@@ -3,7 +3,11 @@ name: Fork shared Codex CI
 on:
   push:
     branches:
+      - main
       - codex/shared-codex-sessions
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
