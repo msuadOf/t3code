@@ -95,7 +95,8 @@ export const mapHistory = (
   const existingMessages = new Set(input.existing?.messages.map((message) => message.id));
   const existingItems = new Map(input.existing?.turnItems.map((item) => [item.id, item]));
   for (const turn of input.turns) {
-    if (turn.status === "inProgress") continue;
+    const active = turn.status === "inProgress";
+    const lifecycleStatus = turn.status === "inProgress" ? "running" : turn.status;
     const startedAt = DateTime.makeUnsafe((turn.startedAt ?? input.thread.createdAt) * 1000);
     const completedAt = DateTime.makeUnsafe((turn.completedAt ?? input.thread.updatedAt) * 1000);
     const providerTurnId = idAllocator.derive.providerTurn({
@@ -116,6 +117,18 @@ export const mapHistory = (
     const rootNodeId = existingRun?.rootNodeId ?? idAllocator.derive.rootNode({ runId });
     const attemptId =
       existingAttempt?.id ?? idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 });
+    // Only the adapter may adopt an active native turn. Canonical history can
+    // then fill completed reasoning parts that predate our live subscription.
+    if (
+      active &&
+      (existingRun === undefined ||
+        existingAttempt === undefined ||
+        existingTurn === undefined ||
+        !input.existing?.nodes.some((node) => node.id === rootNodeId) ||
+        !input.existing.checkpointScopes.some((scope) => scope.nodeId === rootNodeId))
+    ) {
+      continue;
+    }
     const firstUser = turn.items.find((item) => item.type === "userMessage");
     const rootMessageId =
       existingRun?.userMessageId ??
@@ -135,7 +148,7 @@ export const mapHistory = (
       userMessageId: rootMessageId,
       rootNodeId,
       activeAttemptId: attemptId,
-      status: turn.status,
+      status: lifecycleStatus,
       requestedAt: startedAt,
       startedAt,
       completedAt,
@@ -152,7 +165,7 @@ export const mapHistory = (
       providerThreadId: input.providerThread.id,
       providerTurnId,
       reason: "initial",
-      status: turn.status,
+      status: lifecycleStatus,
       startedAt,
       completedAt,
     };
@@ -163,7 +176,7 @@ export const mapHistory = (
       runAttemptId: attemptId,
       nativeTurnRef: { driver: CODEX, nativeId: turn.id, strength: "strong" },
       ordinal: ++nextProviderOrdinal,
-      status: turn.status,
+      status: lifecycleStatus,
       startedAt,
       completedAt,
     };
@@ -191,7 +204,7 @@ export const mapHistory = (
       parentNodeId: null,
       rootNodeId,
       kind: "root_turn",
-      status: turn.status,
+      status: lifecycleStatus,
       countsForRun: true,
       providerThreadId: input.providerThread.id,
       providerTurnId,
@@ -258,6 +271,10 @@ export const mapHistory = (
       });
     };
     for (const item of turn.items) {
+      // Native full history exposes completed reasoning even while a later
+      // assistant item is still streaming. Do not invent a partial assistant
+      // snapshot or duplicate the adapter's synthetic user input.
+      if (active && item.type !== "reasoning") continue;
       if (item.type === "userMessage" || item.type === "agentMessage") {
         const messageId =
           item === firstUser

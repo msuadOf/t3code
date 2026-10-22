@@ -359,7 +359,13 @@ const make = Effect.gen(function* () {
               const revision = `${native.updatedAt}:${native.name ?? ""}:${native.preview}`;
               // Native timestamps have second precision, so periodically reconcile
               // unchanged summaries too (two quick CLI turns can share a timestamp).
-              if (revisions.get(key) !== revision || scan % 20 === 0) {
+              // Active snapshots also reveal completed reasoning parts after
+              // adoption, without changing the thread summary timestamp.
+              if (
+                native.status.type === "active" ||
+                revisions.get(key) !== revision ||
+                scan % 20 === 0
+              ) {
                 const turns = yield* collectPages((cursor) =>
                   client.request("thread/turns/list", {
                     threadId: native.id,

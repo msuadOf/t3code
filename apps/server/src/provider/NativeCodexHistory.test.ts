@@ -252,6 +252,97 @@ it.layer(IdAllocator.layer)("native Codex history", (it) => {
       }),
   );
 
+  it.effect("hydrates canonical completed reasoning when joining an already running CLI turn", () =>
+    Effect.gen(function* () {
+      const allocator = yield* IdAllocator.IdAllocatorV2;
+      const original = fixture();
+      const records = recordsOf(mapHistory(original, allocator));
+      const existing = {
+        ...records,
+        runs: records.runs.map((run) => ({
+          ...run,
+          status: "running" as const,
+          completedAt: null,
+        })),
+        attempts: records.attempts.map((attempt) => ({
+          ...attempt,
+          status: "running" as const,
+          completedAt: null,
+        })),
+        providerTurns: records.providerTurns.map((turn) => ({
+          ...turn,
+          status: "running" as const,
+          completedAt: null,
+        })),
+        nodes: records.nodes.map((node) => ({
+          ...node,
+          status: "running" as const,
+          completedAt: null,
+        })),
+        messages: records.messages.filter((message) => message.role === "user"),
+        turnItems: records.turnItems.filter((item) => item.type === "user_message"),
+      };
+      // Actual thread/turns/list shape while the assistant stream is held:
+      // canonical user/reasoning IDs, completed reasoning, no assistant prefix.
+      const input: NativeCodexHistoryInput = {
+        ...original,
+        existing,
+        turns: [
+          {
+            id: "turn-1",
+            status: "inProgress",
+            startedAt: 110,
+            completedAt: null,
+            items: [
+              {
+                id: "user-1",
+                type: "userMessage",
+                content: [{ type: "text", text: "Inspect the repository" }],
+              },
+              {
+                id: "reason_100001",
+                type: "reasoning",
+                summary: [
+                  "I am verifying that the phone and terminal control the same native Codex session.",
+                ],
+                content: [],
+              },
+            ],
+          },
+        ],
+      };
+      const events = mapHistory(input, allocator);
+      assert.equal(events.length, 1);
+      const item = recordsOf(events).turnItems[0];
+      assert.equal(item?.type, "reasoning");
+      assert.equal(item?.nodeId, existing.runs[0]?.rootNodeId);
+      assert.equal(item?.runId, existing.runs[0]?.id);
+      assert.equal(item?.nativeItemRef?.nativeId, "reason_100001");
+      assert.equal(
+        item?.id,
+        allocator.derive.turnItemFromProviderItem({
+          driver: ProviderDriverKind.make("codex"),
+          nativeItemId: JSON.stringify(["turn-1", "reason_100001", "summary", 0]),
+        }),
+      );
+      assert.deepEqual(
+        mapHistory(
+          {
+            ...input,
+            existing: {
+              ...existing,
+              turnItems: [...existing.turnItems, ...recordsOf(events).turnItems],
+            },
+          },
+          allocator,
+        ),
+        [],
+      );
+      assert.equal(existing.runs[0]?.status, "running");
+      assert.equal(existing.runs[0]?.completedAt, null);
+    }),
+  );
+
   it.effect("does not truncate a completed native conversation at the old importer limit", () =>
     Effect.gen(function* () {
       const allocator = yield* IdAllocator.IdAllocatorV2;

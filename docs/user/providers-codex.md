@@ -25,6 +25,11 @@ its original Codex session ID; it does not create a copy. CLI and T3 Code can st
 open together. Messages, ongoing replies, tool activity, and supported approvals
 use the same running session. Closing T3 Code leaves the daemon and CLI running.
 
+When joining a turn already in progress, T3 restores the items the native server
+exposes, including available reasoning summaries. Codex may withhold an unfinished
+assistant reply from its snapshot; that prefix becomes available when Codex emits
+the completed item. Reasoning shows the summaries Codex publishes.
+
 T3 titles and archive choices organize its own list. Later CLI renames and archive
 changes are not mirrored.
 
