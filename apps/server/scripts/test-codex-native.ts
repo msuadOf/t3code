@@ -1,7 +1,10 @@
 /** Manual isolated native protocol check: node scripts/test-codex-native.ts /path/to/codex */
+// This standalone process/network probe is a Node runtime boundary, not an Effect service.
+// @effect-diagnostics nodeBuiltinImport:off globalConsole:off globalTimers:off
 import * as NodeAssert from "node:assert/strict";
 import * as NodeChildProcess from "node:child_process";
-import * as NodeEvents from "node:events";
+// eslint-disable-next-line t3code/namespace-node-imports -- The node:events namespace loses the once export under this project's module settings.
+import { once } from "node:events";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
@@ -206,7 +209,7 @@ class NativeClient {
 }
 async function connect() {
   const client = new NativeClient();
-  await NodeEvents.once(client.socket, "open");
+  await once(client.socket, "open");
   clients.push(client);
   await client.request("initialize", {
     clientInfo: { name: "t3_native_isolated_test", version: "1" },
@@ -278,7 +281,7 @@ try {
       "LIMIT: native resume omits unfinished assistant prefix; it becomes available at item/completed",
     );
   modelMode = "answer";
-  await NodeEvents.once((second.socket.close(), second.socket), "close");
+  await once((second.socket.close(), second.socket), "close");
   const firstBoundary = first.frames.length;
   await first.request("turn/start", {
     threadId,
@@ -317,7 +320,7 @@ try {
   releaseStream?.();
   for (const client of clients) client.socket.terminate();
   child.kill("SIGTERM");
-  await Promise.race([NodeEvents.once(child, "exit"), NodeTimersPromises.setTimeout(2000)]);
+  await Promise.race([once(child, "exit"), NodeTimersPromises.setTimeout(2000)]);
   if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   for (const response of connections) response.destroy();
   await new Promise<void>((resolve) => server.close(() => resolve()));
