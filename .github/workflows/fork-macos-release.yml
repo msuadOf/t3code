@@ -3,13 +3,13 @@ name: Fork macOS release
 on:
   push:
     tags:
-      - "v*-preview.*"
+      - "codex-v*"
   workflow_dispatch:
     inputs:
       version:
-        description: "Prerelease version (for example 0.0.0-preview.20261022.1)"
-        required: true
-        default: "0.0.0-preview.20261022.1"
+        description: "Version from the upstream base package (leave empty to read package.json)"
+        required: false
+        default: ""
         type: string
 
 permissions:
@@ -27,20 +27,24 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     env:
-      RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
+      RELEASE_VERSION: ${{ inputs.version || (github.event_name == 'push' && github.ref_name) || '' }}
       T3CODE_TELEMETRY_CHANNEL: dev
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
     steps:
       - uses: actions/checkout@v6
-      - name: Validate prerelease and architecture
+      - name: Validate upstream version and architecture
         id: version
         shell: bash
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
+          base_version="$(/usr/bin/plutil -extract version raw apps/server/package.json)"
+          desktop_version="$(/usr/bin/plutil -extract version raw apps/desktop/package.json)"
+          RELEASE_VERSION="${RELEASE_VERSION#codex-v}"
           RELEASE_VERSION="${RELEASE_VERSION#v}"
-          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]{8}\.[0-9]+$ ]]; then
-            echo "Use a preview prerelease version, such as 0.0.0-preview.20261022.1." >&2
+          RELEASE_VERSION="${RELEASE_VERSION:-$base_version}"
+          if [[ "$RELEASE_VERSION" != "$base_version" || "$RELEASE_VERSION" != "$desktop_version" ]]; then
+            echo "Release version must match the unchanged upstream server and desktop package versions." >&2
             exit 1
           fi
           echo "RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
@@ -113,6 +117,6 @@ jobs:
 
           SHA256SUMS.txt contains the archive checksums. This preview does not configure an upstream automatic update feed or publish to npm, hosted T3, or an app store.
           NOTES
-          gh release create "v$RELEASE_VERSION" release/*.dmg release/*.zip release/SHA256SUMS.txt \
-            --target "$RELEASE_COMMIT" --title "Shared Codex preview $RELEASE_VERSION (macOS arm64)" \
+          gh release create "codex-v$RELEASE_VERSION" release/*.dmg release/*.zip release/SHA256SUMS.txt \
+            --target "$RELEASE_COMMIT" --title "Shared Codex $RELEASE_VERSION (macOS arm64)" \
             --notes-file release-notes.md --prerelease --latest=false
