@@ -40,6 +40,8 @@ jobs:
           run-install: false
       - name: Install dependencies
         run: vp install --frozen-lockfile
+      - name: Install Chromium for browser tests
+        run: node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
       - name: Validate changed packages and related tests
         run: vp run check:changed upstream/main
       - name: Build shared web, server, and desktop bundles
