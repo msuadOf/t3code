@@ -74,7 +74,7 @@ jobs:
           test -n "$app_dir"
           app_executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_dir/Contents/Info.plist")"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_dir/Contents/Info.plist")" = "$RELEASE_VERSION"
-          lipo -verify_arch arm64 "$app_dir/Contents/MacOS/$app_executable"
+          lipo "$app_dir/Contents/MacOS/$app_executable" -verify_arch arm64
           cd fork-release
           shasum -a 256 ./*.dmg ./*.zip > SHA256SUMS.txt
       - uses: actions/upload-artifact@v7
