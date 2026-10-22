@@ -79,6 +79,73 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
     }),
   );
 
+  it.effect(
+    "decodes resume replies while notification handlers wait, preserving notification order",
+    () =>
+      Effect.gen(function* () {
+        const { stdio, input, output } = yield* makeInMemoryStdio();
+        const client = yield* CodexClient.make(stdio);
+        const reply = yield* Deferred.make<unknown>();
+        const started = yield* Deferred.make<void>();
+        const delivered = yield* Deferred.make<void>();
+        const received: Array<string> = [];
+        yield* client.handleUnknownServerNotification((_method, params) =>
+          Effect.gen(function* () {
+            const label = (params as { label: string }).label;
+            if (label === "before-resume-reply") {
+              yield* Deferred.succeed(started, undefined);
+              yield* Deferred.await(reply);
+            }
+            received.push(label);
+            if (label === "after-resume-reply") yield* Deferred.succeed(delivered, undefined);
+          }),
+        );
+        const resume = yield* client.raw
+          .request("thread/resume", { threadId: "native-thread" })
+          .pipe(
+            Effect.tap((result) => Deferred.succeed(reply, result)),
+            Effect.forkScoped,
+          );
+        const request = JSON.parse(yield* Queue.take(output));
+        const send = (value: unknown) =>
+          Queue.offer(input, new TextEncoder().encode(`${JSON.stringify(value)}\n`));
+        yield* send({ method: "test/notification", params: { label: "before-resume-reply" } });
+        yield* Deferred.await(started);
+        yield* send({ method: "test/notification", params: { label: "after-resume-reply" } });
+        yield* send({ id: request.id, result: { thread: { id: "native-thread" } } });
+        yield* Queue.end(input);
+        assert.deepEqual(yield* Fiber.join(resume), { thread: { id: "native-thread" } });
+        if (client.closed === undefined) return yield* Effect.die("Expected closure signal");
+        yield* client.closed;
+        assert.equal(yield* Deferred.isDone(delivered), true);
+        assert.deepEqual(received, ["before-resume-reply", "after-resume-reply"]);
+      }),
+  );
+
+  it.effect("fails a notification-owned pending RPC before draining EOF notifications", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const client = yield* CodexClient.make(stdio);
+      const processed = yield* Deferred.make<void>();
+      yield* client.handleUnknownServerNotification(() =>
+        client.raw.request("thread/read", { threadId: "native-thread" }).pipe(
+          Effect.exit,
+          Effect.flatMap((exit) => {
+            assert.equal(Exit.isFailure(exit), true);
+            return Deferred.succeed(processed, undefined).pipe(Effect.asVoid);
+          }),
+        ),
+      );
+      yield* Queue.offer(input, new TextEncoder().encode('{"method":"test/notification"}\n'));
+      const request = JSON.parse(yield* Queue.take(output));
+      assert.equal(request.method, "thread/read");
+      yield* Queue.end(input);
+      if (client.closed === undefined) return yield* Effect.die("Expected closure signal");
+      yield* client.closed;
+      assert.equal(yield* Deferred.isDone(processed), true);
+    }),
+  );
+
   it.effect("exposes termination even when no request is pending", () =>
     Effect.gen(function* () {
       const first = yield* makeInMemoryStdio();

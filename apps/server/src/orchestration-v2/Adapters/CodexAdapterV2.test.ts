@@ -3167,8 +3167,9 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         yield* unload;
         assert.isTrue(yield* harness.hasPendingBackgroundWork);
         yield* unload;
-        assert.equal(yield* harness.hasPendingBackgroundWork, retainContext);
+        // RPC responses can arrive before the ordered notification consumer.
         yield* Deferred.await(interrupted);
+        assert.equal(yield* harness.hasPendingBackgroundWork, retainContext);
         yield* unload;
         if (retainContext) yield* Deferred.await(monitorCompleted);
         assert.deepEqual(

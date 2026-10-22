@@ -1,7 +1,9 @@
 import * as Context from "effect/Context";
+import type * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stdio from "effect/Stdio";
@@ -104,6 +106,8 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
   terminationError?: Effect.Effect<CodexError.CodexAppServerError>,
 ): Effect.fn.Return<CodexAppServerClient["Service"], never, Scope.Scope> {
   const closed = yield* Deferred.make<CodexError.CodexAppServerError>();
+  const transportClosed = yield* Deferred.make<CodexError.CodexAppServerError>();
+  const notifications = yield* Queue.unbounded<Effect.Effect<void>, Cause.Done<void>>();
   const requestHandlers = new Map<string, ServerRequestHandler>();
   const notificationHandlers = new Map<string, Array<ServerNotificationHandler>>();
   let unknownRequestHandler:
@@ -202,6 +206,15 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
       : Effect.fail(CodexError.CodexAppServerRequestError.methodNotFound(request.method));
   };
 
+  // Handlers can await a resume reply or issue another RPC. Keep their ordered
+  // execution off the input reader so the awaited response can still be decoded.
+  yield* Stream.fromQueue(notifications).pipe(
+    Stream.runForEach((dispatch) => dispatch),
+    Effect.andThen(Deferred.await(transportClosed)),
+    Effect.flatMap((error) => Deferred.succeed(closed, error)),
+    Effect.forkScoped,
+  );
+
   const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
     stdio,
     ...(terminationError ? { terminationError } : {}),
@@ -210,9 +223,23 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     ...(options.logger ? { logger: options.logger } : {}),
     shouldHandleRequest: (request) =>
       requestHandlers.has(request.method) || unknownRequestHandler !== undefined,
-    onTermination: (error) => Deferred.succeed(closed, error).pipe(Effect.asVoid),
-    onNotification: dispatchNotification,
-    onRequest: dispatchRequest,
+    // The protocol has already failed pending RPCs, releasing resume barriers.
+    // Drain notifications read before EOF before exposing closure to adapters.
+    onTermination: (error) =>
+      Deferred.succeed(transportClosed, error).pipe(
+        Effect.andThen(Queue.end(notifications)),
+        Effect.asVoid,
+      ),
+    onNotification: (notification) =>
+      Queue.offer(notifications, dispatchNotification(notification)).pipe(Effect.asVoid),
+    onRequest: Effect.fn("CodexClient.dispatchOrderedRequest")(function* (request) {
+      // Requests must observe earlier item notifications (approval paths, etc.)
+      // but their possibly long user interaction must not hold the queue.
+      const ready = yield* Deferred.make<void>();
+      yield* Queue.offer(notifications, Deferred.succeed(ready, undefined).pipe(Effect.asVoid));
+      yield* Deferred.await(ready);
+      return yield* dispatchRequest(request);
+    }),
   });
 
   const request = <M extends CodexRpc.ClientRequestMethod>(
