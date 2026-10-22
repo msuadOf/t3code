@@ -50,6 +50,9 @@ export const bufferShellLiveStream = <E, R>(
     limits,
   );
 
+const visibleThreadShells = (threads: ReadonlyArray<OrchestrationV2ThreadShell>) =>
+  threads.filter((thread) => thread.nativeSessionScopeHidden !== true);
+
 export function buildActiveShellSnapshot(input: {
   readonly projects: ReadonlyArray<OrchestrationProjectShell>;
   readonly threads: OrchestrationV2ThreadShellSnapshot;
@@ -59,7 +62,7 @@ export function buildActiveShellSnapshot(input: {
     schemaVersion: input.threads.schemaVersion,
     snapshotSequence: input.snapshotSequence,
     projects: input.projects,
-    threads: input.threads.threads,
+    threads: visibleThreadShells(input.threads.threads),
     archivedThreads: [],
   };
 }
@@ -89,9 +92,14 @@ export const loadShellSnapshotParts = Effect.fn("ShellStream.loadShellSnapshotPa
       }),
     )
     .pipe(NodeSqliteClient.readOnly);
+  const threads = yield* read.decodeThreads;
   return {
     projects: read.projects,
-    threads: yield* read.decodeThreads,
+    threads: {
+      ...threads,
+      threads: visibleThreadShells(threads.threads),
+      archivedThreads: visibleThreadShells(threads.archivedThreads),
+    },
     snapshotSequence: read.snapshotSequence,
   };
 });
@@ -267,7 +275,11 @@ export function shellStreamItemsFromInitialSnapshot(input: {
 }): ReadonlyArray<Extract<OrchestrationV2ShellStreamItem, { readonly kind: "snapshot" }>> {
   const authoritative = {
     kind: "snapshot" as const,
-    snapshot: input.snapshot,
+    snapshot: {
+      ...input.snapshot,
+      threads: visibleThreadShells(input.snapshot.threads),
+      archivedThreads: visibleThreadShells(input.snapshot.archivedThreads),
+    },
   };
   if (input.resolvedRepositoryIdentityRoots.length === 0) {
     return [authoritative];
@@ -362,7 +374,7 @@ export function shellStreamItemFromThreadShell(input: {
   { readonly kind: "thread.updated" | "thread.removed" }
 > {
   if (input.shell !== null) {
-    if (input.shell.archivedAt !== null) {
+    if (input.shell.nativeSessionScopeHidden === true || input.shell.archivedAt !== null) {
       return {
         kind: "thread.removed",
         sequence: input.stored.sequence,
@@ -390,6 +402,13 @@ export function archivedShellStreamItemFromThreadShell(input: {
   readonly stored: OrchestrationV2StoredEvent;
   readonly shell: OrchestrationV2ThreadShell | null;
 }): Exclude<OrchestrationV2ArchivedShellStreamItem, { readonly kind: "snapshot" }> | null {
+  if (input.shell?.nativeSessionScopeHidden === true) {
+    return {
+      kind: "thread.removed",
+      sequence: input.stored.sequence,
+      threadId: input.shell.id,
+    };
+  }
   if (input.shell !== null && input.shell.archivedAt !== null) {
     return {
       kind: "thread.updated",

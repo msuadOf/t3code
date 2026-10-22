@@ -3245,6 +3245,7 @@ function runBackgroundItemScenario(
   key: string,
   makeEvents: (ids: BackgroundScenarioIds) => ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>,
   options?: {
+    readonly external?: boolean;
     readonly keepEventStreamOpen?: boolean;
     readonly loadInheritedBackgroundTurnItems?: () => Effect.Effect<
       ReadonlyArray<{ readonly id: TurnItemId; readonly runId: RunId }>
@@ -3310,7 +3311,10 @@ function runBackgroundItemScenario(
 
     yield* Effect.gen(function* () {
       const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
-      yield* runExecution.startRootRun({
+      const execute = options?.external
+        ? runExecution.observeExternalRun
+        : runExecution.startRootRun;
+      yield* execute({
         commandId: CommandId.make(`command:${key}`),
         appThread: { id: ids.threadId } as OrchestrationV2AppThread,
         providerSessionId: ProviderSessionId.make(`session:${key}`),
@@ -3331,7 +3335,10 @@ function runBackgroundItemScenario(
               close: Deferred.succeed(ingestionDone, undefined),
             };
           }),
-          startTurn: () => Effect.void,
+          startTurn: () =>
+            options?.external
+              ? Effect.die("External observation started a second native turn")
+              : Effect.void,
         } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
         run: {
           id: ids.runId,
@@ -3432,4 +3439,21 @@ it.effect("keeps a failed root's still-running native children live while the ru
       "a child that outlives the failed root must not be settled with it",
     );
   }),
+);
+
+it.effect(
+  "observes and finalizes an externally started native turn without sending another input",
+  () =>
+    Effect.gen(function* () {
+      const observed = yield* runBackgroundItemScenario(
+        "external-live-run",
+        (ids) => [
+          backgroundTurnItemEvent(ids, "command_execution", "running", 1),
+          backgroundTurnItemEvent(ids, "command_execution", "completed", 2),
+          rootTerminalEvent(ids, "completed"),
+        ],
+        { external: true },
+      );
+      assert.deepEqual(observed, ["turn_item:running", "turn_item:completed", "root-finalized"]);
+    }),
 );

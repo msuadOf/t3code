@@ -1,3 +1,6 @@
+import * as Deferred from "effect/Deferred";
+import * as Queue from "effect/Queue";
+import { makeInMemoryStdio } from "./_internal/stdio.ts";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -28,6 +31,52 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       });
       return yield* spawner.spawn(command);
     });
+
+  it.effect("passes native request IDs and leaves requests owned by other clients unanswered", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const client = yield* CodexClient.make(stdio);
+      const observed = yield* Deferred.make<string | number>();
+      const barrier = yield* Deferred.make<void>();
+      yield* client.handleServerRequest("item/tool/requestUserInput", (_payload, requestId) =>
+        Deferred.succeed(observed, requestId).pipe(Effect.as({ answers: {} })),
+      );
+      yield* client.handleServerNotification("serverRequest/resolved", () =>
+        Deferred.succeed(barrier, undefined).pipe(Effect.asVoid),
+      );
+      const send = (value: unknown) =>
+        Queue.offer(input, new TextEncoder().encode(`${JSON.stringify(value)}\n`));
+      yield* send({
+        id: "native-approval",
+        method: "item/tool/requestUserInput",
+        params: {
+          isBlocking: true,
+          itemId: "item-1",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          questions: [],
+        },
+      });
+      assert.equal(yield* Deferred.await(observed), "native-approval");
+      assert.deepEqual(JSON.parse(yield* Queue.take(output)), {
+        id: "native-approval",
+        result: { answers: {} },
+      });
+      yield* send({ id: "foreign-request", method: "other/client/request", params: {} });
+      yield* send({
+        id: "unregistered-known-request",
+        method: "item/commandExecution/requestApproval",
+        params: {},
+      });
+      yield* send({
+        method: "serverRequest/resolved",
+        params: { requestId: "foreign-request", threadId: "thread-1" },
+      });
+      yield* Deferred.await(barrier);
+      yield* client.raw.notify("barrier");
+      assert.deepEqual(JSON.parse(yield* Queue.take(output)), { method: "barrier" });
+    }),
+  );
 
   it.effect("initializes, handles typed server requests, and reads account and skills data", () =>
     Effect.gen(function* () {

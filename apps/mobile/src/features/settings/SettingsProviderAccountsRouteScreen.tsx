@@ -59,11 +59,24 @@ export function SettingsProviderAccountsRouteScreen() {
                   </View>
                 ) : (
                   <>
+                    {(providersByEnvironment.get(environment.environmentId) ?? []).some(
+                      (provider) => provider.driver === "codex",
+                    ) ? (
+                      <View className="gap-1 p-4">
+                        <Text className="text-base text-foreground">Codex CLI account</Text>
+                        <Text className="text-sm text-foreground-muted">
+                          Codex uses the shared daemon’s login. Run codex login on this
+                          environment’s machine. Configure session sharing under the environment’s
+                          Providers settings.
+                        </Text>
+                      </View>
+                    ) : null}
                     {(providersByEnvironment.get(environment.environmentId) ?? [])
                       .filter(
                         (provider) =>
-                          provider.setup?.canAuthenticate ||
-                          (provider.driver === "acpRegistry" && provider.installed),
+                          provider.driver !== "codex" &&
+                          (provider.setup?.canAuthenticate ||
+                            (provider.driver === "acpRegistry" && provider.installed)),
                       )
                       .map((provider) => (
                         <ProviderAccount
@@ -74,6 +87,7 @@ export function SettingsProviderAccountsRouteScreen() {
                       ))}
                     {!(providersByEnvironment.get(environment.environmentId) ?? []).some(
                       (provider) =>
+                        provider.driver === "codex" ||
                         provider.setup?.canAuthenticate ||
                         (provider.driver === "acpRegistry" && provider.installed),
                     ) ? (

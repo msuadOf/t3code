@@ -76,6 +76,15 @@ export class ProviderRuntimeRecoveryService extends Context.Service<
   }
 >()("t3/orchestration-v2/ProviderRuntimeRecoveryService") {}
 
+function usesSharedCodexDaemon(projection: ProjectionStore.ProjectionRuntimeRecoveryState) {
+  return projection.providerThreads.some(
+    (thread) =>
+      thread.id === projection.thread.activeProviderThreadId &&
+      thread.driver === "codex" &&
+      thread.nativeThreadRef !== null,
+  );
+}
+
 function nonterminalRuns(projection: ProjectionStore.ProjectionRuntimeRecoveryState) {
   return projection.runs.filter((run) => {
     const status: string = run.status;
@@ -202,6 +211,10 @@ export const make = Effect.gen(function* () {
       continueAfterRestart: boolean,
       stoppedThisPass: ReadonlyMap<string, RecoverySession> = new Map(),
     ) {
+      // The daemon outlives this process. Its next atomic resume snapshot owns
+      // recovery; process-loss cancellation would misreport live CLI work.
+      if (usesSharedCodexDaemon(projection))
+        return { terminalizedRuns: 0, stoppedSessions: 0, closedRequests: 0, retiredEffects: 0 };
       const now = yield* DateTime.now;
       const runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
       for (const run of nonterminalRuns(projection)) {
@@ -759,6 +772,7 @@ export const make = Effect.gen(function* () {
     for (const threadId of threadIds) {
       yield* Effect.gen(function* () {
         const projection = yield* projections.getRuntimeRecoveryProjection(threadId);
+        if (usesSharedCodexDaemon(projection)) return;
         if (
           !resolveProjectSettings(enabled, projection.thread.projectId).settings
             .continueThreadsAfterServerUpdate

@@ -1,84 +1,75 @@
 # Codex
 
-Use your ChatGPT plan or an existing Codex CLI login to code in T3 Code.
+T3 Code connects to the shared Codex server on your environment’s machine. Use the
+same server from Codex CLI to open and control the same live sessions in T3 Code
+on web, desktop, iOS, and Android.
 
-## Connect with ChatGPT
+## Share sessions with Codex CLI
 
-Connect during onboarding or in **Settings → Providers**. For a remote machine,
-select that environment first. T3 Code handles Codex installation; sign in on
-OpenAI and allow sharing of your ChatGPT plan.
-
-Manage shared usage and credits in ChatGPT through **Manage usage** in T3 Code.
-If a request uses a feature that ChatGPT sharing does not support, use another
-provider for that request.
-
-When reconnecting, choose the same account in T3 Code and on OpenAI's sign-in
-page. Disconnecting stops running threads but keeps their history and lets you
-reconnect later.
-
-If remote sign-in cannot return automatically, paste the full URL from the final
-localhost page into the sign-in panel, even if that page could not load.
-
-## Use an existing Codex login
-
-T3 Code can use your installed Codex and its existing login. Run `codex login`
-on the environment's machine to sign in. [Provider setup](./install.md#providers)
-covers installation and custom configuration.
-
-## Use multiple accounts
-
-Add another ChatGPT account in **Settings → Providers**, then select the account
-from the thread's model picker. Compatible accounts can continue the same thread.
-Connecting accounts through T3 Code leaves your CLI login unchanged.
-
-### Multiple CLI logins
-
-A shared Codex home with a shadow home lets work and personal accounts continue
-the same threads. The accounts share Codex sessions and configuration while keeping
-their own login and available models.
-
-Keep your first account in `~/.codex`. On the environment's machine, sign the
-second account into a fresh directory:
+Install a current Codex CLI that supports `app-server daemon` and `--remote`, then
+sign in on the environment’s machine:
 
 ```bash
-mkdir -p ~/.codex_personal
-CODEX_HOME=~/.codex_personal codex login
+codex login
+codex app-server daemon start
+codex --remote unix://
 ```
 
-Then add a second Codex instance in **Settings > Providers**:
+In T3 Code, select your environment and configure Codex to use the existing CLI
+installation. Leave **Shared Codex server** empty to use the daemon for that
+instance’s **CODEX_HOME path**, which defaults to `~/.codex`. T3 Code can start the
+default daemon if it is not running.
 
-| Instance       | CODEX_HOME path | Shadow home path    |
-| -------------- | --------------- | ------------------- |
-| Codex Work     | `~/.codex`      | Leave empty         |
-| Codex Personal | `~/.codex`      | `~/.codex_personal` |
+Codex sessions appear in the normal project and thread lists. Opening one keeps
+its original Codex session ID; it does not create a copy. CLI and T3 Code can stay
+open together. Messages, ongoing replies, tool activity, and supported approvals
+use the same running session. Closing T3 Code leaves the daemon and CLI running.
 
-Both instances must use the same **CODEX_HOME path**. T3 Code prepares the shared
-state in the shadow directory; do not populate it by copying your whole Codex
-home.
+T3 titles and archive choices organize its own list. Later CLI renames and archive
+changes are not mirrored.
 
-The shadow account needs its own `auth.json` file. If Codex uses an OS credential
-store, configure file storage for this setup. See
-[OpenAI's credential storage guide](https://learn.chatgpt.com/docs/auth#credential-storage).
+An independent CLI process that has not connected to this daemon cannot share its
+active execution. Start it with `--remote unix://` using the same Codex home.
 
-Use a completely separate **CODEX_HOME path**, with no shadow home, when you want
-separate Codex sessions and configuration. That instance cannot continue threads
-from the other home.
+## Choose which sessions to share
 
-## Switch accounts in an existing thread
+Leave **Shared session directory** empty to show sessions from all directories.
+Set it to an absolute directory on the environment’s machine to include that
+directory and its subdirectories. This setting is available with the Codex
+provider settings on web and desktop, and under the environment’s **Providers**
+section on mobile.
 
-Choose the other account from the thread's model picker. T3 Code offers compatible
-Codex instances that share the thread's **CODEX_HOME path**. Changing accounts does
-not move the conversation into a separate Codex home.
+Narrowing the directory hides previously shared sessions outside that directory
+in T3 Code. It does not archive or delete them in Codex. Clear or widen the
+setting to show them again.
 
-If the account is missing from the picker, compare the home paths in provider
-settings. If two instances show the same unexpected account or models, check their
-reported accounts, refresh provider status, and confirm the second instance has
-its own shadow path and login. A shadow-home conflict usually means the directory
-contains a copied Codex setup. Use a fresh shadow directory and sign in again.
+## Connect to a remote machine
+
+Use T3 Code’s existing remote environment connection, including its SSH flow,
+then select that environment before configuring Codex. Both Codex CLI and the
+shared daemon run on the remote machine; the clients connect through T3 Code.
+
+**CODEX_HOME path**, **Shared Codex server**, and **Shared session directory** all
+refer to that environment’s machine. For a custom daemon, set **Shared Codex
+server** to its `unix:///absolute/path/to/socket`, `ws://`, or `wss://` endpoint and
+connect CLI clients to that same endpoint. T3 Code connects to an explicit
+endpoint without starting another server. A Unix socket path is on the T3
+server’s machine, not on the phone or desktop viewing it.
+
+## Accounts and configuration
+
+Shared sessions use the login and configuration owned by the Codex daemon. Sign
+in with `codex login` for its Codex home. T3-managed ChatGPT credentials and
+shadow-home account switching are not used for shared sessions.
+
+For a separate account, configure a separate **CODEX_HOME path**, sign in there,
+and start its own daemon. Keep its CLI and T3 instance connected to that home’s
+server. Separate homes have separate sessions; selecting another account does
+not move an existing native session between homes.
 
 ## Answer questions while Codex works
 
-Codex can ask a question and keep working. Answer it in the thread's question
+Codex can ask a question and keep working. Answer it in the thread’s question
 panel. The answer becomes a new message: it reaches the active turn, or starts
 another turn if Codex has finished. Unanswered questions survive reconnects.
 If you do not want to answer, dismiss the question from its panel. Dismissing
@@ -87,17 +78,19 @@ supports async questions.
 
 ## Approve app access
 
-Codex tools can request access to another app. Respond to the named app's request
+Codex tools can request access to another app. Respond to the named app’s request
 in the thread on web, desktop, or mobile. Some tools offer access for one request,
-the current session, or permanently. See [Permission modes](./permission-modes.md)
-for command and file approvals.
+the current session, or permanently. An approval resolved by another connected
+client is removed from T3 Code. Some requests must be answered by the client that
+owns them. See [Permission modes](./permission-modes.md) for command and file
+approvals.
 
 ## Codex says I hit a usage limit
 
 When Codex stops on a usage limit, the thread names the window that ran out and
-when it resets, when Codex reports them. Send the message again after the reset. On a workspace plan the
-message also says whether your workspace owner needs to add credits or raise the
-spend limit to continue sooner.
+when it resets, when Codex reports them. Send the message again after the reset.
+On a workspace plan the message also says whether your workspace owner needs to
+add credits or raise the spend limit to continue sooner.
 
 ## Send feedback to OpenAI
 

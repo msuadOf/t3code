@@ -37,6 +37,7 @@ import {
 import * as Context from "effect/Context";
 import * as Schema from "effect/Schema";
 import type * as Effect from "effect/Effect";
+import type * as DateTime from "effect/DateTime";
 import type * as Scope from "effect/Scope";
 import type * as Stream from "effect/Stream";
 
@@ -402,7 +403,22 @@ export const ProviderAdapterV2Error = Schema.Union([
 ]);
 export type ProviderAdapterV2Error = typeof ProviderAdapterV2Error.Type;
 
+export interface ProviderAdapterV2ExternalTurnInput {
+  readonly cwd?: string;
+  readonly snapshot?: boolean;
+  readonly nativeModel?: string;
+  readonly nativeStatus?: "inProgress" | "completed" | "interrupted" | "failed";
+  readonly threadId: ThreadId;
+  readonly nativeThreadId: string;
+  readonly nativeTurnId: string;
+  readonly startedAt: DateTime.Utc;
+  readonly text: string;
+}
+
 export interface ProviderAdapterV2OpenSessionInput {
+  readonly onExternalTurn?: (
+    input: ProviderAdapterV2ExternalTurnInput,
+  ) => Effect.Effect<ProviderAdapterV2TurnInput | undefined, ProviderAdapterProtocolError>;
   readonly threadId: ThreadId;
   readonly providerSessionId: ProviderSessionId;
   readonly modelSelection: ModelSelection;

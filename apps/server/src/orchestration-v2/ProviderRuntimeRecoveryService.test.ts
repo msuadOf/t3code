@@ -1368,3 +1368,54 @@ it.effect("leaves delegated tasks to their own child threads after process loss"
     assert.deepEqual(noted, [`subagent ${nativeSubagentId}`]);
   }).pipe(Effect.provide(layer));
 });
+
+it.effect("leaves shared Codex work to the daemon across startup and shutdown", () => {
+  const threadId = ThreadId.make("thread:daemon-recovery");
+  const providerThreadId = ProviderThreadId.make("provider-thread:daemon-recovery");
+  const projection = {
+    thread: { id: threadId, activeProviderThreadId: providerThreadId },
+    providerThreads: [
+      {
+        id: providerThreadId,
+        driver: ProviderDriverKind.make("codex"),
+        nativeThreadRef: { nativeId: "still-running-in-daemon" },
+      },
+    ],
+    providerSessions: [],
+    runs: [{ status: "running" }],
+    runtimeRequests: [],
+    nodes: [],
+  } as unknown as OrchestrationV2ThreadProjection;
+  const commit = vi.fn(() =>
+    Effect.die("Shared daemon work must not be terminalized on T3 process loss"),
+  );
+  const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provide(ServerSettings.layerTest()),
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getRecoveryThreadIds: () => Effect.succeed([threadId]),
+          getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+        }),
+        Layer.mock(EventSink.EventSinkV2)({ commitCommand: commit, writeWithEffects: commit }),
+        IdAllocator.layer,
+        Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({
+          runRecoveryOnce: Effect.succeed(false),
+        }),
+        Layer.mock(EffectOutbox.EffectOutboxV2)({
+          reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+        }),
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    const recovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
+    for (const trigger of ["startup", "shutdown"] as const) {
+      const result = yield* recovery.reconcile(trigger);
+      assert.equal(result.terminalizedRuns, 0);
+      assert.equal(result.closedRequests, 0);
+    }
+    yield* recovery.prepareForShutdown;
+    assert.equal(commit.mock.calls.length, 0);
+  }).pipe(Effect.provide(layer));
+});

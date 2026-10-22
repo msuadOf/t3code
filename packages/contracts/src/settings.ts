@@ -612,16 +612,29 @@ export const CodexSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    daemonEndpoint: Schema.optionalKey(TrimmedString).pipe(
+      Schema.annotateKey({
+        title: "Shared Codex server",
+        description:
+          "Leave empty to use the shared daemon for this CODEX_HOME. CLI clients must connect to the same server.",
+        providerSettingsForm: { placeholder: "unix://", clearWhenEmpty: "omit" },
+      }),
+    ),
+    sharedSessionRoot: Schema.optionalKey(TrimmedString).pipe(
+      Schema.annotateKey({
+        title: "Shared session directory",
+        description:
+          "Share sessions in this directory and its subdirectories. Leave empty to share all Codex sessions.",
+        providerSettingsForm: { placeholder: "All directories", clearWhenEmpty: "omit" },
+      }),
+    ),
     shadowHomePath: TrimmedString.pipe(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
         title: "Shadow home path",
         description:
           "Account-specific Codex home. Keeps auth.json separate while sharing state from CODEX_HOME.",
-        providerSettingsForm: {
-          placeholder: "~/.codex-t3/personal",
-          clearWhenEmpty: "omit",
-        },
+        providerSettingsForm: { hidden: true },
       }),
     ),
     launchArgs: TrimmedString.pipe(
@@ -629,6 +642,7 @@ export const CodexSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "Launch arguments",
         description: "Additional CLI arguments passed to codex app-server on session start.",
+        providerSettingsForm: { hidden: true },
       }),
     ),
     customModels: Schema.Array(CustomModelSetting).pipe(
@@ -637,7 +651,7 @@ export const CodexSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "homePath", "shadowHomePath", "launchArgs"],
+    order: ["binaryPath", "homePath", "daemonEndpoint", "sharedSessionRoot"],
   },
 );
 export type CodexSettings = typeof CodexSettings.Type;

@@ -1,0 +1,118 @@
+name: Fork macOS release
+
+on:
+  push:
+    tags:
+      - "v*-preview.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Prerelease version (for example 0.0.0-preview.20261022.1)"
+        required: true
+        default: "0.0.0-preview.20261022.1"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-macos-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository != 'pingdotgg/t3code'
+    runs-on: macos-14
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    env:
+      RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
+      T3CODE_TELEMETRY_CHANNEL: dev
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate prerelease and architecture
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          RELEASE_VERSION="${RELEASE_VERSION#v}"
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]{8}\.[0-9]+$ ]]; then
+            echo "Use a preview prerelease version, such as 0.0.0-preview.20261022.1." >&2
+            exit 1
+          fi
+          echo "RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
+          echo "version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+      - name: Install dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - name: Build macOS app, DMG, and ZIP
+        run: vp run dist:desktop:artifact --platform mac --target dmg --arch arm64 --build-version "$RELEASE_VERSION" --output-dir fork-release --verbose
+      - name: Verify and checksum archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$(find fork-release -maxdepth 1 -name '*.dmg' -print -quit)"
+          test -n "$(find fork-release -maxdepth 1 -name '*.zip' -print -quit)"
+          for archive in fork-release/*.zip; do unzip -t "$archive" >/dev/null; done
+          for image in fork-release/*.dmg; do hdiutil verify "$image"; done
+          inspection_dir="$RUNNER_TEMP/macos-app-inspection"
+          mkdir -p "$inspection_dir"
+          for archive in fork-release/*.zip; do ditto -x -k "$archive" "$inspection_dir"; done
+          app_dir="$(find "$inspection_dir" -maxdepth 1 -name '*.app' -type d -print -quit)"
+          test -n "$app_dir"
+          app_executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_dir/Contents/Info.plist")"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_dir/Contents/Info.plist")" = "$RELEASE_VERSION"
+          lipo -verify_arch arm64 "$app_dir/Contents/MacOS/$app_executable"
+          cd fork-release
+          shasum -a 256 ./*.dmg ./*.zip > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-arm64-release
+          path: |
+            fork-release/*.dmg
+            fork-release/*.zip
+            fork-release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_VERSION: ${{ needs.build.outputs.version }}
+      RELEASE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-arm64-release
+          path: release
+      - name: Publish fork prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'NOTES'
+          Fork preview with shared Codex CLI sessions in the existing T3 interface.
+
+          macOS Apple Silicon: download the DMG or ZIP. This community build is not signed with an Apple Developer ID and is not notarized. macOS may require approval in Privacy & Security before opening it.
+
+          SHA256SUMS.txt contains the archive checksums. This preview does not configure an upstream automatic update feed or publish to npm, hosted T3, or an app store.
+          NOTES
+          gh release create "v$RELEASE_VERSION" release/*.dmg release/*.zip release/SHA256SUMS.txt \
+            --target "$RELEASE_COMMIT" --title "Shared Codex preview $RELEASE_VERSION (macOS arm64)" \
+            --notes-file release-notes.md --prerelease --latest=false

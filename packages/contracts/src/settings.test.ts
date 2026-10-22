@@ -7,6 +7,7 @@ import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
+  CodexSettings,
   DEFAULT_SERVER_SETTINGS,
   globalIdleCompaction,
   idleCompactionPatch,
@@ -26,6 +27,7 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
@@ -368,5 +370,27 @@ describe("server model preferences", () => {
     const input = { favorites: [], providerModelPreferences: {} };
     expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
     expect(decodeServerSettingsPatch(input)).toEqual(input);
+  });
+});
+
+describe("shared Codex settings", () => {
+  it("uses the home daemon and all directories when sharing settings are omitted", () => {
+    const settings = decodeCodexSettings({});
+    expect(settings.daemonEndpoint).toBeUndefined();
+    expect(settings.sharedSessionRoot).toBeUndefined();
+  });
+
+  it("trims explicit endpoints and directory scopes and round-trips clearing", () => {
+    const decode = decodeCodexSettings;
+    const settings = decode({
+      daemonEndpoint: "  unix:///tmp/codex.sock  ",
+      sharedSessionRoot: "  /work/project  ",
+    });
+    expect(settings.daemonEndpoint).toBe("unix:///tmp/codex.sock");
+    expect(settings.sharedSessionRoot).toBe("/work/project");
+    expect(decode({ daemonEndpoint: "", sharedSessionRoot: "" })).toMatchObject({
+      daemonEndpoint: "",
+      sharedSessionRoot: "",
+    });
   });
 });

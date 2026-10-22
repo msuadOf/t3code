@@ -66,6 +66,8 @@ export class EventSinkStreamError extends Schema.TaggedError<EventSinkStreamErro
 export const EventSinkV2Error = Schema.Union([EventSinkWriteError, EventSinkStreamError]);
 export type EventSinkV2Error = typeof EventSinkV2Error.Type;
 
+const encodeHistoryIds = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
+
 export interface EventSinkV2Shape {
   readonly write: (input: {
     /** Return no events if another thread owns this native session at commit time. */
@@ -73,6 +75,7 @@ export interface EventSinkV2Shape {
       OrchestrationV2ProviderThread,
       "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
     >;
+    readonly insertHistoryOnly?: boolean;
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
@@ -87,6 +90,7 @@ export interface EventSinkV2Shape {
       OrchestrationV2ProviderThread,
       "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
     >;
+    readonly insertHistoryOnly?: boolean;
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
@@ -337,6 +341,117 @@ const layerBase: Layer.Layer<
         });
       });
 
+    const insertMissingHistory = Effect.fn("EventSink.insertMissingHistory")(function* (
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+    ) {
+      // Read on the write connection: a native history read can race live
+      // adoption, including a T3-owned run with a different application ID.
+      const identity = (event: OrchestrationV2DomainEvent) => {
+        switch (event.type) {
+          case "message.updated":
+            return ["message", event.payload.id] as const;
+          case "turn-item.updated":
+            return ["item", event.payload.id] as const;
+          case "run.created":
+            return ["run", event.payload.id] as const;
+          case "run-attempt.created":
+            return ["attempt", event.payload.id] as const;
+          case "provider-turn.updated":
+            return ["provider-turn", event.payload.id] as const;
+          case "node.updated":
+            return ["node", event.payload.id] as const;
+          case "checkpoint-scope.created":
+            return ["scope", event.payload.id] as const;
+          default:
+            return undefined;
+        }
+      };
+      const ids = events.flatMap((event) => {
+        const key = identity(event);
+        return key === undefined ? [] : [key[1]];
+      });
+      if (ids.length === 0) return events;
+      const rows = yield* sql<{ readonly kind: string; readonly id: string }>`
+        WITH ids AS (SELECT value FROM json_each(${encodeHistoryIds(ids)}))
+        SELECT 'message' AS kind, message_id AS id FROM orchestration_v2_projection_messages WHERE message_id IN ids
+        UNION ALL SELECT 'item', turn_item_id FROM orchestration_v2_projection_turn_items WHERE turn_item_id IN ids
+        UNION ALL SELECT 'run', run_id FROM orchestration_v2_projection_runs WHERE run_id IN ids
+        UNION ALL SELECT 'attempt', attempt_id FROM orchestration_v2_projection_run_attempts WHERE attempt_id IN ids
+        UNION ALL SELECT 'provider-turn', provider_turn_id FROM orchestration_v2_projection_provider_turns WHERE provider_turn_id IN ids
+        UNION ALL SELECT 'node', node_id FROM orchestration_v2_projection_nodes WHERE node_id IN ids
+        UNION ALL SELECT 'scope', scope_id FROM orchestration_v2_projection_checkpoint_scopes WHERE scope_id IN ids
+      `;
+      const existing = new Set(rows.map((row) => `${row.kind}:${row.id}`));
+      const turns = events.flatMap((event) =>
+        event.type === "provider-turn.updated" ? [event] : [],
+      );
+      const turnOwners =
+        turns.length === 0
+          ? []
+          : yield* sql<{ readonly id: string; readonly runId: string | null }>`
+        SELECT turn.provider_turn_id AS id, attempt.run_id AS runId
+        FROM orchestration_v2_projection_provider_turns AS turn
+        LEFT JOIN orchestration_v2_projection_run_attempts AS attempt ON attempt.attempt_id = turn.run_attempt_id
+        WHERE turn.provider_turn_id IN (SELECT value FROM json_each(${encodeHistoryIds(turns.map((event) => event.payload.id))}))
+      `;
+      const conflictingRuns = new Set(
+        turns.flatMap((event) => {
+          const owner = turnOwners.find((row) => row.id === event.payload.id);
+          return owner !== undefined && owner.runId !== event.runId && event.runId !== undefined
+            ? [event.runId]
+            : [];
+        }),
+      );
+      const scopes = events.flatMap((event) =>
+        event.type === "checkpoint-scope.created" ? [event.payload.nodeId] : [],
+      );
+      const scopeNodes =
+        scopes.length === 0
+          ? []
+          : yield* sql<{ readonly id: string }>`
+        SELECT node_id AS id FROM orchestration_v2_projection_checkpoint_scopes
+        WHERE node_id IN (SELECT value FROM json_each(${encodeHistoryIds(scopes)}))
+      `;
+      const existingScopeNodes = new Set(scopeNodes.map((row) => row.id));
+      const runs = events.flatMap((event) => (event.type === "run.created" ? [event.payload] : []));
+      const runUsers =
+        runs.length === 0
+          ? []
+          : yield* sql<{ readonly id: string; readonly messageId: string }>`
+        SELECT run_id AS id, json_extract(payload_json, '$.userMessageId') AS messageId FROM orchestration_v2_projection_runs
+        WHERE run_id IN (SELECT value FROM json_each(${encodeHistoryIds(runs.map((run) => run.id))}))
+      `;
+      const replacedUserIds = new Set(
+        runs.flatMap((run) => {
+          const current = runUsers.find((row) => row.id === run.id);
+          return current !== undefined && current.messageId !== run.userMessageId
+            ? [run.userMessageId]
+            : [];
+        }),
+      );
+      return events.filter((event) => {
+        if (event.runId !== undefined && conflictingRuns.has(event.runId)) return false;
+        if (
+          event.type === "checkpoint-scope.created" &&
+          existingScopeNodes.has(event.payload.nodeId)
+        )
+          return false;
+        if (event.type === "message.updated" && replacedUserIds.has(event.payload.id)) return false;
+        if (
+          event.type === "turn-item.updated" &&
+          event.payload.type === "user_message" &&
+          replacedUserIds.has(event.payload.messageId)
+        )
+          return false;
+        const key = identity(event);
+        if (key === undefined) return true;
+        const encoded = `${key[0]}:${key[1]}`;
+        if (existing.has(encoded)) return false;
+        existing.add(encoded);
+        return true;
+      });
+    });
+
     const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
       const runOrdinals = new Map(
         events.flatMap((event) =>
@@ -442,10 +557,12 @@ const layerBase: Layer.Layer<
                 }),
               )
             : input.events;
+          const missing =
+            input.insertHistoryOnly === true ? yield* insertMissingHistory(events) : events;
           const normalized = yield* normalizeEvents(
             input.guardPendingUserInputCancellations === true
-              ? yield* guardUserInputCancellations(events)
-              : events,
+              ? yield* guardUserInputCancellations(missing)
+              : missing,
           );
           const committed = yield* eventStore.append({
             ...(input.commandId === undefined ? {} : { commandId: input.commandId }),

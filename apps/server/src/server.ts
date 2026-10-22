@@ -84,6 +84,8 @@ import * as ServerOwnership from "./serverOwnership.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as NativeCodexSessionSync from "./provider/NativeCodexSessionSync.ts";
 import * as ProjectEnrichmentService from "./project/ProjectEnrichmentService.ts";
 import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as AntigravityInstallation from "./provider/AntigravityInstallation.ts";
@@ -598,6 +600,16 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
       yield* service.start();
     }),
   ).pipe(Layer.provide(DelegatedTaskQuestionReactor.layer), Layer.provide(ProjectionStoreV2.layer)),
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      yield* (yield* NativeCodexSessionSync.NativeCodexSessionSync).start;
+    }),
+  ).pipe(
+    Layer.provide(NativeCodexSessionSync.layer),
+    Layer.provide(RuntimeLayer.layerEventSink),
+    Layer.provide(ProjectionStoreV2.layer),
+    Layer.provide(IdAllocator.layer),
+  ),
   ProviderUsageLimitsIngestion.layer,
   layerProviderInstallationRefresh,
   ReplayMarkers.layer,

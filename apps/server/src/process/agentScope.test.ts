@@ -4,15 +4,13 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, describe, expect, it } from "@effect/vitest";
-import { AgentScope } from "@t3tools/shared/AgentScope";
+import { describe, expect, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import * as ServerConfig from "../config.ts";
-import { makeCodexAppServerSpawnCommand } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { classifyScope, make, ownedAgentSlice, type ScopeState } from "./agentScope.ts";
 
@@ -103,16 +101,6 @@ const unitOf = (launch: { readonly args: ReadonlyArray<string> }) =>
 const sliceOf = (launch: { readonly args: ReadonlyArray<string> }) =>
   launch.args.find((arg) => arg.startsWith("--slice="))?.slice("--slice=".length) ?? "";
 
-const launchCodex = (scope: Effect.Success<typeof make>, threadId: string) =>
-  makeCodexAppServerSpawnCommand({ command: "agent", args: ["app-server"], threadId }).pipe(
-    Effect.provideService(AgentScope, scope),
-    Effect.provideService(HostProcess.Platform, "linux"),
-    Effect.map((command) => {
-      assert(ChildProcess.isStandardCommand(command));
-      return command;
-    }),
-  );
-
 describe("AgentScope service", () => {
   it.effect("labels a thread from its newest scope until its next session clears it", () =>
     withFakeSystemd(({ scope, units }) =>
@@ -135,7 +123,7 @@ describe("AgentScope service", () => {
   );
 
   it.effect(
-    "keeps shared Codex scopes running without attributing their OOM to the launch thread",
+    "keeps shared provider scopes running without attributing their OOM to the launch thread",
     () =>
       withFakeSystemd(({ scope, units, calls }) =>
         Effect.gen(function* () {
@@ -144,7 +132,13 @@ describe("AgentScope service", () => {
           units.set(unitOf(agent), { activeState: "failed", result: "oom-kill" });
           expect(yield* scope.oomKilled("a")).toBe(true);
 
-          const codex = yield* launchCodex(scope, "a");
+          const codex = yield* scope.wrap({
+            command: "agent",
+            args: [],
+            name: "shared",
+            threadId: "a",
+            shared: true,
+          });
           expect(codex.args).toContain("--property=OOMPolicy=continue");
           expect(codex.args).not.toContain("--property=OOMPolicy=stop");
           expect(codex.args).toContain("--property=TimeoutStopSec=10s");

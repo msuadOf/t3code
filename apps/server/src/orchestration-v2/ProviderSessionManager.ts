@@ -1,5 +1,6 @@
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
+import * as ExternalCodexRuns from "./ExternalCodexRuns.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   isOrchestrationV2WorkActive,
@@ -179,6 +180,7 @@ export interface ProviderSessionManagerV2Shape {
     readonly threadId: ThreadId;
     readonly detail?: string;
     readonly revokeMcpCredential?: boolean;
+    readonly preserveNativeWork?: boolean;
   }) => Effect.Effect<void, ProviderSessionManagerV2Error>;
 }
 
@@ -328,6 +330,7 @@ export const layerWithOptions = (
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
       const providerEventIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const externalCodexRuns = yield* Effect.serviceOption(ExternalCodexRuns.ExternalCodexRuns);
       const agentScope = yield* AgentScope;
       const agentAccessSettings = Effect.fn("ProviderSessionManagerV2.agentAccessSettings")(
         function* (threadId: ThreadId) {
@@ -1988,6 +1991,30 @@ export const layerWithOptions = (
                       });
                     });
                   }
+                  if (
+                    event.type === "provider_thread.updated" &&
+                    event.retainedNativeTurnIds !== undefined &&
+                    event.providerThread.appThreadId !== null
+                  ) {
+                    yield* providerEventIngestor
+                      .ingestNormalized({
+                        providerSessionId: entry.runtime.providerSessionId,
+                        providerInstanceId: entry.runtime.instanceId,
+                        threadId: event.providerThread.appThreadId,
+                        event,
+                      })
+                      .pipe(
+                        Effect.mapError(
+                          (cause) =>
+                            new ProviderAdapter.ProviderAdapterEventStreamError({
+                              driver: entry.runtime.driver,
+                              providerSessionId: entry.runtime.providerSessionId,
+                              cause,
+                            }),
+                        ),
+                      );
+                    return;
+                  }
                   // Some providers can block before a run subscriber exists
                   // (project trust, login, or session-switch hooks). Persist
                   // their runless request artifacts directly so the normal T3
@@ -2164,6 +2191,29 @@ export const layerWithOptions = (
               yield* agentScope.clear(input.threadId);
               const runtime = yield* adapter
                 .openSession({
+                  ...(Option.isNone(externalCodexRuns)
+                    ? {}
+                    : {
+                        onExternalTurn: Effect.fn("ProviderSessionManager.attachExternalCodexTurn")(
+                          function* (turn: ProviderAdapter.ProviderAdapterV2ExternalTurnInput) {
+                            const entry = (yield* Ref.get(sessions)).get(key);
+                            if (entry === undefined) return undefined;
+                            const adopted = yield* externalCodexRuns.value.adopt({
+                              ...turn,
+                              session: entry.exposedRuntime,
+                            });
+                            if (adopted !== undefined)
+                              yield* observeActivity(
+                                input.providerSessionId,
+                                markBusy(
+                                  input.providerSessionId,
+                                  busyTurnKey(adopted.providerThread.id, adopted.runOrdinal),
+                                ),
+                              );
+                            return adopted;
+                          },
+                        ),
+                      }),
                   threadId: input.threadId,
                   providerSessionId: input.providerSessionId,
                   modelSelection: input.modelSelection,
@@ -2370,29 +2420,30 @@ export const layerWithOptions = (
                 const activeTurns = projection.value.providerTurns.filter(
                   (turn) => turn.status === "running" && providerThreads.has(turn.providerThreadId),
                 );
-                yield* Effect.forEach(
-                  activeTurns,
-                  (turn) =>
-                    currentEntry.exposedRuntime
-                      .interruptTurn({
-                        providerThread: providerThreads.get(turn.providerThreadId)!,
-                        providerTurnId: turn.id,
-                      })
-                      .pipe(
-                        Effect.catchCause((cause) =>
-                          Effect.logWarning(
-                            "orchestration-v2.driver-session.detach-interrupt-failed",
-                            {
-                              providerSessionId: input.providerSessionId,
-                              threadId: input.threadId,
-                              providerTurnId: turn.id,
-                              cause,
-                            },
+                if (input.preserveNativeWork !== true)
+                  yield* Effect.forEach(
+                    activeTurns,
+                    (turn) =>
+                      currentEntry.exposedRuntime
+                        .interruptTurn({
+                          providerThread: providerThreads.get(turn.providerThreadId)!,
+                          providerTurnId: turn.id,
+                        })
+                        .pipe(
+                          Effect.catchCause((cause) =>
+                            Effect.logWarning(
+                              "orchestration-v2.driver-session.detach-interrupt-failed",
+                              {
+                                providerSessionId: input.providerSessionId,
+                                threadId: input.threadId,
+                                providerTurnId: turn.id,
+                                cause,
+                              },
+                            ),
                           ),
                         ),
-                      ),
-                  { concurrency: 1, discard: true },
-                );
+                    { concurrency: 1, discard: true },
+                  );
               }
             }
             const detachResult = yield* Ref.modify(sessions, (current) => {
@@ -2447,7 +2498,7 @@ export const layerWithOptions = (
             // provider process may still be alive (shared multi-thread codex
             // session across a workspace handoff) and holds its MCP client's
             // credential for the thread it will re-attach with.
-            if (input.revokeMcpCredential === true) {
+            if (input.revokeMcpCredential === true && input.preserveNativeWork !== true) {
               yield* clearMcpSession(input.threadId);
             }
             if (Option.isNone(detached)) {

@@ -371,6 +371,42 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
     }),
   );
 
+  it.effect("cancels a pending shared request when another client resolves it", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const started = yield* Deferred.make<void>();
+      const cancelled = yield* Deferred.make<void>();
+      const resolved = yield* Deferred.make<void>();
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        onRequest: () =>
+          Deferred.succeed(started, undefined).pipe(
+            Effect.andThen(Effect.never),
+            Effect.onInterrupt(() => Deferred.succeed(cancelled, undefined)),
+          ),
+        onNotification: () => Deferred.succeed(resolved, undefined).pipe(Effect.asVoid),
+      });
+      yield* Queue.offer(input, encodeJsonl({ id: "approval-1", method: "approval", params: {} }));
+      yield* Deferred.await(started);
+      yield* Queue.offer(
+        input,
+        encodeJsonl({
+          method: "serverRequest/resolved",
+          params: { requestId: "approval-1", threadId: "thread-1" },
+        }),
+      );
+      yield* Deferred.await(resolved);
+      yield* Deferred.await(cancelled);
+      yield* transport.respond("approval-1", { decision: "accept" });
+      yield* transport.respondError(
+        "approval-1",
+        CodexError.CodexAppServerRequestError.methodNotFound("approval"),
+      );
+      yield* transport.notify("barrier");
+      assert.deepEqual(yield* decodeJson(yield* Queue.take(output)), { method: "barrier" });
+    }),
+  );
+
   it.effect("rejects incoming requests after the active handler limit is reached", () =>
     Effect.gen(function* () {
       const { stdio, input, output } = yield* makeInMemoryStdio();

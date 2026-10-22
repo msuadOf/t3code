@@ -39,6 +39,37 @@ describe("ProviderSettingsForm helpers", () => {
     expect(next).toEqual({ forkOwned: 1 });
   });
 
+  it("can scope shared Codex sessions and reset sharing to the home daemon", () => {
+    const codex = providerClients.get(ProviderDriverKind.make("codex"));
+    expect(codex).toBeDefined();
+    const fields = deriveProviderSettingsFields(codex!);
+    const endpoint = fields.find((field) => field.key === "daemonEndpoint")!;
+    const root = fields.find((field) => field.key === "sharedSessionRoot")!;
+    expect(endpoint).toBeDefined();
+    expect(root).toBeDefined();
+    expect(
+      fields.some((field) => field.key === "shadowHomePath" || field.key === "launchArgs"),
+    ).toBe(false);
+    const scoped = nextProviderConfigWithFieldValue(
+      { homePath: "/home/codex" },
+      root,
+      "/work/project",
+    );
+    const connected = nextProviderConfigWithFieldValue(scoped, endpoint, "unix:///tmp/codex.sock");
+    expect(connected).toEqual({
+      homePath: "/home/codex",
+      sharedSessionRoot: "/work/project",
+      daemonEndpoint: "unix:///tmp/codex.sock",
+    });
+    expect(
+      nextProviderConfigWithFieldValue(
+        nextProviderConfigWithFieldValue(connected, root, ""),
+        endpoint,
+        "",
+      ),
+    ).toEqual({ homePath: "/home/codex" });
+  });
+
   it("stores false boolean fields when true is the default", () => {
     const next = nextProviderConfigWithFieldValue(
       undefined,

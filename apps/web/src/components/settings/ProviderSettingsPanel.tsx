@@ -101,8 +101,6 @@ import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { UsageProviderSettings } from "./UsageProviderSettings";
 import { ProviderSetupSection, readAntigravityAuthMethod } from "./ProviderSetupSection";
 import { ProviderAuthenticationSection } from "./ProviderAuthenticationSection";
-import { CodexSetupSection, CodexManagedRuntimeFields } from "./CodexSetupSection";
-import { readCodexSetupMode } from "./CodexSetupSection.logic";
 import { providerClients } from "./providerDriverMeta";
 import { searchableSetting } from "./settingsSearch";
 import {
@@ -1303,7 +1301,6 @@ function ProviderInstanceRow({
         onReset: () => actions.writeProjectOverride(instanceId, undefined),
       }
     : undefined;
-  const codexSetupMode = driver === "codex" ? readCodexSetupMode(instance.config) : null;
   const recommendedVersion = liveProvider?.compatibilityAdvisory?.recommendedVersion;
   const canInstallRecommended =
     !readOnly &&
@@ -1328,15 +1325,6 @@ function ProviderInstanceRow({
       selected={selected}
       onSelect={mode === "list" ? () => actions.selectInstance(instanceId) : undefined}
       readOnly={readOnly}
-      runtime={
-        mode === "editor" && codexSetupMode === "managed" ? (
-          <CodexManagedRuntimeFields
-            environmentId={environmentId}
-            instanceId={instanceId}
-            provider={liveProvider}
-          />
-        ) : undefined
-      }
       canWriteSettings={canWriteSettings}
       setup={
         mode === "editor" && driver === "antigravity" ? (
@@ -1351,26 +1339,33 @@ function ProviderInstanceRow({
             readOnly={readOnly}
             onEnable={() => actions.enableInstance(instanceId, { ...instance, enabled: true })}
           />
-        ) : mode === "editor" && codexSetupMode === "managed" ? (
-          <CodexSetupSection
-            environmentId={environmentId}
-            instanceId={instanceId}
-            provider={liveProvider}
-            mode={codexSetupMode}
-            enabled={resolveProviderInstanceEnabled(instance)}
-            readOnly={readOnly}
-            onModeChange={(setupMode) =>
-              actions.enableInstance(instanceId, {
-                ...instance,
-                enabled: true,
-                config: {
-                  ...(instance.config !== null && typeof instance.config === "object"
-                    ? instance.config
-                    : {}),
-                  enabled: true,
-                  setupMode,
-                },
-              })
+        ) : mode === "editor" && driver === "codex" ? (
+          <SettingsRow
+            title="Codex CLI account"
+            description="Shared sessions use the daemon’s CLI login. Run codex login on this environment’s machine, then connect CLI clients with codex --remote unix://."
+            control={
+              providerConfigString(instance.config, "setupMode") === "managed" && !readOnly ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    actions.enableInstance(instanceId, {
+                      ...instance,
+                      enabled: true,
+                      config: {
+                        ...(instance.config !== null && typeof instance.config === "object"
+                          ? instance.config
+                          : {}),
+                        setupMode: "existing",
+                        shadowHomePath: "",
+                        launchArgs: "",
+                      },
+                    })
+                  }
+                >
+                  Use CLI login
+                </Button>
+              ) : undefined
             }
           />
         ) : mode === "editor" &&

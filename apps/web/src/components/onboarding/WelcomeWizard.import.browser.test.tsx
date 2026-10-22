@@ -124,10 +124,6 @@ vi.mock(import("../../state/use-atom-command"), async (original) => ({
     command: "createProject" | "importThreads" | "refreshProviders" | "connectPairing",
   ) => state[command]) as never,
 }));
-vi.mock(import("../settings/ChatGptWelcomeCoordinator"), async (original) => ({
-  ...(await original()),
-  ChatGptWelcomeCoordinator: () => <></>,
-}));
 
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { WelcomeWizard } from "./WelcomeWizard";

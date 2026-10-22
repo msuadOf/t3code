@@ -47,6 +47,7 @@ export interface CodexAppServerPatchedProtocolOptions {
   readonly onNotification?: (
     notification: CodexAppServerIncomingNotification,
   ) => Effect.Effect<void, never>;
+  readonly shouldHandleRequest?: (request: CodexAppServerIncomingRequest) => boolean;
   readonly onRequest?: (
     request: CodexAppServerIncomingRequest,
   ) => Effect.Effect<unknown, CodexError.CodexAppServerError>;
@@ -175,6 +176,21 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
     const terminationFailure = yield* Ref.make(Option.none<CodexError.CodexAppServerError>());
     const terminationSignal = yield* Deferred.make<void>();
     const activeRequestHandlers = yield* Ref.make(0);
+    const requestCancellations = new Map<string, Deferred.Deferred<void>>();
+    // Requests can be answered by another client. Bound completed IDs while also
+    // suppressing a handler that races the shared resolution notification.
+    const completedRequests = new Set<string>();
+    const requestKey = (id: string | number) => `${typeof id}:${id}`;
+    const completeRequest = (id: string | number) => {
+      const key = requestKey(id);
+      if (completedRequests.has(key)) return false;
+      completedRequests.add(key);
+      if (completedRequests.size > 1024) {
+        const oldest = completedRequests.values().next().value;
+        if (oldest !== undefined) completedRequests.delete(oldest);
+      }
+      return true;
+    };
 
     const logProtocol = (event: CodexAppServerProtocolLogEvent) => {
       if (event.direction === "incoming" && !options.logIncoming) {
@@ -275,12 +291,21 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       }).pipe(Effect.flatten);
 
     const respond = (requestId: string | number, result: unknown) =>
-      offerOutgoing(toProtocolMessage(requestId, { result }));
+      Effect.suspend(() =>
+        completeRequest(requestId)
+          ? offerOutgoing(toProtocolMessage(requestId, { result }))
+          : Effect.void,
+      );
 
     const respondError = (
       requestId: string | number,
       error: CodexError.CodexAppServerRequestError,
-    ) => offerOutgoing(toProtocolMessage(requestId, { error: error.toProtocolError() }));
+    ) =>
+      Effect.suspend(() =>
+        completeRequest(requestId)
+          ? offerOutgoing(toProtocolMessage(requestId, { error: error.toProtocolError() }))
+          : Effect.void,
+      );
 
     const handleResponse = (response: typeof JsonRpcResponseEnvelope.Type) => {
       const requestId = String(response.id);
@@ -306,7 +331,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       Queue.offer(incomingRequests, request).pipe(
         Effect.flatMap(() => {
           const handler = options.onRequest;
-          if (!handler) return Effect.void;
+          if (!handler || options.shouldHandleRequest?.(request) === false) return Effect.void;
 
           return Ref.modify(activeRequestHandlers, (count) =>
             count >= MAX_BUFFERED_RAW_MESSAGES ? [false, count] : [true, count + 1],
@@ -321,18 +346,31 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
                 );
               }
 
-              return handler(request).pipe(
-                Effect.matchEffect({
-                  onFailure: (error) =>
-                    respondError(
-                      request.id,
-                      CodexError.CodexAppServerRequestError.fromAppServerError(
-                        error,
-                        request.method,
-                      ),
-                    ),
-                  onSuccess: (result) => respond(request.id, result),
-                }),
+              return Effect.gen(function* () {
+                const cancellation = yield* Deferred.make<void>();
+                const key = requestKey(request.id);
+                requestCancellations.set(key, cancellation);
+                if (completedRequests.has(key)) return;
+                yield* Effect.raceFirst(
+                  handler(request).pipe(
+                    Effect.matchEffect({
+                      onFailure: (error) =>
+                        respondError(
+                          request.id,
+                          CodexError.CodexAppServerRequestError.fromAppServerError(
+                            error,
+                            request.method,
+                          ),
+                        ),
+                      onSuccess: (result) => respond(request.id, result),
+                    }),
+                  ),
+                  Deferred.await(cancellation).pipe(Effect.andThen(Effect.interrupt)),
+                );
+              }).pipe(
+                Effect.ensuring(
+                  Effect.sync(() => requestCancellations.delete(requestKey(request.id))),
+                ),
                 Effect.ensuring(
                   Ref.update(activeRequestHandlers, (count) => Math.max(0, count - 1)),
                 ),
@@ -351,11 +389,21 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
         Effect.asVoid,
       );
 
-    const handleNotification = (notification: CodexAppServerIncomingNotification) =>
-      Queue.offer(incomingNotifications, notification).pipe(
-        Effect.andThen(options.onNotification ? options.onNotification(notification) : Effect.void),
-        Effect.asVoid,
-      );
+    // Notification delivery is a per-message hot path; request spans cover the lifecycle.
+    const handleNotification = Effect.fnUntraced(function* (
+      notification: CodexAppServerIncomingNotification,
+    ) {
+      if (notification.method === "serverRequest/resolved" && isObject(notification.params)) {
+        const id = notification.params.requestId;
+        if (isJsonRpcId(id)) {
+          completeRequest(id);
+          const cancellation = requestCancellations.get(requestKey(id));
+          if (cancellation !== undefined) yield* Deferred.succeed(cancellation, undefined);
+        }
+      }
+      yield* Queue.offer(incomingNotifications, notification);
+      if (options.onNotification) yield* options.onNotification(notification);
+    });
 
     const routeMessage = Effect.fnUntraced(function* (message: unknown) {
       if (Option.isSome(yield* Ref.get(terminationFailure))) return;

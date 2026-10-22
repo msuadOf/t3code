@@ -3,6 +3,7 @@ import type {
   OrchestrationV2ShellSnapshot,
   OrchestrationV2ShellStreamItem,
   OrchestrationV2ThreadShell,
+  OrchestrationV2StoredEvent,
 } from "@t3tools/contracts";
 import { ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import type * as Cause from "effect/Cause";
@@ -16,6 +17,9 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import {
+  archivedShellStreamItemFromThreadShell,
+  buildActiveShellSnapshot,
+  shellStreamItemFromThreadShell,
   bufferShellLiveStream,
   composeShellStreamWithEnrichment,
   dedupeShellEnrichment,
@@ -463,4 +467,71 @@ describe("skipUnchangedThreadShells", () => {
       expect(sent).toEqual([1, 2, 3]);
     }),
   );
+});
+
+describe("native session directory visibility", () => {
+  const hidden = () => shellFixture({ nativeSessionScopeHidden: true });
+  const stored = {
+    sequence: 7,
+    event: { type: "thread.archived", threadId: ThreadId.make("thread-a") },
+  } as OrchestrationV2StoredEvent;
+
+  it("omits hidden rows from active snapshots without changing stored rows", () => {
+    const visible = shellFixture({ id: ThreadId.make("visible") });
+    const hiddenThread = hidden();
+    const threads = {
+      schemaVersion: 1,
+      snapshotSequence: 7,
+      threads: [visible, hiddenThread],
+      archivedThreads: [],
+    };
+    expect(
+      buildActiveShellSnapshot({ projects: [], threads, snapshotSequence: 7 }).threads,
+    ).toEqual([visible]);
+    expect(threads.threads).toEqual([visible, hiddenThread]);
+  });
+
+  it("omits hidden rows from both locations in initial client snapshots", () => {
+    const visible = shellFixture({ id: ThreadId.make("visible") });
+    const snapshot = {
+      ...emptyShellSnapshot,
+      threads: [visible, hidden()],
+      archivedThreads: [hidden(), visible],
+    };
+    const items = shellStreamItemsFromInitialSnapshot({
+      snapshot,
+      resolvedRepositoryIdentityRoots: [],
+    });
+    expect(items[0]?.snapshot.threads).toEqual([visible]);
+    expect(items[0]?.snapshot.archivedThreads).toEqual([visible]);
+    expect(snapshot.archivedThreads).toHaveLength(2);
+  });
+
+  it("removes newly hidden rows from both live list subscriptions", () => {
+    const shell = hidden();
+    expect(shellStreamItemFromThreadShell({ stored, shell })).toEqual({
+      kind: "thread.removed",
+      sequence: 7,
+      location: "active",
+      threadId: shell.id,
+    });
+    expect(archivedShellStreamItemFromThreadShell({ stored, shell })).toEqual({
+      kind: "thread.removed",
+      sequence: 7,
+      threadId: shell.id,
+    });
+  });
+
+  it("restores visible rows in the location selected by their archive state", () => {
+    const shell = shellFixture({ nativeSessionScopeHidden: false });
+    expect(shellStreamItemFromThreadShell({ stored, shell })).toMatchObject({
+      kind: "thread.updated",
+      thread: shell,
+    });
+    const archived = { ...shell, archivedAt: DateTime.makeUnsafe("2026-10-22T00:00:00Z") };
+    expect(archivedShellStreamItemFromThreadShell({ stored, shell: archived })).toMatchObject({
+      kind: "thread.updated",
+      thread: archived,
+    });
+  });
 });

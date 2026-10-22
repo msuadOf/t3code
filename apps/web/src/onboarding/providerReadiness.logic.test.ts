@@ -117,6 +117,42 @@ describe("selectOnboardingProvidersByDriver", () => {
 });
 
 describe("resolveOnboardingProviderLoginCommand", () => {
+  it("signs into the configured shared home and quotes shell metacharacters", () => {
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [readyCodex.instanceId]: {
+          driver: readyCodex.driver,
+          config: { homePath: "/work/my $(account)'s home" },
+        },
+      },
+    };
+    expect(resolveOnboardingProviderLoginCommand(readyCodex, settings, "linux")).toBe(
+      "CODEX_HOME='/work/my $(account)'\"'\"'s home' codex login",
+    );
+    expect(resolveOnboardingProviderLoginCommand(readyCodex, settings, "windows")).toBe(
+      "$env:CODEX_HOME = '/work/my $(account)''s home'; codex login",
+    );
+  });
+
+  it("expands a home-relative Codex home before signing in", () => {
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [readyCodex.instanceId]: {
+          driver: readyCodex.driver,
+          config: { homePath: "~/codex work" },
+        },
+      },
+    };
+    expect(resolveOnboardingProviderLoginCommand(readyCodex, settings, "linux")).toBe(
+      "CODEX_HOME=\"$HOME\"/'codex work' codex login",
+    );
+    expect(resolveOnboardingProviderLoginCommand(readyCodex, settings, "windows")).toBe(
+      "$env:CODEX_HOME = ($HOME + '/codex work'); codex login",
+    );
+  });
+
   it("uses the selected Codex account binary", () => {
     const provider = { ...readyCodex, instanceId: ProviderInstanceId.make("codex_work") };
 

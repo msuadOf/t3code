@@ -112,7 +112,17 @@ export function resolveOnboardingProviderLoginCommand(
   if (provider.driver === "codex") {
     const config = decodeCodexSettings(instance?.config ?? {});
     const binaryPath = Option.isSome(config) ? config.value.binaryPath : "codex";
-    return `${quoteProviderBinary(binaryPath, "codex", platform)} login`;
+    const login = `${quoteProviderBinary(binaryPath, "codex", platform)} login`;
+    const homePath = Option.isSome(config) ? config.value.homePath : "";
+    if (!homePath) return login;
+    if (platform === "windows") {
+      const value = homePath.replaceAll("'", "''");
+      const home = /^~[\\/]/.test(homePath) ? `($HOME + '${value.slice(1)}')` : `'${value}'`;
+      return `$env:CODEX_HOME = ${home}; ${login}`;
+    }
+    const quoted = homePath.replaceAll("'", `'"'"'`);
+    const home = homePath.startsWith("~/") ? `"$HOME"/'${quoted.slice(2)}'` : `'${quoted}'`;
+    return `CODEX_HOME=${home} ${login}`;
   }
 
   return provider.driver;

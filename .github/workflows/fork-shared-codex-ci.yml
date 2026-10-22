@@ -1,0 +1,46 @@
+name: Fork shared Codex CI
+
+on:
+  push:
+    branches:
+      - codex/shared-codex-sessions
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-shared-codex-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    if: github.repository != 'pingdotgg/t3code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/.repos/
+            !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
+      - name: Fetch comparison branch
+        run: |
+          git remote add upstream https://github.com/pingdotgg/t3code.git
+          git fetch --no-tags --filter=blob:none upstream main
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+      - name: Install dependencies
+        run: vp install --frozen-lockfile
+      - name: Validate changed packages and related tests
+        run: vp run check:changed upstream/main
+      - name: Build shared web, server, and desktop bundles
+        run: vp run build:desktop
