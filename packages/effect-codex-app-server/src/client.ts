@@ -1,5 +1,6 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -40,6 +41,7 @@ export class CodexAppServerClient extends Context.Service<
   CodexAppServerClient,
   {
     readonly raw: CodexAppServerClientRaw;
+    readonly closed?: Effect.Effect<CodexError.CodexAppServerError>;
     readonly request: <M extends CodexRpc.ClientRequestMethod>(
       method: M,
       payload: CodexRpc.ClientRequestParamsByMethod[M],
@@ -101,6 +103,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
   options: CodexAppServerClientOptions = {},
   terminationError?: Effect.Effect<CodexError.CodexAppServerError>,
 ): Effect.fn.Return<CodexAppServerClient["Service"], never, Scope.Scope> {
+  const closed = yield* Deferred.make<CodexError.CodexAppServerError>();
   const requestHandlers = new Map<string, ServerRequestHandler>();
   const notificationHandlers = new Map<string, Array<ServerNotificationHandler>>();
   let unknownRequestHandler:
@@ -207,6 +210,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     ...(options.logger ? { logger: options.logger } : {}),
     shouldHandleRequest: (request) =>
       requestHandlers.has(request.method) || unknownRequestHandler !== undefined,
+    onTermination: (error) => Deferred.succeed(closed, error).pipe(Effect.asVoid),
     onNotification: dispatchNotification,
     onRequest: dispatchRequest,
   });
@@ -236,6 +240,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     );
 
   return CodexAppServerClient.of({
+    closed: Deferred.await(closed),
     raw: {
       notifications: transport.incomingNotifications,
       requests: transport.incomingRequests,

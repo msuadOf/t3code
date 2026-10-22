@@ -4,6 +4,8 @@ import { CommandId, type Project, ProjectId, ProviderInstanceId } from "@t3tools
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -56,10 +58,15 @@ const layerTestFor = (
     | ProjectFaviconResolver.ProjectFaviconResolver
     | RepositoryIdentityResolver.RepositoryIdentityResolver
   >,
+  workspacePathsLayer: Layer.Layer<
+    WorkspacePaths.WorkspacePaths,
+    never,
+    FileSystem.FileSystem | Path.Path
+  > = layerWorkspacePaths,
 ) =>
   RuntimeLayer.layerProjectService.pipe(
     Layer.provideMerge(ProjectEnrichmentService.layer),
-    Layer.provideMerge(layerWorkspacePaths),
+    Layer.provideMerge(workspacePathsLayer),
     Layer.provideMerge(projectMetadataLayer),
     Layer.provideMerge(SqlitePersistence.layerMemory),
     Layer.provideMerge(ServerSettings.layerTest()),
@@ -83,7 +90,7 @@ const layerProjectServiceDependencies = Layer.mergeAll(
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "project-service-race-" })),
-  Layer.provide(NodeServices.layer),
+  Layer.provideMerge(NodeServices.layer),
 );
 
 const waitForProject = Effect.fn("ProjectServiceTest.waitForProject")(function* (
@@ -668,4 +675,51 @@ it.effect("rejects an update that waited on the lock while its project was delet
       "Update race",
     );
   }).pipe(Effect.provide(layerProjectServiceDependencies)),
+);
+
+it.effect(
+  "bootstraps native session metadata for a removed workspace without recreating the directory",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* ProjectService.ProjectService;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const parent = yield* fs.makeTempDirectoryScoped({ prefix: "removed-codex-workspace-" });
+      const workspaceRoot = path.join(parent, "removed-worktree");
+      const input = {
+        commandId: CommandId.make("native-missing:create"),
+        projectId: ProjectId.make("native-missing"),
+        title: "Historical worktree",
+        workspaceRoot,
+      };
+      const ordinary = yield* service.create(input).pipe(Effect.flip);
+      assert.equal(ordinary._tag, "ProjectOperationError");
+      if (ordinary._tag === "ProjectOperationError")
+        assert.equal(ordinary.operation, "normalize-workspace");
+      const historical = yield* service.bootstrap({
+        ...input,
+        commandId: CommandId.make("native-missing:bootstrap"),
+        allowMissingWorkspaceRoot: true,
+      });
+      assert.equal(historical.created, true);
+      assert.equal(historical.project.workspaceRoot, workspaceRoot);
+      assert.equal(yield* fs.exists(workspaceRoot), false);
+      const again = yield* service.bootstrap({
+        ...input,
+        commandId: CommandId.make("native-missing:again"),
+        allowMissingWorkspaceRoot: true,
+      });
+      assert.equal(again.created, false);
+      assert.equal(again.project.id, historical.project.id);
+      const strictAfterImport = yield* service
+        .create({ ...input, commandId: CommandId.make("native-missing:strict") })
+        .pipe(Effect.flip);
+      assert.equal(strictAfterImport._tag, "ProjectOperationError");
+      assert.equal(yield* fs.exists(workspaceRoot), false);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(layerTestFor(layerMetadata, WorkspacePaths.layer), NodeServices.layer),
+      ),
+    ),
 );

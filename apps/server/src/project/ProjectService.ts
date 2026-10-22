@@ -9,11 +9,14 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
@@ -44,7 +47,10 @@ export interface ProjectUpdateInput extends ProjectUpdatePayload {
   readonly projectId: ProjectId;
 }
 
-export interface ProjectBootstrapInput extends ProjectCreateInput {}
+export interface ProjectBootstrapInput extends ProjectCreateInput {
+  /** Historical sessions retain workspace identity after their directory is removed. */
+  readonly allowMissingWorkspaceRoot?: boolean;
+}
 
 export interface ProjectDeleteInput {
   readonly commandId: CommandId;
@@ -150,6 +156,7 @@ export const make = Effect.gen(function* () {
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const path = yield* Path.Path;
   const projectLocks = yield* KeyedLock.make<ProjectId>();
   const workspaceLocks = yield* KeyedLock.make<string>();
 
@@ -325,6 +332,22 @@ export const make = Effect.gen(function* () {
     return Option.isNone(row) ? Option.none() : Option.some(yield* hydrate(row.value));
   });
 
+  const createNormalized = Effect.fn("ProjectService.createNormalized")(function* (
+    input: ProjectCreateInput,
+    workspaceRoot: string,
+  ) {
+    yield* commit({
+      type: "project.create",
+      commandId: input.commandId,
+      projectId: input.projectId,
+      title: input.title,
+      workspaceRoot,
+      ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
+    });
+    yield* projectEnrichment.invalidate([workspaceRoot]);
+    return yield* readCommitted(input.projectId);
+  });
+
   const create: ProjectService["Service"]["create"] = Effect.fn("ProjectService.create")(
     function* (input) {
       const workspaceRoot = yield* normalizeWorkspaceRoot({
@@ -332,16 +355,7 @@ export const make = Effect.gen(function* () {
         workspaceRoot: input.workspaceRoot,
         createIfMissing: input.createWorkspaceRootIfMissing ?? false,
       });
-      yield* commit({
-        type: "project.create",
-        commandId: input.commandId,
-        projectId: input.projectId,
-        title: input.title,
-        workspaceRoot,
-        ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
-      });
-      yield* projectEnrichment.invalidate([workspaceRoot]);
-      return yield* readCommitted(input.projectId);
+      return yield* createNormalized(input, workspaceRoot);
     },
   );
 
@@ -385,9 +399,26 @@ export const make = Effect.gen(function* () {
 
   const bootstrap: ProjectService["Service"]["bootstrap"] = Effect.fn("ProjectService.bootstrap")(
     function* (input) {
-      const existing = yield* getByWorkspaceRoot(input.workspaceRoot);
-      if (Option.isSome(existing)) return { project: existing.value, created: false };
-      return { project: yield* create(input), created: true };
+      if (input.allowMissingWorkspaceRoot !== true) {
+        const existing = yield* getByWorkspaceRoot(input.workspaceRoot);
+        if (Option.isSome(existing)) return { project: existing.value, created: false };
+        return { project: yield* create(input), created: true };
+      }
+      // Discovery preserves the recorded cwd as metadata. Statting it would
+      // discard sessions after worktree cleanup; creating it would resurrect
+      // directories the user deliberately removed.
+      const workspaceRoot = path.resolve(
+        expandHomePath(input.workspaceRoot.trim(), yield* HostProcess.HomeDirectory),
+      );
+      const row = yield* projects
+        .findActiveByWorkspaceRoot(workspaceRoot)
+        .pipe(
+          Effect.mapError(
+            (cause) => new ProjectOperationError({ operation: "list-projects", cause }),
+          ),
+        );
+      if (Option.isSome(row)) return { project: yield* hydrate(row.value), created: false };
+      return { project: yield* createNormalized(input, workspaceRoot), created: true };
     },
   );
 

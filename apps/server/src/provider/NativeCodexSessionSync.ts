@@ -20,7 +20,6 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as FileSystem from "effect/FileSystem";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
-import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
@@ -134,18 +133,16 @@ const make = Effect.gen(function* () {
       );
       if (providerThread !== undefined) return { appThread: context.thread, providerThread };
     }
-    const projectOption = yield* projects.getByWorkspaceRoot(native.cwd);
-    const project = Option.isSome(projectOption)
-      ? projectOption.value
-      : (yield* projects.bootstrap({
-          projectId: yield* ids.allocate.project({ fixtureName: "native-codex" }),
-          commandId: yield* ids.allocate.command({
-            fixtureName: "native-codex",
-            commandName: "project.bootstrap",
-          }),
-          title: path.basename(native.cwd) || native.cwd,
-          workspaceRoot: native.cwd,
-        })).project;
+    const project = (yield* projects.bootstrap({
+      projectId: yield* ids.allocate.project({ fixtureName: "native-codex" }),
+      commandId: yield* ids.allocate.command({
+        fixtureName: "native-codex",
+        commandName: "project.bootstrap",
+      }),
+      title: path.basename(native.cwd) || native.cwd,
+      workspaceRoot: native.cwd,
+      allowMissingWorkspaceRoot: true,
+    })).project;
     const providerThreadId = ids.derive.providerThread({
       driver: CODEX,
       nativeThreadId: native.id,

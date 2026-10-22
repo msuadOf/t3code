@@ -2,6 +2,7 @@ import * as Deferred from "effect/Deferred";
 import * as Queue from "effect/Queue";
 import { makeInMemoryStdio } from "./_internal/stdio.ts";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Effect from "effect/Effect";
@@ -75,6 +76,29 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       yield* Deferred.await(barrier);
       yield* client.raw.notify("barrier");
       assert.deepEqual(JSON.parse(yield* Queue.take(output)), { method: "barrier" });
+    }),
+  );
+
+  it.effect("exposes termination even when no request is pending", () =>
+    Effect.gen(function* () {
+      const first = yield* makeInMemoryStdio();
+      const client = yield* CodexClient.make(first.stdio);
+      if (client.closed === undefined)
+        return yield* Effect.die("Production clients expose transport closure");
+      yield* Queue.end(first.input);
+      const error = yield* client.closed;
+      assert.equal(error._tag, "CodexAppServerInputStreamEndedError");
+      const next = yield* makeInMemoryStdio();
+      const replacement = yield* CodexClient.make(next.stdio);
+      assert.notStrictEqual(replacement, client);
+      const request = replacement.raw.request("probe").pipe(Effect.forkScoped);
+      const pending = yield* request;
+      const outbound = JSON.parse(yield* Queue.take(next.output));
+      yield* Queue.offer(
+        next.input,
+        new TextEncoder().encode(`${JSON.stringify({ id: outbound.id, result: "reconnected" })}\n`),
+      );
+      assert.equal(yield* Fiber.join(pending), "reconnected");
     }),
   );
 

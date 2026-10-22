@@ -32,6 +32,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexReplay from "effect-codex-app-server/replay";
 import type * as CodexSchema from "effect-codex-app-server/schema";
+import * as CodexErrors from "effect-codex-app-server/errors";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Crypto from "effect/Crypto";
@@ -882,6 +883,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
     onExternalTurn?: ProviderAdapter.ProviderAdapterV2OpenSessionInput["onExternalTurn"],
+    closed?: CodexClient.CodexAppServerClient["Service"]["closed"],
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -910,6 +912,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   (client) =>
                     ({
                       ...client,
+                      ...(closed === undefined ? {} : { closed }),
                       request: (method, params) =>
                         onRequest(method, params).pipe(
                           Effect.andThen(client.request(method, params)),
@@ -2351,6 +2354,46 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(rewinds.length, 1);
         assert.deepEqual(rewinds[0]?.retainedNativeTurnIds, ["retained-cli-turn"]);
         assert.equal(rewinds[0]?.providerThread.id, harness.providerThread.id);
+      }),
+    ).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect("fails its event stream when a shared daemon connection closes while idle", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const scenario = "codex-idle-daemon-disconnect";
+        const closed = yield* Deferred.make<CodexErrors.CodexAppServerError>();
+        const transcript = makeCodexReplayTranscript({
+          scenario,
+          entries: codexReplayPreamble({
+            nativeThreadId: "disconnect-thread",
+            nativeTurnId: "unused",
+            prompt: "unused",
+          }).slice(0, 5),
+        });
+        const harness = yield* makeCodexReplayHarness(
+          transcript,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          Deferred.await(closed),
+        );
+        const failure = harness.runtime.events.pipe(
+          Stream.runDrain,
+          Effect.flip,
+          Effect.forkScoped,
+        );
+        const failureFiber = yield* failure;
+        yield* Deferred.succeed(closed, new CodexErrors.CodexAppServerInputStreamEndedError({}));
+        const error = yield* Fiber.join(failureFiber);
+        assert.equal(error._tag, "ProviderAdapterEventStreamError");
+        if (error._tag === "ProviderAdapterEventStreamError")
+          assert.equal(error.providerSessionId, harness.runtime.providerSessionId);
       }),
     ).pipe(
       Effect.provide(

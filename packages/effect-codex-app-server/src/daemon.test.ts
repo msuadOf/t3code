@@ -12,7 +12,7 @@ import * as Client from "./client.ts";
 import * as Daemon from "./daemon.ts";
 
 it.live.each(["unix", "tcp"] as const)(
-  "speaks framed JSON over %s and closes only its client connection",
+  "speaks framed JSON over %s and reconnects after its peer disconnects",
   (transport) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -39,13 +39,13 @@ it.live.each(["unix", "tcp"] as const)(
         if (transport === "unix") server.listen(socketPath, () => resume(Effect.void));
         else server.listen(0, "127.0.0.1", () => resume(Effect.void));
       });
+      const address = server.address();
+      const endpoint =
+        transport === "unix"
+          ? `unix://${socketPath}`
+          : `ws://127.0.0.1:${typeof address === "object" && address !== null ? address.port : 0}`;
       const readOnce = Effect.scoped(
         Effect.gen(function* () {
-          const address = server.address();
-          const endpoint =
-            transport === "unix"
-              ? `unix://${socketPath}`
-              : `ws://127.0.0.1:${typeof address === "object" && address !== null ? address.port : 0}`;
           const client = yield* Client.make(yield* Daemon.makeStdio(endpoint));
           return yield* client.raw.request("echo", { text: "你好\nsecond line" });
         }),
@@ -53,6 +53,17 @@ it.live.each(["unix", "tcp"] as const)(
       assert.deepEqual(yield* readOnce, { echo: { text: "你好\nsecond line" } });
       // A second connection to the same server still works after the first
       // client's scope closes; transport cleanup must never own the daemon.
+      assert.deepEqual(yield* readOnce, { echo: { text: "你好\nsecond line" } });
+      const disconnected = yield* Client.make(yield* Daemon.makeStdio(endpoint));
+      yield* disconnected.raw.request("echo", { connected: true });
+      const peer = [...websocket.clients].at(-1);
+      if (peer === undefined || disconnected.closed === undefined)
+        return yield* Effect.die("Expected a connected daemon client with termination reporting");
+      peer.terminate();
+      const failure = yield* disconnected.closed;
+      assert.equal(failure._tag, "CodexAppServerTransportError");
+      // The listening daemon remains authoritative; recovery opens a new client,
+      // rather than replaying the interrupted client's native request.
       assert.deepEqual(yield* readOnce, { echo: { text: "你好\nsecond line" } });
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
