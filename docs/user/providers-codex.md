@@ -25,6 +25,46 @@ T3 Code can use your installed Codex and its existing login. Run `codex login`
 on the environment's machine to sign in. [Provider setup](./install.md#providers)
 covers installation and custom configuration.
 
+## Share a live session with Codex CLI
+
+Open **Native Codex** from the sidebar to use a session simultaneously in a terminal
+and a phone browser. This mode connects directly to an existing Codex server. Its
+sessions use native Codex IDs and the server's model, login, tools, and permissions.
+
+On the remote machine, start the current Codex daemon and connect your terminal:
+
+```bash
+codex app-server daemon start
+codex --remote unix://
+```
+
+Start this T3 fork on that same machine, open its authenticated web address on your
+phone, and select **Native Codex**. Choose the terminal session or paste its native
+ID. To resume it in another terminal, run `codex --remote unix:// resume <session-id>`.
+Both clients must connect to the same server; sharing a history directory alone
+does not join an already running session.
+
+The default connection uses the daemon socket under `CODEX_HOME` (otherwise
+`~/.codex`). Set `T3CODE_CODEX_NATIVE_ENDPOINT=unix:///absolute/path/to/socket`
+on the T3 server for another socket. `ws://` and `wss://` endpoints are also supported.
+The native connector currently targets macOS and Linux hosts; it does not configure
+upstream WebSocket bearer authentication. Use the local daemon socket on the T3 host.
+This mode requires current Codex support for atomic paginated session attachment;
+there is no older-protocol fallback.
+
+Replies, exposed thinking summaries, tool activity, and pending requests update
+from either client. Approvals answered elsewhere disappear here. Requests without
+a supported control remain available in Codex CLI. Closing the page disconnects
+only that client. After a connection failure, reconnect and reopen the session;
+unconfirmed messages and answers are never automatically resent.
+
+When joining a task mid-reply, Codex may initially supply only subsequent output.
+The completed reply replaces that partial text when the native item finishes.
+
+Native Codex is served by this fork's web server, including access from a phone
+over a private network. It is separate from T3's ordinary threads and does not
+provide T3 checkpoints, provider switching, or native React Native app integration.
+
 ## Use multiple accounts
 
 Add another ChatGPT account in **Settings → Providers**, then select the account

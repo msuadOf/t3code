@@ -216,6 +216,21 @@ function RootRouteView() {
     </CommandPalette>
   );
 
+  if (pathname === "/native-codex") {
+    return (
+      <ToastProvider>
+        <AnchoredToastProvider>
+          <DocumentTitleSync />
+          <BrowserChromeThemeSync key={pathname} />
+          <ContrastAppearanceSync />
+          <EnvironmentThemeSync />
+          <FontAppearanceSync />
+          <Outlet />
+        </AnchoredToastProvider>
+      </ToastProvider>
+    );
+  }
+
   return (
     <ToastProvider>
       <AnchoredToastProvider>

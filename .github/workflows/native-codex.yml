@@ -1,0 +1,33 @@
+name: Native Codex
+
+on:
+  push:
+    branches: [codex/native-codex-companion]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-codex:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          sparse-checkout: |
+            /*
+            !/.repos/
+            !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
+          sparse-checkout-cone-mode: false
+      - uses: ./.github/actions/setup-ci-deps
+      - name: Check the changed files
+        run: vp run check:changed origin/main
+      - name: Install the native protocol test runtime
+        run: npm install --prefix "$RUNNER_TEMP/native-codex" --no-save @openai/codex@0.164.0-alpha.12
+      - name: Verify two clients against a real Codex engine and a local mock model
+        working-directory: apps/server
+        run: |
+          "$RUNNER_TEMP/native-codex/node_modules/.bin/codex" --version
+          node scripts/test-codex-native.ts "$RUNNER_TEMP/native-codex/node_modules/.bin/codex"
