@@ -1,10 +1,11 @@
-name: Fork shared Codex CI
+name: Fork native shared sessions CI
 
 on:
   push:
     branches:
       - main
       - codex/shared-codex-sessions
+      - codex/shared-cli-providers
   pull_request:
     branches:
       - main

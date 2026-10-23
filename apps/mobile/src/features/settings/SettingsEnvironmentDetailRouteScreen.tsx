@@ -25,7 +25,7 @@ import { useRemoteConnections } from "../../state/use-remote-environment-registr
 import { ConnectionEnvironmentRow } from "../connection/ConnectionEnvironmentRow";
 import { EnvironmentRoutesSection } from "./EnvironmentRoutesSection";
 import { OutdatedServerUpdateSection } from "./OutdatedServerUpdateSection";
-import { CodexSharedSessionSettings } from "./components/CodexSharedSessionSettings";
+import { NativeSharedSessionSettings } from "./components/NativeSharedSessionSettings";
 import { SettingsActionRow } from "./components/SettingsActionRow";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SettingsSection } from "./components/SettingsSection";
@@ -368,8 +368,8 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
                             </Text>
                           ) : null}
                         </View>
-                        {provider.driver === "codex" ? (
-                          <CodexSharedSessionSettings
+                        {["codex", "claudeAgent", "opencode"].includes(provider.driver) ? (
+                          <NativeSharedSessionSettings
                             environmentId={environmentId}
                             provider={provider}
                             disabled={busy}

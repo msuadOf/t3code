@@ -17,6 +17,7 @@ import * as UrlParams from "effect/http/UrlParams";
 
 import * as OpenCode2Client from "@t3tools/provider-opencode/server/v2/OpenCode2Client";
 import * as OpenCode2Server from "@t3tools/provider-opencode/server/v2/OpenCode2Server";
+import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
@@ -192,6 +193,7 @@ export const replayServer = (
   transcript: ProviderReplayTranscript,
   options?: {
     readonly external?: boolean;
+    readonly shared?: boolean;
     readonly onPrompt?: (input: unknown) => void;
     readonly replayGate?: ProviderReplayGate;
     readonly borrowers?: { current: number };
@@ -216,6 +218,7 @@ export const replayServer = (
       url: BASE_URL,
       version: transcript.version,
       external: options?.external ?? false,
+      shared: options?.shared ?? false,
     };
     const borrowers = options?.borrowers;
     return OpenCode2Server.OpenCode2Server.of({
@@ -239,6 +242,7 @@ const makeReplayAdapter = (
   transcript: ProviderReplayTranscript,
   options?: {
     readonly external?: boolean;
+    readonly shared?: boolean;
     readonly onPrompt?: (input: unknown) => void;
     readonly replayGate?: ProviderReplayGate;
     readonly borrowers?: { current: number };
@@ -282,6 +286,8 @@ export const openCode2ReplayRuntime = (
   entries: ReadonlyArray<ProviderReplayEntry>,
   options?: {
     readonly external?: boolean;
+    readonly shared?: boolean;
+    readonly onExternalTurn?: ProviderAdapter.ProviderAdapterV2OpenSessionInput["onExternalTurn"];
     readonly onPrompt?: (input: unknown) => void;
     readonly borrowers?: { current: number };
     readonly replayGate?: ProviderReplayGate;
@@ -302,6 +308,7 @@ export const openCode2ReplayRuntime = (
       options,
     ).pipe(Effect.provideService(FileSystem.FileSystem, fileSystem));
     return yield* adapter.openSession({
+      ...(options?.onExternalTurn === undefined ? {} : { onExternalTurn: options.onExternalTurn }),
       threadId: ThreadId.make("thread:opencode2-adapter"),
       providerSessionId: ProviderSessionId.make("provider-session:opencode2-adapter"),
       modelSelection: {

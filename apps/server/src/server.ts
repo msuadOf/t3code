@@ -85,6 +85,7 @@ import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as NativeSessionSync from "./provider/NativeSessionSync.ts";
 import * as NativeCodexSessionSync from "./provider/NativeCodexSessionSync.ts";
 import * as ProjectEnrichmentService from "./project/ProjectEnrichmentService.ts";
 import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
@@ -607,6 +608,16 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     }),
   ).pipe(
     Layer.provide(NativeCodexSessionSync.layer),
+    Layer.provide(RuntimeLayer.layerEventSink),
+    Layer.provide(ProjectionStoreV2.layer),
+    Layer.provide(IdAllocator.layer),
+  ),
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      yield* (yield* NativeSessionSync.NativeSessionSync).start;
+    }),
+  ).pipe(
+    Layer.provide(NativeSessionSync.layer),
     Layer.provide(RuntimeLayer.layerEventSink),
     Layer.provide(ProjectionStoreV2.layer),
     Layer.provide(IdAllocator.layer),

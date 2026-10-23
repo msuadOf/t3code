@@ -43,6 +43,7 @@ import {
 import * as OpenCodeServerOwner from "./OpenCodeServerOwner.ts";
 import * as OpenCode2Client from "./v2/OpenCode2Client.ts";
 import * as OpenCode2Server from "./v2/OpenCode2Server.ts";
+import { makeNativeSessions } from "./v2/nativeSessions.ts";
 import {
   defaultProviderContinuationIdentity,
   type ProviderDriver,
@@ -525,6 +526,7 @@ export const OpenCodeDriver: ProviderDriver<
               ),
             }),
       orchestrationAdapter,
+      nativeSessions: makeNativeSessions(openCode2Server, instanceId),
       textGeneration,
     } satisfies ProviderInstance;
   }),

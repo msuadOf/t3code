@@ -1,3 +1,7 @@
+import { makeClaudeScopedLimitNames } from "../claudeUsageLimits.ts";
+import { makeNativeClaudeAdapter } from "../NativeClaudeAdapter.ts";
+import { NativeClaudeClient } from "../NativeClaudeClient.ts";
+import { NativeClaudeSessions } from "../NativeClaudeSessions.ts";
 import { ClaudeSettings, ProviderDriverKind } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Duration from "effect/Duration";
@@ -17,13 +21,9 @@ import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as ServerConfig from "../../config.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
-import {
-  createClaudeAdapterV2,
-  type ClaudeAdapterV2DriverEnv,
-} from "../../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
+import { type ClaudeAdapterV2DriverEnv } from "../../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { claudeUsageReader } from "./claudeUsage.ts";
-import { makeClaudeScopedLimitNames } from "../claudeUsageLimits.ts";
 import * as ClaudeResetCredits from "../claudeResetCredits.ts";
 import * as ResetCreditCoordinator from "../resetCreditCoordinator.ts";
 import {
@@ -170,23 +170,18 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     });
 
     const scopedLimitNames = yield* makeClaudeScopedLimitNames;
-    const orchestrationAdapter = yield* createClaudeAdapterV2(
-      {
-        instanceId,
-        displayName,
-        accentColor,
-        environment,
-        enabled,
-        config,
-      },
-      { scopedLimitNames, onUsageLimits: (update) => snapshot.applyUsageLimits(update) },
-    ).pipe(
+    const orchestrationAdapter = yield* makeNativeClaudeAdapter({
+      instanceId,
+      configDirectory: configDir,
+      binaryPath: effectiveConfig.binaryPath,
+      environment: { ...processEnv, CLAUDE_CONFIG_DIR: configDir },
+    }).pipe(
       Effect.mapError(
         (cause) =>
           new ProviderDriverError({
             driver: DRIVER_KIND,
             instanceId,
-            detail: "Failed to build Claude orchestration adapter.",
+            detail: "Failed to build Claude native shared-session adapter.",
             cause,
           }),
       ),
@@ -384,6 +379,25 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       ),
     );
 
+    const nativeClaudeSessions = new NativeClaudeSessions(
+      configDir,
+      new NativeClaudeClient({
+        configDirectory: configDir,
+        platform: yield* HostProcess.Platform,
+        binaryPath: effectiveConfig.binaryPath || "claude",
+        environment: { ...processEnv, CLAUDE_CONFIG_DIR: configDir },
+        cwd: stateDir,
+      }),
+    );
+    const nativeSessionError = (cause: unknown) =>
+      new ProviderDriverError({
+        driver: DRIVER_KIND,
+        instanceId,
+        detail:
+          "Claude shared-session discovery failed. Check native CLI availability and the configured Claude directory.",
+        cause,
+      });
+
     return {
       instanceId,
       driverKind: DRIVER_KIND,
@@ -405,6 +419,17 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           Effect.provideService(Path.Path, path),
         ),
       orchestrationAdapter,
+      nativeSessions: {
+        list: Effect.tryPromise({
+          try: () => nativeClaudeSessions.list(),
+          catch: nativeSessionError,
+        }),
+        history: (sessionId) =>
+          Effect.tryPromise({
+            try: () => nativeClaudeSessions.history(sessionId),
+            catch: nativeSessionError,
+          }),
+      },
       textGeneration,
       consumeResetCredit,
     } satisfies ProviderInstance;

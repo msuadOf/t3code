@@ -21,7 +21,7 @@ import type * as CodexSchema from "effect-codex-app-server/schema";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import * as ExternalCodexRuns from "../orchestration-v2/ExternalCodexRuns.ts";
+import * as ExternalNativeRuns from "../orchestration-v2/ExternalNativeRuns.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -238,7 +238,7 @@ it.live(
               return { project, created: true };
             }),
         }),
-        Layer.mock(ExternalCodexRuns.ExternalCodexRuns)({ reconcileSnapshot: () => Effect.void }),
+        Layer.mock(ExternalNativeRuns.ExternalNativeRuns)({ reconcileSnapshot: () => Effect.void }),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
           detach: (input) =>
             Effect.sync(() => {

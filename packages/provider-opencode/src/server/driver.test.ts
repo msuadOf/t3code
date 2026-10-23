@@ -1,5 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
+import { Service } from "@opencode/client/effect/service";
+import { vi } from "vite-plus/test";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
@@ -69,6 +71,14 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
   it.effect("never starts a 1.x server for an OpenCode 2 instance", () =>
     Effect.gen(function* () {
       serverStarts.length = 0;
+      using ensure = vi.spyOn(Service, "ensure").mockReturnValue(
+        Effect.fail(
+          new OpenCodeRuntime.OpenCodeRuntimeError({
+            operation: "service.ensure",
+            detail: "native shared service unavailable",
+          }),
+        ),
+      );
       const instance = yield* create({}, noHttp);
       yield* Effect.flip(
         instance.textGeneration.generateThreadTitle({
@@ -77,7 +87,12 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
           modelSelection: { instanceId: instance.instanceId, model: "opencode/big-pickle" },
         }),
       );
-      assert.deepStrictEqual(serverStarts, ["start"]);
+      assert.deepStrictEqual(serverStarts, []);
+      assert.deepStrictEqual(ensure.mock.calls[0]?.[0]?.command, [
+        "opencode",
+        "serve",
+        "--service",
+      ]);
     }).pipe(Effect.scoped),
   );
 

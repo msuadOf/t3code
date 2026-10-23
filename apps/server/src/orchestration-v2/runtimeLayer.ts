@@ -43,7 +43,7 @@ import * as ProviderSwitchService from "./ProviderSwitchService.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
 import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
-import * as ExternalCodexRuns from "./ExternalCodexRuns.ts";
+import * as ExternalNativeRuns from "./ExternalNativeRuns.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
@@ -145,7 +145,7 @@ const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
   ),
 );
 
-const layerExternalCodexRunsProvided = ExternalCodexRuns.layer.pipe(
+const layerExternalNativeRunsProvided = ExternalNativeRuns.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
       ProjectionStore.layer,
@@ -159,7 +159,7 @@ const layerExternalCodexRunsProvided = ExternalCodexRuns.layer.pipe(
 const layerProviderSessionManagerProvided = ProviderSessionManager.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
-      layerExternalCodexRunsProvided,
+      layerExternalNativeRunsProvided,
       layerCommandOutputHubProvided,
       layerProviderAdapterRegistryProvided,
       layerEventSinkProvided,
@@ -360,7 +360,7 @@ const layerMcpAppRequestsProvided = McpAppRequests.layer.pipe(
 );
 
 export const layer = Layer.mergeAll(
-  layerExternalCodexRunsProvided,
+  layerExternalNativeRunsProvided,
   layerCommandOutputHubProvided,
   layerOrchestratorProvided,
   layerMcpAppRequestsProvided,

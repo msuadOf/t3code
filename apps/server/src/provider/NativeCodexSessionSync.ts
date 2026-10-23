@@ -26,7 +26,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import type * as CodexSchema from "effect-codex-app-server/schema";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
-import * as ExternalCodexRuns from "../orchestration-v2/ExternalCodexRuns.ts";
+import * as ExternalNativeRuns from "../orchestration-v2/ExternalNativeRuns.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -95,7 +95,7 @@ const make = Effect.gen(function* () {
   const store = yield* ProjectionStore.ProjectionStoreV2;
   const sink = yield* EventSink.EventSinkV2;
   const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
-  const externalRuns = yield* ExternalCodexRuns.ExternalCodexRuns;
+  const externalRuns = yield* ExternalNativeRuns.ExternalNativeRuns;
   const ids = yield* IdAllocator.IdAllocatorV2;
   const path = yield* Path.Path;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -376,6 +376,8 @@ const make = Effect.gen(function* () {
                   }),
                 );
                 yield* externalRuns.reconcileSnapshot({
+                  driver: CODEX,
+                  providerInstanceId: instance.instanceId,
                   threadId: target.appThread.id,
                   nativeThreadId: native.id,
                   idle: native.status.type === "idle" || native.status.type === "notLoaded",

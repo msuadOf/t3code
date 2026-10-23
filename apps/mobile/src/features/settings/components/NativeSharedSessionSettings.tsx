@@ -22,7 +22,7 @@ function configRecord(config: unknown): Record<string, unknown> {
     : {};
 }
 
-export function CodexSharedSessionSettings({
+export function NativeSharedSessionSettings({
   environmentId,
   provider,
   disabled,
@@ -34,7 +34,12 @@ export function CodexSharedSessionSettings({
   const snapshot = useAtomValue(serverEnvironment.configValueAtom(environmentId));
   const instance = snapshot?.settings.providerInstances[provider.instanceId];
   const saved = configRecord(instance?.config);
-  const endpoint = typeof saved.daemonEndpoint === "string" ? saved.daemonEndpoint : "";
+  const isCodex = provider.driver === "codex";
+  const isClaude = provider.driver === "claudeAgent";
+  const endpointKey = isCodex ? "daemonEndpoint" : "serverUrl";
+  const savedEndpoint = saved[endpointKey];
+  const endpoint = typeof savedEndpoint === "string" ? savedEndpoint : "";
+  const name = provider.displayName ?? (isCodex ? "Codex" : isClaude ? "Claude" : "OpenCode");
   const root = typeof saved.sharedSessionRoot === "string" ? saved.sharedSessionRoot : "";
   const [draft, setDraft] = useState<{ endpoint: string; root: string } | null>(null);
   const [saving, setSaving] = useState(false);
@@ -43,7 +48,7 @@ export function CodexSharedSessionSettings({
   const canManage = useEnvironmentScope(environmentId, AuthProvidersManageScope);
   const updateSettings = useAtomCommand(serverEnvironment.mutateProviderInstance);
   const value = draft ?? { endpoint, root };
-  const needsCliLogin = saved.setupMode === "managed";
+  const needsCliLogin = isCodex && saved.setupMode === "managed";
   const dirty = needsCliLogin || value.endpoint.trim() !== endpoint || value.root.trim() !== root;
   const unavailable = disabled || !canManage || saving;
 
@@ -70,10 +75,8 @@ export function CodexSharedSessionSettings({
             ...current,
             config: {
               ...configRecord(current.config),
-              setupMode: "existing",
-              shadowHomePath: "",
-              launchArgs: "",
-              daemonEndpoint: value.endpoint.trim(),
+              ...(isCodex ? { setupMode: "existing", shadowHomePath: "", launchArgs: "" } : {}),
+              ...(!isClaude ? { [endpointKey]: value.endpoint.trim() } : {}),
               sharedSessionRoot: value.root.trim(),
             },
           },
@@ -84,7 +87,7 @@ export function CodexSharedSessionSettings({
     setSaving(false);
     if (AsyncResult.isFailure(result)) {
       const cause = squashAtomCommandFailure(result);
-      setError(cause instanceof Error ? cause.message : "Could not save Codex settings.");
+      setError(cause instanceof Error ? cause.message : `Could not save ${name} settings.`);
     } else {
       setDraft(null);
     }
@@ -94,20 +97,26 @@ export function CodexSharedSessionSettings({
     <View>
       <View className="gap-3 px-4 pb-4">
         <Text className="text-sm text-foreground-muted">
-          Connect CLI clients to the same Codex server to share live sessions.
+          {isClaude
+            ? "Live control uses Claude background sessions. Existing foreground sessions must be moved to the background first."
+            : `Connect CLI clients to the same ${name} server to share live sessions.`}
         </Text>
-        <Text className="text-sm text-foreground">Shared Codex server</Text>
-        <TextInput
-          accessibilityLabel="Shared Codex server"
-          className="rounded-lg border border-border-subtle px-3 py-2 text-base text-foreground"
-          placeholderTextColorClassName="accent-foreground-muted"
-          placeholder="Default daemon for CODEX_HOME"
-          value={value.endpoint}
-          editable={!unavailable}
-          autoCapitalize="none"
-          autoCorrect={false}
-          onChangeText={(endpoint) => setDraft({ ...value, endpoint })}
-        />
+        {!isClaude ? (
+          <>
+            <Text className="text-sm text-foreground">Shared {name} server</Text>
+            <TextInput
+              accessibilityLabel={`Shared ${name} server`}
+              className="rounded-lg border border-border-subtle px-3 py-2 text-base text-foreground"
+              placeholderTextColorClassName="accent-foreground-muted"
+              placeholder={isCodex ? "Default daemon for CODEX_HOME" : "Native OpenCode service"}
+              value={value.endpoint}
+              editable={!unavailable}
+              autoCapitalize="none"
+              autoCorrect={false}
+              onChangeText={(endpoint) => setDraft({ ...value, endpoint })}
+            />
+          </>
+        ) : null}
         <Text className="text-sm text-foreground">Shared session directory</Text>
         <TextInput
           accessibilityLabel="Shared session directory"
@@ -131,7 +140,7 @@ export function CodexSharedSessionSettings({
       </View>
       <SettingsActionRow
         icon="checkmark"
-        label={needsCliLogin ? "Use CLI login" : "Save Codex sharing settings"}
+        label={needsCliLogin ? "Use CLI login" : `Save ${name} sharing settings`}
         disabled={unavailable || !dirty}
         loading={saving}
         onPress={() => void save()}

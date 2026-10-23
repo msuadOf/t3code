@@ -1,7 +1,8 @@
 import {
   CommandId,
   type ThreadId,
-  ProviderDriverKind,
+  type ProviderInstanceId,
+  type ProviderDriverKind,
   MessageId,
   RunId,
   type OrchestrationV2DomainEvent,
@@ -22,10 +23,12 @@ import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 
-export class ExternalCodexRuns extends Context.Service<
-  ExternalCodexRuns,
+export class ExternalNativeRuns extends Context.Service<
+  ExternalNativeRuns,
   {
     readonly reconcileSnapshot: (input: {
+      readonly driver: ProviderDriverKind;
+      readonly providerInstanceId?: ProviderInstanceId;
       readonly threadId: ThreadId;
       readonly nativeThreadId: string;
       readonly idle: boolean;
@@ -40,7 +43,7 @@ export class ExternalCodexRuns extends Context.Service<
       ProviderAdapter.ProviderAdapterProtocolError
     >;
   }
->()("t3/orchestration-v2/ExternalCodexRuns") {}
+>()("t3/orchestration-v2/ExternalNativeRuns") {}
 
 const make = Effect.gen(function* () {
   const store = yield* ProjectionStore.ProjectionStoreV2;
@@ -51,7 +54,7 @@ const make = Effect.gen(function* () {
   const startupBoundary = yield* DateTime.now;
   const observing = new WeakMap<ProviderAdapter.ProviderAdapterV2SessionRuntime, Set<string>>();
 
-  const adopt = Effect.fn("ExternalCodexRuns.adopt")(function* (
+  const adopt = Effect.fn("ExternalNativeRuns.adopt")(function* (
     input: ProviderAdapter.ProviderAdapterV2ExternalTurnInput & {
       readonly session: ProviderAdapter.ProviderAdapterV2SessionRuntime;
     },
@@ -63,6 +66,7 @@ const make = Effect.gen(function* () {
         const providerThread = projection.providerThreads.find(
           (thread) =>
             thread.nativeThreadRef?.nativeId === input.nativeThreadId &&
+            thread.driver === input.session.driver &&
             thread.providerInstanceId === input.session.instanceId,
         );
         if (providerThread === undefined) return undefined;
@@ -72,7 +76,7 @@ const make = Effect.gen(function* () {
         });
         const existingTurn = projection.providerTurns.find((turn) => turn.id === providerTurnId);
         const nativeRunId = RunId.make(
-          `run:codex-external:${encodeURIComponent(providerThread.id)}:${encodeURIComponent(input.nativeTurnId)}`,
+          `run:${input.session.driver}-external:${encodeURIComponent(providerThread.id)}:${encodeURIComponent(input.nativeTurnId)}`,
         );
         const previousRun = projection.runs.find(
           (run) =>
@@ -99,7 +103,7 @@ const make = Effect.gen(function* () {
           previousRun?.activeAttemptId ?? ids.derive.runAttempt({ runId, attemptOrdinal: 1 });
         const messageId =
           previousRun?.userMessageId ??
-          MessageId.make(`message:codex-external:${encodeURIComponent(runId)}`);
+          MessageId.make(`message:${input.session.driver}-external:${encodeURIComponent(runId)}`);
         const run: OrchestrationV2Run = {
           ...(previousRun ?? {
             id: runId,
@@ -320,7 +324,7 @@ const make = Effect.gen(function* () {
             .observeExternalRun({
               onObservationClosed: release,
               commandId: CommandId.make(
-                `command:codex-external:${encodeURIComponent(input.nativeTurnId)}`,
+                `command:${input.session.driver}-external:${encodeURIComponent(input.nativeTurnId)}`,
               ),
               appThread: projection.thread,
               providerSessionId: input.session.providerSessionId,
@@ -342,17 +346,25 @@ const make = Effect.gen(function* () {
       }),
     );
   });
-  const reconcileSnapshot = Effect.fn("ExternalCodexRuns.reconcileSnapshot")(function* (
-    input: Parameters<ExternalCodexRuns["Service"]["reconcileSnapshot"]>[0],
+  const reconcileSnapshot = Effect.fn("ExternalNativeRuns.reconcileSnapshot")(function* (
+    input: Parameters<ExternalNativeRuns["Service"]["reconcileSnapshot"]>[0],
   ) {
-    if (!input.idle || input.turns.some((turn) => turn.status === "inProgress")) return;
+    if (
+      !input.idle ||
+      input.turns.some((turn) => turn.status === "inProgress" || turn.status === "running")
+    )
+      return;
+    const driver = input.driver;
     return yield* locks.withLock(
       String(input.threadId),
       Effect.gen(function* () {
         const projection = yield* store.getThreadProjection(input.threadId);
         const providerThread = projection.providerThreads.find(
           (thread) =>
-            thread.driver === "codex" && thread.nativeThreadRef?.nativeId === input.nativeThreadId,
+            thread.driver === driver &&
+            thread.nativeThreadRef?.nativeId === input.nativeThreadId &&
+            (input.providerInstanceId === undefined ||
+              thread.providerInstanceId === input.providerInstanceId),
         );
         if (providerThread === undefined) return;
         const now = yield* DateTime.now;
@@ -377,8 +389,7 @@ const make = Effect.gen(function* () {
           const failure = makeProviderFailure({
             code: "manual_retry_required",
             retryable: false,
-            message:
-              "T3 restarted before Codex acknowledged this input. The shared daemon is idle. Review the conversation and retry manually if needed; T3 has not replayed the input.",
+            message: `T3 restarted before ${driver === "codex" ? "Codex" : driver === "claudeAgent" ? "Claude" : driver === "opencode" ? "OpenCode" : driver} acknowledged this input. The shared ${driver === "codex" ? "daemon" : "runtime"} is idle. Review the conversation and retry manually if needed; T3 has not replayed the input.`,
           });
           const payloads = [
             { type: "run.updated", payload: { ...run, status: "interrupted", completedAt: now } },
@@ -444,14 +455,14 @@ const make = Effect.gen(function* () {
       }),
     );
   });
-  return ExternalCodexRuns.of({
+  return ExternalNativeRuns.of({
     reconcileSnapshot: (input) =>
       reconcileSnapshot(input).pipe(
         Effect.mapError(
           (cause) =>
             new ProviderAdapter.ProviderAdapterProtocolError({
-              driver: ProviderDriverKind.make("codex"),
-              detail: "Could not reconcile an unacknowledged Codex input",
+              driver: input.driver,
+              detail: "Could not reconcile an unacknowledged native input",
               cause,
             }),
         ),
@@ -470,4 +481,4 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(ExternalCodexRuns, make);
+export const layer = Layer.effect(ExternalNativeRuns, make);

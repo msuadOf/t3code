@@ -1,3 +1,5 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- A real native HTTP service verifies SDK discovery and ownership.
+import * as NodeHttp from "node:http";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -6,7 +8,6 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
-import * as Redacted from "effect/Redacted";
 import * as TestClock from "effect/testing/TestClock";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpClient from "effect/http/HttpClient";
@@ -148,72 +149,103 @@ describe("OpenCode2Server error details", () => {
   );
 });
 
-describe("OpenCode2Server passwords", () => {
-  it("hands the spawned server only the T3 password", () => {
-    const password = Redacted.make("t3-generated");
-    const environment = OpenCode2Server.serverEnvironment(
-      { PATH: "/bin", OPENCODE_SERVER_PASSWORD: "ambient", OPENCODE_PASSWORD: "ambient" },
-      password,
-    );
-    assert.deepStrictEqual(environment, { PATH: "/bin", OPENCODE_PASSWORD: "t3-generated" });
-  });
-});
+describe("OpenCode2Server shared service", () => {
+  it.effect("resolves the same registration file as the CLI for overridden homes", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      assert.equal(
+        OpenCode2Server.serviceRegistrationFile(
+          path,
+          { XDG_STATE_HOME: "/state", HOME: "/other" },
+          "/fallback",
+        ),
+        "/state/opencode/service.json",
+      );
+      assert.equal(
+        OpenCode2Server.serviceRegistrationFile(path, { HOME: "/home/user" }, "/fallback"),
+        "/home/user/.local/state/opencode/service.json",
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
-const FAKE_SERVER = `import { createServer } from "node:http";
-const expected = "Basic " + Buffer.from("opencode:" + process.env.OPENCODE_PASSWORD).toString("base64");
-const server = createServer((request, response) => {
-  if (request.headers.authorization !== expected) {
-    response.writeHead(401, { "content-type": "application/json", "www-authenticate": "Basic" });
-    response.end(${JSON.stringify(UNAUTHORIZED_BODY)});
-    return;
-  }
-  response.writeHead(200, { "content-type": "application/json" });
-  response.end(JSON.stringify({ version: "2.0.18", pid: process.pid, urls: [], paths: { tmp: "/tmp" } }));
-});
-server.listen(0, "127.0.0.1", () => {
-  process.stdout.write("server listening on http://127.0.0.1:" + server.address().port + "\\n");
-  process.stdout.write("server password not-the-t3-password\\n");
-});
-`;
-
-describe("OpenCode2Server spawned server", () => {
-  it.live("is ready once /api/info accepts the generated password", () =>
+  it.live("reuses the CLI service and leaves it running after the T3 scope closes", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const platform = yield* HostProcess.Platform;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-opencode2-fake-" });
-      const isWindows = platform === "win32";
-      const binaryPath = path.join(directory, isWindows ? "opencode.cmd" : "opencode");
-      const scriptPath = path.join(directory, "opencode.mjs");
-      yield* fs.writeFileString(scriptPath, FAKE_SERVER);
-      yield* fs.writeFileString(
-        binaryPath,
-        isWindows
-          ? `@echo off\r\n"${yield* HostProcess.ExecutablePath}" "${scriptPath}" %*\r\n`
-          : `#!/bin/sh\nexec "${yield* HostProcess.ExecutablePath}" "${scriptPath}" "$@"\n`,
-      );
-      if (!isWindows) yield* fs.chmod(binaryPath, 0o755);
-
-      const server = yield* OpenCode2Server.make({
-        binaryPath,
-        serverUrl: "",
-        serverPassword: "",
-        directory,
-        environment: { ...(yield* HostProcess.Environment), OPENCODE_SERVER_PASSWORD: "ambient" },
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-opencode-shared-" });
+      const password = "private-native-service-password";
+      const expected = "Basic " + Buffer.from("opencode:" + password).toString("base64");
+      const http = NodeHttp.createServer((request, response) => {
+        if (request.headers.authorization !== expected) {
+          response.writeHead(401, { "content-type": "application/json" });
+          response.end(UNAUTHORIZED_BODY);
+          return;
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            version: "2.0.28",
+            pid: process.pid,
+            urls: [],
+            paths: { tmp: directory },
+          }),
+        );
       });
-      const first = yield* server.withConnection((connection) => Effect.succeed(connection));
-      const second = yield* server.withConnection((connection) => Effect.succeed(connection));
-      assert.strictEqual(first.version, "2.0.18");
-      assert.strictEqual(first.external, false);
-      assert.strictEqual(second.client, first.client);
+      yield* Effect.acquireRelease(
+        Effect.promise(() => new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve))),
+        () =>
+          Effect.promise(
+            () =>
+              new Promise<void>((resolve, reject) =>
+                http.close((error) => (error ? reject(error) : resolve())),
+              ),
+          ),
+      );
+      const address = http.address();
+      assert.isNotNull(address);
+      assert.notEqual(typeof address, "string");
+      if (address === null || typeof address === "string") return;
+      const url = `http://127.0.0.1:${address.port}`;
+      const environment = { ...(yield* HostProcess.Environment), XDG_STATE_HOME: directory };
+      const registration = OpenCode2Server.serviceRegistrationFile(path, environment, directory);
+      yield* fs.makeDirectory(path.dirname(registration), { recursive: true });
+      yield* fs.writeFileString(
+        registration,
+        JSON.stringify({ id: "native-test", version: "2.0.28", url, pid: process.pid, password }),
+        { mode: 0o600 },
+      );
+      yield* Effect.gen(function* () {
+        const server = yield* OpenCode2Server.make({
+          // Any attempt to spawn a private runtime would fail this test.
+          binaryPath: "/does-not-exist/opencode",
+          serverUrl: "",
+          serverPassword: "",
+          directory,
+          environment,
+        });
+        const first = yield* server.withConnection((connection) => Effect.succeed(connection));
+        const second = yield* server.withConnection((connection) => Effect.succeed(connection));
+        assert.equal(first.version, "2.0.28");
+        assert.equal(first.shared, true);
+        assert.equal(first.external, false);
+        assert.strictEqual(first.client, second.client);
+      }).pipe(Effect.scoped);
+      assert.isTrue(http.listening);
+      const response = yield* HttpClient.get(`${url}/api/info`, {
+        headers: { authorization: expected },
+      });
+      assert.equal(response.status, 200);
+      assert.equal(
+        yield* fs.readFileString(registration),
+        JSON.stringify({ id: "native-test", version: "2.0.28", url, pid: process.pid, password }),
+      );
     }).pipe(
       Effect.scoped,
       Effect.provide(
-        Layer.mergeAll(
-          OpenCode2Client.layer,
-          OpenCodeRuntime.layer.pipe(Layer.provide(OpenCodeServerLedger.layerTest)),
-        ).pipe(Layer.provideMerge(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer))),
+        OpenCode2Client.layer.pipe(
+          Layer.provideMerge(FetchHttpClient.layer),
+          Layer.provideMerge(NodeServices.layer),
+        ),
       ),
     ),
   );

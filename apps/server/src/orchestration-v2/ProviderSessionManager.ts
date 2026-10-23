@@ -1,6 +1,6 @@
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
-import * as ExternalCodexRuns from "./ExternalCodexRuns.ts";
+import * as ExternalNativeRuns from "./ExternalNativeRuns.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   isOrchestrationV2WorkActive,
@@ -330,7 +330,7 @@ export const layerWithOptions = (
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
       const providerEventIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
-      const externalCodexRuns = yield* Effect.serviceOption(ExternalCodexRuns.ExternalCodexRuns);
+      const externalNativeRuns = yield* Effect.serviceOption(ExternalNativeRuns.ExternalNativeRuns);
       const agentScope = yield* AgentScope;
       const agentAccessSettings = Effect.fn("ProviderSessionManagerV2.agentAccessSettings")(
         function* (threadId: ThreadId) {
@@ -2191,28 +2191,28 @@ export const layerWithOptions = (
               yield* agentScope.clear(input.threadId);
               const runtime = yield* adapter
                 .openSession({
-                  ...(Option.isNone(externalCodexRuns)
+                  ...(Option.isNone(externalNativeRuns)
                     ? {}
                     : {
-                        onExternalTurn: Effect.fn("ProviderSessionManager.attachExternalCodexTurn")(
-                          function* (turn: ProviderAdapter.ProviderAdapterV2ExternalTurnInput) {
-                            const entry = (yield* Ref.get(sessions)).get(key);
-                            if (entry === undefined) return undefined;
-                            const adopted = yield* externalCodexRuns.value.adopt({
-                              ...turn,
-                              session: entry.exposedRuntime,
-                            });
-                            if (adopted !== undefined)
-                              yield* observeActivity(
+                        onExternalTurn: Effect.fn(
+                          "ProviderSessionManager.attachExternalNativeTurn",
+                        )(function* (turn: ProviderAdapter.ProviderAdapterV2ExternalTurnInput) {
+                          const entry = (yield* Ref.get(sessions)).get(key);
+                          if (entry === undefined) return undefined;
+                          const adopted = yield* externalNativeRuns.value.adopt({
+                            ...turn,
+                            session: entry.exposedRuntime,
+                          });
+                          if (adopted !== undefined)
+                            yield* observeActivity(
+                              input.providerSessionId,
+                              markBusy(
                                 input.providerSessionId,
-                                markBusy(
-                                  input.providerSessionId,
-                                  busyTurnKey(adopted.providerThread.id, adopted.runOrdinal),
-                                ),
-                              );
-                            return adopted;
-                          },
-                        ),
+                                busyTurnKey(adopted.providerThread.id, adopted.runOrdinal),
+                              ),
+                            );
+                          return adopted;
+                        }),
                       }),
                   threadId: input.threadId,
                   providerSessionId: input.providerSessionId,

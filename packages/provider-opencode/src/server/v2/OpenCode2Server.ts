@@ -2,17 +2,18 @@
  * A 2.x server serves every location from one process, so an instance shares
  * one server across all of its threads and directories.
  */
+import * as Path from "effect/Path";
+import * as FileSystem from "effect/FileSystem";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { Service } from "@opencode/client/effect/service";
 import type { OpenCodeClient } from "@opencode/client/effect";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
-import * as Base64Url from "effect/encoding/Base64Url";
 import * as P from "effect/Predicate";
 import * as Redacted from "effect/Redacted";
 import * as HttpClientError from "effect/http/HttpClientError";
 
 import * as OpenCodeRuntime from "../OpenCodeRuntime.ts";
-import * as OpenCodeServerOwner from "../OpenCodeServerOwner.ts";
 import * as OpenCode2Client from "./OpenCode2Client.ts";
 
 const INFO_TIMEOUT = "5 seconds";
@@ -21,6 +22,8 @@ export interface OpenCode2Connection extends OpenCode2Client.OpenCode2Api {
   readonly url: string;
   readonly version: string;
   readonly external: boolean;
+  /** Session execution belongs to the native service, never to this T3 client. */
+  readonly shared?: boolean;
 }
 
 export class OpenCode2Server extends Context.Service<
@@ -31,29 +34,6 @@ export class OpenCode2Server extends Context.Service<
     ) => Effect.Effect<A, E | OpenCodeRuntime.OpenCodeRuntimeError, R>;
   }
 >()("@t3tools/provider-opencode/server/v2/OpenCode2Server") {}
-
-/**
- * OpenCode 2 always requires one and prints a generated one to stdout
- * otherwise, so T3 supplies its own and keeps it in memory.
- */
-const generatePassword = Effect.gen(function* () {
-  const crypto = yield* Crypto.Crypto;
-  const bytes = yield* crypto.randomBytes(32).pipe(Effect.orDie);
-  return Redacted.make(Base64Url.encode(bytes), { label: "OPENCODE_PASSWORD" });
-});
-
-/**
- * `OPENCODE_PASSWORD` wins over `OPENCODE_SERVER_PASSWORD` in OpenCode 2, so
- * the inherited 1.x variable is dropped to keep the T3 password the only one in
- * play.
- */
-export const serverEnvironment = (
-  environment: NodeJS.ProcessEnv,
-  password: Redacted.Redacted,
-): NodeJS.ProcessEnv => {
-  const { OPENCODE_SERVER_PASSWORD: _inherited, ...rest } = environment;
-  return { ...rest, OPENCODE_PASSWORD: Redacted.value(password) };
-};
 
 /** The client wraps HTTP failures in a `ClientError`; this unwraps either shape. */
 const httpFailureOf = (cause: unknown): HttpClientError.HttpClientError | undefined => {
@@ -142,7 +122,7 @@ export const make = Effect.fn("OpenCode2Server.make")(function* (input: {
   ) {
     const api = yield* opencode.connect({ baseUrl: url, password });
     const version = yield* verifyServer(api.client);
-    return { ...api, url, version, external } satisfies OpenCode2Connection;
+    return { ...api, url, version, external, shared: true } satisfies OpenCode2Connection;
   });
   let latest: OpenCode2Connection | undefined;
   const remember = (connection: OpenCode2Connection) =>
@@ -164,19 +144,53 @@ export const make = Effect.fn("OpenCode2Server.make")(function* (input: {
     });
   }
 
-  const password = yield* generatePassword;
-  const owner = yield* OpenCodeServerOwner.make({
-    binaryPath: input.binaryPath,
-    directory: input.directory,
-    environment: serverEnvironment(input.environment, password),
-    verify: (url) => connectTo(url, password, false).pipe(Effect.flatMap(remember)),
-  });
-  return OpenCode2Server.of({
-    withConnection: (use) =>
-      owner.withServer((server) =>
-        latest?.url === server.url
-          ? use(latest)
-          : Effect.die(new Error("OpenCode 2 server was lent before verification.")),
+  const path = yield* Path.Path;
+  const home = yield* HostProcess.HomeDirectory;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const options = {
+    file: serviceRegistrationFile(path, input.environment, home),
+    command: [input.binaryPath, "serve", "--service"],
+    env: Object.fromEntries(
+      Object.entries(input.environment).filter(
+        (entry): entry is [string, string] => entry[1] !== undefined,
       ),
+    ),
+  };
+  let previousPassword: string | undefined;
+  return OpenCode2Server.of({
+    withConnection: Effect.fn("OpenCode2Server.withConnection")(function* (use) {
+      // Rediscover on every acquisition: native service restarts can rotate
+      // the URL and credentials. Never stop the service on client teardown.
+      const endpoint = yield* Service.ensure(options).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.mapError(
+          (cause) =>
+            new OpenCodeRuntime.OpenCodeRuntimeError({
+              operation: "service.ensure",
+              detail: "Could not connect to the shared OpenCode service.",
+              cause,
+            }),
+        ),
+      );
+      const password = endpoint.auth?.password ?? "";
+      if (latest === undefined || latest.url !== endpoint.url || previousPassword !== password) {
+        latest = yield* connectTo(endpoint.url, Redacted.make(password), false);
+        previousPassword = password;
+      }
+      return yield* use(latest);
+    }),
   });
 });
+
+/** Match native CLI discovery, including per-instance XDG/HOME overrides. */
+export const serviceRegistrationFile = (
+  path: Path.Path,
+  environment: NodeJS.ProcessEnv,
+  home: string,
+): string =>
+  path.join(
+    environment.XDG_STATE_HOME ??
+      path.join(environment.HOME ?? environment.USERPROFILE ?? home, ".local", "state"),
+    "opencode",
+    "service.json",
+  );

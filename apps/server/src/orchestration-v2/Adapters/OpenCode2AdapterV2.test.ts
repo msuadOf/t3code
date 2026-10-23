@@ -411,6 +411,114 @@ const history = {
 };
 
 it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
+  it.effect(
+    "attaches passively without cancelling requests, rewriting policy or moving the CLI session",
+    () =>
+      Effect.gen(function* () {
+        const runtime = yield* openCode2ReplayRuntime(
+          [
+            ...opening,
+            out("session.get", { sessionID: SESSION }),
+            replyData("session.get", sessionInfo({ location: { directory: "/original/cli" } })),
+            out("session.active"),
+            replyData("session.active", {}),
+          ],
+          { shared: true, external: true },
+        );
+        const thread = yield* runtime.resumeThread({
+          providerThread: providerThread(yield* DateTime.now),
+          threadId,
+          modelSelection: bigPickle,
+          runtimePolicy: policy("approval-required"),
+        });
+        assert.equal(thread.nativeThreadRef?.nativeId, SESSION);
+        // Any permission.cancel, form.cancel, move, update or interrupt would be an
+        // unexpected native request, including when this runtime scope closes.
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "adopts a CLI-started execution through the canonical external turn hook without sending another prompt",
+    () =>
+      Effect.gen(function* () {
+        const nativePrompt = {
+          id: "msg_cli_prompt",
+          type: "user",
+          text: "From CLI",
+          time: { created: 1790656601410 },
+        };
+        let adopted: ProviderAdapter.ProviderAdapterV2ExternalTurnInput | undefined;
+        const runtime = yield* openCode2ReplayRuntime(
+          [
+            ...opening,
+            out("session.get", { sessionID: SESSION }),
+            replyData("session.get", sessionInfo()),
+            out("session.active"),
+            replyData("session.active", {}),
+            event("session.execution.started", { sessionID: SESSION }),
+            out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+            reply("message.list", { data: [nativePrompt], cursor: {} }),
+            event("session.text.started", {
+              sessionID: SESSION,
+              assistantMessageID: "msg_cli_response",
+              ordinal: 0,
+            }),
+            event("session.text.delta", {
+              sessionID: SESSION,
+              assistantMessageID: "msg_cli_response",
+              ordinal: 0,
+              delta: "Shared reply",
+            }),
+            event("session.text.ended", {
+              sessionID: SESSION,
+              assistantMessageID: "msg_cli_response",
+              ordinal: 0,
+              text: "Shared reply",
+            }),
+            event("session.execution.succeeded", { sessionID: SESSION }),
+          ],
+          {
+            shared: true,
+            external: true,
+            onExternalTurn: (native) => {
+              adopted = native;
+              return Effect.gen(function* () {
+                return turnInput(providerThread(yield* DateTime.now));
+              });
+            },
+          },
+        );
+        yield* runtime.resumeThread({
+          providerThread: providerThread(yield* DateTime.now),
+          threadId,
+          modelSelection: bigPickle,
+          runtimePolicy: policy(),
+        });
+        const events = yield* runtime.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        assert.equal(adopted?.nativeTurnId, "msg_cli_prompt");
+        assert.equal(adopted?.text, "From CLI");
+        assert.isTrue(
+          events.some(
+            (event) =>
+              event.type === "provider_turn.updated" &&
+              event.providerTurn.nativeTurnRef?.nativeId === "msg_cli_prompt",
+          ),
+        );
+        assert.isTrue(
+          events.some(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              "text" in event.turnItem &&
+              event.turnItem.text === "Shared reply",
+          ),
+        );
+        assert.deepInclude(events.at(-1), { type: "turn.terminal", status: "completed" });
+      }).pipe(Effect.scoped, Effect.provide(IdAllocator.layer)),
+  );
+
   it.effect("switches the session's model and variant before a turn that changed them", () =>
     Effect.gen(function* () {
       const { runtime, thread } = yield* resumed([

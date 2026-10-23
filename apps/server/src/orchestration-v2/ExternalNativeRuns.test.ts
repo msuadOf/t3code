@@ -15,20 +15,20 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
-import * as ExternalCodexRuns from "./ExternalCodexRuns.ts";
+import * as ExternalNativeRuns from "./ExternalNativeRuns.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as EventSink from "./EventSink.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 
-it.effect(
-  "persists an external run before observing it and reuses its identity on duplicate notifications",
-  () =>
+it.effect.each(["codex", "claudeAgent", "opencode"] as const)(
+  "%s: persists an external run before observing it and reuses its identity on duplicate notifications",
+  (provider) =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;
       const threadId = ThreadId.make("thread:external-adoption");
-      const instanceId = ProviderInstanceId.make("codex");
+      const instanceId = ProviderInstanceId.make(`${provider}-primary`);
       const providerThreadId = ProviderThreadId.make("provider-thread:external-adoption");
-      const driver = ProviderDriverKind.make("codex");
+      const driver = ProviderDriverKind.make(provider);
       let projection = {
         thread: {
           id: threadId,
@@ -59,7 +59,7 @@ it.effect(
         providerSessionId: ProviderSessionId.make("session:external-adoption"),
         providerSession: { cwd: "/workspace" },
       } as ProviderAdapter.ProviderAdapterV2SessionRuntime;
-      const layer = ExternalCodexRuns.layer.pipe(
+      const layer = ExternalNativeRuns.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
             IdAllocator.layer,
@@ -85,7 +85,10 @@ it.effect(
                         attempts: projection.attempts.concat(event.payload),
                       };
                     if (event.type === "node.updated")
-                      projection = { ...projection, nodes: projection.nodes.concat(event.payload) };
+                      projection = {
+                        ...projection,
+                        nodes: projection.nodes.concat(event.payload),
+                      };
                     if (event.type === "checkpoint-scope.created")
                       projection = {
                         ...projection,
@@ -110,7 +113,7 @@ it.effect(
         ),
       );
       yield* Effect.gen(function* () {
-        const runs = yield* ExternalCodexRuns.ExternalCodexRuns;
+        const runs = yield* ExternalNativeRuns.ExternalNativeRuns;
         const input = {
           threadId,
           nativeThreadId: "native-thread",
@@ -123,11 +126,34 @@ it.effect(
         const duplicate = yield* runs.adopt(input);
         assert.isDefined(first);
         assert.equal(first?.runId, duplicate?.runId);
+        assert.equal(
+          first?.runId,
+          `run:${provider}-external:${encodeURIComponent(providerThreadId)}:cli-turn`,
+        );
+        assert.equal(
+          first?.message.messageId,
+          `message:${provider}-external:${encodeURIComponent(String(first?.runId))}`,
+        );
         assert.equal(first?.providerThread.id, providerThreadId);
         assert.equal(first?.message.creationSource, "provider");
         assert.equal(observed.length, 1);
         assert.equal(writes.filter((event) => event.type === "run.created").length, 1);
         assert.isUndefined(yield* runs.adopt({ ...input, nativeThreadId: "unrelated-thread" }));
+        assert.isUndefined(
+          yield* runs.adopt({
+            ...input,
+            session: { ...session, instanceId: ProviderInstanceId.make(`${provider}-other`) },
+          }),
+        );
+        assert.isUndefined(
+          yield* runs.adopt({
+            ...input,
+            session: {
+              ...session,
+              driver: ProviderDriverKind.make(provider === "codex" ? "opencode" : "codex"),
+            },
+          }),
+        );
         projection = {
           ...projection,
           runs: projection.runs.map((run) => ({ ...run, status: "completed" })),
@@ -135,7 +161,11 @@ it.effect(
         assert.isUndefined(yield* runs.adopt(input));
         assert.equal(observed.length, 1);
         yield* observed[0]?.onObservationClosed ?? Effect.void;
-        const revived = yield* runs.adopt({ ...input, snapshot: true, nativeStatus: "inProgress" });
+        const revived = yield* runs.adopt({
+          ...input,
+          snapshot: true,
+          nativeStatus: "inProgress",
+        });
         assert.equal(revived?.runId, first?.runId);
         assert.equal(observed.length, 2);
         assert.isTrue(
@@ -170,12 +200,16 @@ it.effect(
         yield* runs.reconcileSnapshot({
           threadId,
           nativeThreadId: "native-thread",
+          driver,
+          providerInstanceId: instanceId,
           idle: false,
           turns: [],
         });
         yield* runs.reconcileSnapshot({
           threadId,
           nativeThreadId: "native-thread",
+          driver,
+          providerInstanceId: instanceId,
           idle: true,
           turns: [{ id: "still-running", status: "inProgress" }],
         });
@@ -183,6 +217,32 @@ it.effect(
         yield* runs.reconcileSnapshot({
           threadId,
           nativeThreadId: "native-thread",
+          driver,
+          providerInstanceId: instanceId,
+          idle: true,
+          turns: [{ id: "still-running", status: "running" }],
+        });
+        for (const mismatch of [
+          {
+            driver: ProviderDriverKind.make(provider === "codex" ? "opencode" : "codex"),
+            providerInstanceId: instanceId,
+          },
+          { driver, providerInstanceId: ProviderInstanceId.make(`${provider}-other`) },
+        ]) {
+          yield* runs.reconcileSnapshot({
+            threadId,
+            nativeThreadId: "native-thread",
+            idle: true,
+            turns: [],
+            ...mismatch,
+          });
+        }
+        assert.equal(writes.length, beforeRecovery);
+        yield* runs.reconcileSnapshot({
+          threadId,
+          nativeThreadId: "native-thread",
+          driver,
+          providerInstanceId: instanceId,
           idle: true,
           turns: [],
         });

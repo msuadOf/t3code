@@ -32,7 +32,7 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
         title: "Server URL",
-        description: "Leave blank to let T3 Code spawn the server when needed.",
+        description: "Leave blank to connect to the native OpenCode CLI shared background service.",
         providerSettingsForm: {
           placeholder: "http://127.0.0.1:4096",
           clearWhenEmpty: "omit",
@@ -52,13 +52,22 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    sharedSessionRoot: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Shared session directory",
+        description:
+          "Leave blank to share all CLI sessions, or select a directory and its subdirectories.",
+        providerSettingsForm: { placeholder: "All directories", clearWhenEmpty: "omit" },
+      }),
+    ),
     customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
   {
-    order: ["binaryPath", "serverUrl", "serverPassword"],
+    order: ["binaryPath", "serverUrl", "serverPassword", "sharedSessionRoot"],
   },
 );
 export type OpenCodeSettings = typeof OpenCodeSettings.Type;

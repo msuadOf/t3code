@@ -4,6 +4,45 @@ T3 Code uses Claude Code's login and configuration. Start with the default provi
 for one account; [provider setup](./install.md#providers) covers installation and
 shared provider settings.
 
+## Native shared sessions
+
+This fork connects conversations to Claude Code's native background-session daemon.
+Install a current Claude CLI with `agents`, `attach`, and `--bg` on the environment's
+macOS or Linux host. Web, desktop, and mobile clients all read the same server-side
+conversation records.
+
+Existing transcripts appear automatically. **Shared session directory** limits
+this to a directory and its descendants; an empty value includes all directories
+in that Claude configuration. Directory filtering does not delete transcripts or
+stop native work.
+
+For an already running foreground conversation, use `/background` in its terminal.
+Then open that conversation in T3 Code and use `claude attach <id>` in the terminal.
+Both clients observe the same background worker. T3 sends text when that worker is
+idle. Creating a new conversation in T3 also creates a native background worker.
+
+To reopen a historical conversation that has no running worker, start it on the
+host with `claude --bg --resume <session-id>`, using the same `CLAUDE_CONFIG_DIR` as
+T3. T3 then attaches to that worker. Closing T3 leaves native work running.
+
+The current native daemon integration has these limits:
+
+- Replies, tool output, and thinking blocks appear after Claude persists them.
+  Live reasoning token streaming is unavailable.
+- Answer permission dialogs and questions in `claude attach`. T3's structured
+  approval buttons are unavailable for native Claude sessions.
+- Interrupt and steer work from the attached CLI. T3 cannot safely target one
+  native turn with the daemon's current terminal-control protocol.
+- Send from T3 while the worker is idle. Avoid submitting identical text from T3
+  and the CLI simultaneously: the native reply acknowledgement has no request ID
+  to distinguish those submissions.
+- Model, permission, and environment changes for an existing worker belong to its
+  native CLI configuration. Attachment preserves the worker's configuration. The
+  background daemon can filter launcher environment variables; configure router
+  endpoints in that configuration directory's `settings.json` under `env`.
+- Local Windows native-daemon hosting has not been implemented. Clients on Windows
+  can connect to a supported remote host.
+
 ## Separate accounts or configurations
 
 Use a separate Claude config directory for each account. This also works for named
@@ -41,39 +80,12 @@ Claude Code's verbose mode can stay enabled when you use Claude for text generat
 thread titles, branch names, commit messages, and pull request descriptions. On a remote connection,
 T3 Code uses the Claude configuration on the connected server.
 
-## Compact long conversations
+## Native conversation controls
 
-Set **Auto-compact after** in the Claude provider settings to an integer between
-`100000` and `1000000`. For example, `300000` asks Claude to summarize at about
-300,000 tokens. This changes when compaction happens, not the model's context
-window. Leave it empty for Claude Code's default.
-
-You can also send `/compact` in an existing conversation. Web and desktop offer
-**Compact context** from the context meter. When you return to a large thread
-after Claude's prompt cache expires, a **Compact** chip with the thread's token count shows
-next to the send button. While it is on, Enter summarizes the history first, then
-sends your message. Click the chip to switch it to **Full** and keep the full
-history for that message. The cache lasts about an hour on a Claude
-subscription and 5 minutes with an API key, Bedrock, or Vertex. See [commands and skills](./composer.md#commands-and-skills) for using
-composer commands.
-
-**Compact idle threads** in **Settings > General** controls this for threads
-over 200,000 tokens. Each Claude provider's settings can override it:
-
-- **When you return** shows the **Compact** chip described above. This is the default.
-- **Before the cache expires (beta)** compacts an idle thread shortly before its
-  prompt cache expires, so coming back does not reprocess the whole conversation.
-  The compaction appears in the thread as a `/compact` turn sent by T3 Code.
-- **Never** skips idle compaction and Claude's resume prompt. **Auto-compact after**
-  still applies, and you can still compact by hand.
-
-## Usage limits
-
-If your Claude subscription runs out of usage mid-turn, the thread shows which
-limit was reached and the remaining wait when Claude provides a reset time.
-Claude Code holds the turn until that window reopens, so it can keep showing as
-working. Wait for the reset, or stop the turn and continue later. The warning's
-timestamp shows when the displayed wait started.
+Use `/compact`, model selection, permission controls, and task management in the
+attached Claude CLI. Its background worker owns those settings. SDK-specific
+compaction prompts, structured task-list projection, and usage-limit recovery
+are unavailable in the native conversation adapter.
 
 ## Skills
 
@@ -86,13 +98,6 @@ contribute skills under names such as `plugin:review`. Skills marked `disable-mo
 can still be started by you. Invoke those one per message: Claude directly runs
 only the last named skill and may try to start earlier ones through its Skill
 tool, which refuses skills reserved for manual invocation.
-
-## Task lists
-
-To show Claude task lists in the web and desktop apps, add
-`CLAUDE_CODE_ENABLE_TODO_TOOLS=1` under **Variables** in the Claude instance's
-**Environment** section in **Settings > Providers**. Unfinished tasks stay visible
-between turns in the same Claude session.
 
 ## OpenRouter
 
@@ -125,6 +130,6 @@ requirements, use the
 
 A local router uses an ordinary Claude provider instance. Give it a separate
 config directory and put the router's endpoint and credential variables in that
-instance's **Environment variables**. The router must run where the environment
+configuration directory's `settings.json` under `env`. The router must run where the environment
 can reach it. Follow the [Claude Code Router instructions](https://github.com/musistudio/claude-code-router)
 for its installation and routing configuration.

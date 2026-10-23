@@ -1959,6 +1959,15 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           { type: "user_input_request", questions: mapped.questions },
         );
       }
+      if (connection.shared) {
+        yield* setSessionStatus("waiting", null);
+        return yield* Effect.logWarning(
+          "OpenCode requested a form that must be answered in its CLI.",
+          {
+            reason: mapped.unsupported,
+          },
+        );
+      }
       // Cancelling ends OpenCode's execution as a user stop, so the turn is
       // failed here with the reason and that stop's end is skipped.
       yield* Effect.logWarning("Declined an OpenCode form T3 Code cannot show.", {
@@ -2219,6 +2228,38 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
     });
 
     const onWake = Effect.fnUntraced(function* (state: ThreadState) {
+      if (
+        connection.shared &&
+        input.onExternalTurn !== undefined &&
+        state.providerThread.appThreadId !== null &&
+        state.reports.size === 0
+      ) {
+        const messages = yield* OpenCode2Client.paginate(
+          { sessionID: Session.ID.make(state.sessionId), order: "desc" as const, limit: 50 },
+          client.message.list,
+        ).pipe(
+          Stream.takeUntil((message) => message.type === "user"),
+          Stream.runCollect,
+        );
+        const prompt = messages.find((message) => message.type === "user");
+        if (prompt?.type !== "user") return;
+        const turnInput = yield* input.onExternalTurn({
+          threadId: state.providerThread.appThreadId,
+          nativeThreadId: state.sessionId,
+          nativeTurnId: prompt.id,
+          startedAt: prompt.time.created,
+          text: prompt.text,
+          cwd: state.directory,
+          nativeStatus: "inProgress",
+        });
+        if (turnInput !== undefined) {
+          yield* beginTurn(state, turnInput, false, {
+            id: prompt.id,
+            startedAt: prompt.time.created,
+          });
+        }
+        return;
+      }
       const { delivered, stopped } = yield* takeReports(state);
       if (stopped) return;
       const route = state.providerThread.appThreadId;
@@ -2748,7 +2789,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
 
     // A server T3 did not start keeps running after T3 stops, so stop the turns
     // it would otherwise finish unseen. A spawned server stops with its owner.
-    if (connection.external) {
+    if (connection.external && !connection.shared) {
       yield* Effect.addFinalizer(() =>
         Effect.forEach(
           [...threads].filter(([, state]) => state.active !== undefined),
@@ -3162,18 +3203,20 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       state: ThreadState,
       turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
       awaitingStart: boolean,
+      native?: { readonly id: string; readonly startedAt: DateTime.Utc },
     ) {
-      const startedAt = yield* DateTime.now;
-      const nativeTurnId = `${state.sessionId}:attempt:${turnInput.attemptId}`;
+      const startedAt = native?.startedAt ?? (yield* DateTime.now);
+      const nativeTurnId = native?.id ?? `${state.sessionId}:attempt:${turnInput.attemptId}`;
       const providerTurn: OrchestrationV2ProviderTurn = {
         id: idAllocator.derive.providerTurn({ driver, nativeTurnId }),
         providerThreadId: turnInput.providerThread.id,
         nodeId: turnInput.rootNodeId,
         runAttemptId: turnInput.attemptId,
         nativeTurnRef: ref(
-          isContinuation(turnInput)
-            ? wakeTurnId(state.sessionId, turnInput.attemptId)
-            : turnPromptId(state.sessionId, turnInput.attemptId),
+          native?.id ??
+            (isContinuation(turnInput)
+              ? wakeTurnId(state.sessionId, turnInput.attemptId)
+              : turnPromptId(state.sessionId, turnInput.attemptId)),
           "weak",
         ),
         ordinal: turnInput.providerTurnOrdinal,
@@ -3546,13 +3589,23 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           const cwd = threadInput.runtimePolicy?.cwd;
           const loaded = threads.has(sessionId);
           const state = register(providerThread, native, cwd ?? native.location.directory);
-          if (!loaded) yield* stopLeftoverRequests(state);
-          yield* writeRules(state, threadInput.runtimePolicy ?? state.policy);
-          if (cwd != null && native.location.directory !== cwd) {
+          if (!connection.shared) {
+            if (!loaded) yield* stopLeftoverRequests(state);
+            yield* writeRules(state, threadInput.runtimePolicy ?? state.policy);
+          }
+          if (!connection.shared && cwd != null && native.location.directory !== cwd) {
             yield* client.session.move({
               sessionID: Session.ID.make(sessionId),
               directory: AbsolutePath.make(cwd),
             });
+          }
+          if (connection.shared && state.active === undefined) {
+            const active = yield* client.session.active();
+            if (sessionId in active) {
+              yield* onWake(state);
+              yield* backfill(sessionId, state);
+              yield* reconcile;
+            }
           }
           return state.providerThread;
         },

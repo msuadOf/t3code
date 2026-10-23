@@ -22,20 +22,25 @@ started on 1.x continue on 2.x.
 
 Plan mode uses OpenCode's `plan` agent.
 
-## Local or external server
+## Shared CLI sessions
 
-Leave **Server URL** empty to let T3 Code start OpenCode locally. A password in
-provider settings applies to both that server and T3 Code's connection. With no
-password setting, the local server uses `OPENCODE_SERVER_PASSWORD` from its
-environment.
+With current OpenCode, leave **Server URL** empty to connect to its native shared
+background service. T3 Code and the OpenCode CLI use the same service registration
+and credentials on the environment's machine. Opening a session in both clients
+uses the same native session; closing T3 Code leaves CLI work running.
 
-To use an existing OpenCode server, set **Server URL** and its password in provider
-settings. T3 Code uses only that configured password for an external server; it
-does not forward a local `OPENCODE_SERVER_PASSWORD`. If connection or version checks
-fail, check the URL, credentials, and OpenCode version, then refresh provider status.
+Existing native sessions appear automatically. Set **Shared session directory**
+in **Settings > Providers** to limit discovery to one directory and its
+subdirectories. Leave it empty to include all directories. Excluding a directory
+hides discovered sessions without deleting their history or stopping CLI work.
 
-After a lost connection, send another prompt to reconnect to the same OpenCode
-session.
+To use another existing OpenCode server, set **Server URL** and its password in
+provider settings. The CLI must attach to that same server to share live work.
+T3 Code uses only the configured password for an explicit server URL. If connection
+checks fail, check the URL, credentials, and OpenCode version, then refresh status.
+
+A native background service owns its own credentials. The password field applies
+to an explicit server URL; it does not replace the native service's password.
 
 ## Approvals
 
@@ -56,11 +61,10 @@ in **Settings > Providers** for that environment. On mobile, use **Refresh model
 in the thread settings. Reconnecting also refreshes the catalog; periodic provider
 health checks do not.
 
-Credential changes are read on refresh. Native OpenCode configuration can remain
-cached while the local helper is running. Let it sit for 30 seconds without model
-refreshes or text-generation work, then refresh again to reload the files. Repeated
-refreshes keep the helper alive. An external server may need its own reload or
-restart before T3 Code can see configuration changes.
+Credential changes are read on refresh. A running native service can cache its own
+configuration. Reload or restart it through OpenCode when changing native
+configuration that requires a restart; T3 Code does not shut down the shared
+service on disconnect.
 
 Existing threads keep their selected model and options even when it disappears
 from the catalog. If OpenCode rejects that model, select an available one and retry.
