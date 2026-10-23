@@ -101,6 +101,8 @@ export interface ThreadRuntimeSummary {
   readonly activityStartedAt?: string | null | undefined;
   readonly providerInstanceId: ProviderInstanceId;
   readonly providerName: string | null;
+  /** Live provider capability; queued/preparing runs can still be cancelled locally. */
+  readonly supportsInterrupt?: boolean;
   readonly lastError: string | null;
   readonly lastErrorClass?: OrchestrationV2ProviderFailureClass | null;
   readonly lastErrorCode?: string | null;

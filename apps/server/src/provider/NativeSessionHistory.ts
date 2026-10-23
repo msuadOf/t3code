@@ -64,11 +64,18 @@ export const mapHistory = (
     const lifecycleStatus = turn.status;
     const startedAt = DateTime.makeUnsafe(turn.startedAt);
     const completedAt = DateTime.makeUnsafe(turn.completedAt ?? input.thread.updatedAt);
-    const providerTurnId = idAllocator.derive.providerTurn({
+    const nativeProviderTurnId = idAllocator.derive.providerTurn({
       driver,
       nativeTurnId: turn.id,
     });
-    const existingTurn = input.existing?.providerTurns.find((value) => value.id === providerTurnId);
+    // T3-started turns can retain an admission ID after learning their native identity.
+    const existingTurn = input.existing?.providerTurns.find(
+      (value) =>
+        value.providerThreadId === input.providerThread.id &&
+        (value.id === nativeProviderTurnId ||
+          (value.nativeTurnRef?.driver === driver && value.nativeTurnRef.nativeId === turn.id)),
+    );
+    const providerTurnId = existingTurn?.id ?? nativeProviderTurnId;
     const existingAttempt = input.existing?.attempts.find(
       (value) => value.id === existingTurn?.runAttemptId,
     );

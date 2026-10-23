@@ -22,6 +22,7 @@ import {
   NativeClaudeClient,
   NativeClaudeError,
   requireNativeClaudeBackgroundId,
+  type NativeClaudeSession,
 } from "./NativeClaudeClient.ts";
 import { NativeClaudeSessions } from "./NativeClaudeSessions.ts";
 
@@ -35,6 +36,17 @@ export const nativeClaudeMatchesPendingTurn = (
 ): boolean =>
   !pending.baseline?.has(turn.id) &&
   turn.items.find((item) => item.type === "user")?.text === pending.expectedText;
+
+export const nativeClaudeObservedTurnIsTerminal = (
+  turn: { readonly status: string; readonly completedAt: number | null },
+  job: NativeClaudeSession | undefined,
+): boolean =>
+  turn.status === "failed" ||
+  turn.status === "interrupted" ||
+  job?.state === "failed" ||
+  job?.state === "stopped" ||
+  (turn.completedAt !== null &&
+    (job?.kind !== "background" || job.status === "idle" || job.state === "done"));
 
 const driver = ProviderDriverKind.make("claudeAgent");
 export const nativeClaudeCapabilities = {
@@ -187,13 +199,12 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         thread.nativeThreadRef?.nativeId ?? "";
       const jobFor = (thread: OrchestrationV2ProviderThread) =>
         attempt(async () => {
-          const job = (await client.listSessions()).find(
-            (session) => session.sessionId === nativeId(thread),
-          );
-          if (!job)
-            throw new Error(
-              "Claude native worker is not running. Reopen the shared background session before sending input.",
-            );
+          // Observed sessions bypass ensureThread; sending must also revive their native worker.
+          const job = await client.startBackground({
+            sessionId: nativeId(thread),
+            cwd: input.runtimePolicy.cwd ?? process.cwd(),
+            resume: true,
+          });
           requireNativeClaudeBackgroundId(job);
           return job;
         });
@@ -266,16 +277,10 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
             const providerTurnId = allocator.derive.providerTurn({ driver, nativeTurnId: turn.id });
             const startedAt = DateTime.makeUnsafe(turn.startedAt);
             const job = inventory.find((session) => session.sessionId === id);
-            const idle =
-              job?.status === "idle" ||
-              job?.state === "done" ||
-              job?.state === "failed" ||
-              job?.state === "stopped";
-            const finished =
-              idle &&
-              (turn.completedAt !== null || job?.state === "failed" || job?.state === "stopped");
-            const nativeFailure = job?.state === "failed";
-            const wasInterrupted = ownership.interrupted || job?.state === "stopped";
+            const finished = nativeClaudeObservedTurnIsTerminal(turn, job);
+            const nativeFailure = turn.status === "failed" || job?.state === "failed";
+            const wasInterrupted =
+              ownership.interrupted || turn.status === "interrupted" || job?.state === "stopped";
             const status = finished
               ? nativeFailure
                 ? "failed"
@@ -409,9 +414,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         const history = yield* attempt(() => source.history(id)).pipe(
           Effect.orElseSucceed(() => []),
         );
-        const live = yield* attempt(() => client.listSessions());
-        const job = live.find((value) => value.sessionId === id);
-        const stillRunning = job?.status === "busy" || job?.status === "waiting";
+        const stillRunning = history.at(-1)?.status === "running";
         observed.set(
           id,
           new Set((stillRunning ? history.slice(0, -1) : history).map((turn) => turn.id)),

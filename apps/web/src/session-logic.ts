@@ -38,7 +38,10 @@ import type {
   ThreadPendingUserInput,
 } from "@t3tools/client-runtime/state/thread-requests";
 import type { ThreadRunSummary, ThreadRuntimeSummary } from "@t3tools/client-runtime/state/shell";
-import { threadRuntimeHasInterruptibleRun } from "@t3tools/client-runtime/state/thread-execution";
+import {
+  threadRuntimeHasInterruptibleRun,
+  threadRuntimeSupportsInterrupt,
+} from "@t3tools/client-runtime/state/thread-execution";
 import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
 
 import {
@@ -1155,6 +1158,7 @@ export function deriveCanInterruptRunningThread(
 ): boolean {
   return (
     hasActiveThread &&
+    threadRuntimeSupportsInterrupt(runtime) &&
     (derivePhase(runtime) === "running" || threadRuntimeHasInterruptibleRun(runtime))
   );
 }

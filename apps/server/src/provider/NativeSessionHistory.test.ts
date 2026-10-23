@@ -147,6 +147,26 @@ for (const provider of ["claudeAgent", "opencode"] as const) {
           assert.deepEqual(mapHistory({ ...input, existing: records }, allocator), []);
         }),
     );
+    it.effect("reuses a T3 admission turn after its native identity is learned", () =>
+      Effect.gen(function* () {
+        const allocator = yield* IdAllocator.IdAllocatorV2;
+        const input = fixture(ProviderDriverKind.make(provider));
+        const existing = recordsOf(mapHistory(input, allocator));
+        const admissionId = allocator.derive.providerTurn({
+          driver: input.driver,
+          nativeTurnId: "session:attempt:t3-attempt",
+        });
+        existing.providerTurns = existing.providerTurns.map((turn) => ({
+          ...turn,
+          id: admissionId,
+        }));
+        existing.turnItems = existing.turnItems.map((item) => ({
+          ...item,
+          providerTurnId: admissionId,
+        }));
+        assert.deepEqual(mapHistory({ ...input, existing }, allocator), []);
+      }),
+    );
     it.effect(
       "does not create active runs and only fills missing completed thinking after live adoption",
       () =>

@@ -11,8 +11,8 @@ export interface NativeSession {
   readonly updatedAt: number;
   readonly archived: boolean;
   readonly active: boolean;
-  /** The existing worker accepts passive attachment without starting another writer. */
-  readonly attachable?: boolean;
+  /** The adapter can observe active work without starting another native writer. */
+  readonly canObserveActive?: boolean;
 }
 
 export interface NativeHistoryItem {

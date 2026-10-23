@@ -375,6 +375,62 @@ export class NativeClaudeClient {
     );
   }
 
+  private async runCLI(args: readonly string[], cwd: string) {
+    const launched = execFileAsync(this.options.binaryPath || "claude", args, {
+      env: this.options.environment ?? process.env,
+      cwd,
+      timeout: 30000,
+      maxBuffer: MAX_FRAME_BYTES,
+    });
+    launched.child.stdin?.end();
+    return launched;
+  }
+
+  /** CLI attach performs the native, non-forcing wake operation; raw attach cannot wake stopped jobs. */
+  private async wakeBackground(
+    session: NativeClaudeSession,
+    cwd: string,
+  ): Promise<NativeClaudeSession> {
+    const short = requireNativeClaudeBackgroundId(session);
+    const child = NodeChildProcess.spawn(this.options.binaryPath || "claude", ["attach", short], {
+      env: this.options.environment ?? process.env,
+      cwd,
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    let failed = false;
+    const closed = new Promise<void>((resolve) => {
+      child.once("error", () => {
+        failed = true;
+        resolve();
+      });
+      child.once("close", () => resolve());
+    });
+    try {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (failed)
+          throw new NativeClaudeError("EWAKE", "Could not open Claude's native attach client.");
+        const candidates = (await this.listSessions()).filter(
+          (value) => value.sessionId === session.sessionId,
+        );
+        const foreground = candidates.find((value) => value.kind === "interactive");
+        if (foreground) requireNativeClaudeBackgroundId(foreground);
+        const ready = candidates.find((value) => value.id === short);
+        if (ready?.status !== undefined && ready.state !== "stopped" && ready.state !== "failed")
+          return ready;
+        await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      }
+      throw new NativeClaudeError(
+        "ETIMEOUT",
+        "Claude could not reopen this background session. Open it in claude attach to finish its setup.",
+      );
+    } finally {
+      // Only this client's process is terminated; the daemon-owned worker stays alive.
+      child.stdin?.destroy();
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      await closed;
+    }
+  }
+
   /** Launch one daemon-owned native session; never creates a second writer for a live session. */
   async startBackground(input: {
     readonly sessionId?: string;
@@ -389,40 +445,38 @@ export class NativeClaudeClient {
         "EPLATFORM",
         "Native Claude shared workers currently require a macOS or Linux server host.",
       );
-    const existing = input.sessionId
-      ? (await this.listSessions()).find((session) => session.sessionId === input.sessionId)
-      : undefined;
+    const inventory = input.sessionId ? await this.listSessions() : [];
+    const foreground = inventory.find(
+      (value) => value.sessionId === input.sessionId && value.kind === "interactive",
+    );
+    if (foreground) requireNativeClaudeBackgroundId(foreground);
+    const existing = inventory.find((value) => value.sessionId === input.sessionId);
     if (existing) {
       requireNativeClaudeBackgroundId(existing);
-      // Inventory does not guarantee pid presence for an idle background worker.
-      // A known job must never be resumed as a second writer.
       if (existing.state === "failed" || existing.state === "stopped")
-        throw new NativeClaudeError(
-          "ETERMINAL",
-          "Restart this stopped native job in the Claude CLI before attaching T3.",
-        );
+        return this.wakeBackground(existing, input.cwd);
       return this.readyBackground(existing);
     }
-    if (input.resume)
+    if (
+      input.resume &&
+      (!input.sessionId || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(input.sessionId))
+    )
       throw new NativeClaudeError(
-        "ENOJOB",
-        "Open this historical session with claude --bg --resume in the CLI before attaching T3.",
+        "ESESSION",
+        "A canonical full Claude session UUID is required to resume its history.",
       );
     const args = [
       "--bg",
-      ...(input.model ? ["--model", input.model] : []),
-      ...(input.permissionMode ? ["--permission-mode", input.permissionMode] : []),
-      ...(input.settings ? ["--settings", input.settings] : []),
+      // Saved sessions retain their own options; overrides make the CLI fork a copy.
+      ...(input.resume && input.sessionId
+        ? ["--resume", input.sessionId]
+        : [
+            ...(input.model ? ["--model", input.model] : []),
+            ...(input.permissionMode ? ["--permission-mode", input.permissionMode] : []),
+            ...(input.settings ? ["--settings", input.settings] : []),
+          ]),
     ];
-    const launched = execFileAsync(this.options.binaryPath || "claude", args, {
-      env: this.options.environment ?? process.env,
-      cwd: input.cwd,
-      timeout: 30000,
-      maxBuffer: MAX_FRAME_BYTES,
-    });
-    // Never let CLI consume inherited or unclosed stdin as extra prompt text.
-    launched.child.stdin?.end();
-    const output = await launched;
+    const output = await this.runCLI(args, input.cwd);
     const short = /backgrounded\s*·\s*([a-f0-9]{8})\b/.exec(output.stdout)?.[1];
     if (!short)
       throw new NativeClaudeError(
@@ -438,6 +492,14 @@ export class NativeClaudeClient {
         "Claude did not register the requested background session.",
       );
     requireNativeClaudeBackgroundId(created);
+    if (input.resume && created.sessionId !== input.sessionId) {
+      // Native CLI can fork when another owner wins its claim. Never submit to that copy.
+      await this.runCLI(["stop", short], input.cwd);
+      throw new NativeClaudeError(
+        "ESESSIONCOPY",
+        "Claude could not claim the original session and created a separate copy. That copy was stopped; no message was sent. Reopen the original session after its CLI ownership changes.",
+      );
+    }
     return this.readyBackground(created);
   }
 

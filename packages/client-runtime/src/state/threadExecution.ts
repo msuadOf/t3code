@@ -264,6 +264,9 @@ export function deriveThreadStructureRuntime(
         : DateTime.formatIso(orchestrationV2RunWorkStartedAt(liveActivityRun)),
     providerInstanceId: projection.thread.providerInstanceId,
     providerName: providerSession?.driver ?? null,
+    ...(providerSession === undefined
+      ? {}
+      : { supportsInterrupt: providerSession.capabilities.turns.supportsInterrupt }),
     ...threadErrorSummary(
       latestRootProviderFailure(latestRunProjection, projection.turnItems),
       providerSession?.lastError ?? null,
@@ -271,11 +274,24 @@ export function deriveThreadStructureRuntime(
   };
 }
 
+/** Preparation can be cancelled by T3 before a provider turn starts. */
+export function threadRuntimeSupportsInterrupt(
+  runtime: ThreadStructureRuntime | null | undefined,
+): boolean {
+  return (
+    runtime?.supportsInterrupt !== false ||
+    runtime.status === "queued" ||
+    runtime.status === "preparing" ||
+    runtime.status === "starting"
+  );
+}
+
 export function threadRuntimeHasInterruptibleRun(
   runtime: ThreadStructureRuntime | null | undefined,
 ): boolean {
   return (
     threadRuntimeIsActive(runtime) &&
+    threadRuntimeSupportsInterrupt(runtime) &&
     runtime?.activeRunId !== null &&
     runtime?.activeRunId !== undefined
   );

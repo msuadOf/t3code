@@ -5,6 +5,11 @@ import {
   ProviderThreadId,
   ProviderDriverKind,
   ThreadId,
+  ProjectId,
+  RunId,
+  RunAttemptId,
+  NodeId,
+  MessageId,
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as Effect from "effect/Effect";
@@ -16,6 +21,7 @@ import {
   makeNativeClaudeAdapter,
   nativeClaudeCapabilities,
   nativeClaudeMatchesPendingTurn,
+  nativeClaudeObservedTurnIsTerminal,
 } from "./NativeClaudeAdapter.ts";
 
 const instanceId = ProviderInstanceId.make("claude-native-test");
@@ -29,6 +35,11 @@ const runtimePolicy = {
 const nativeId = "1234abcd-1234-1234-1234-123456789abc";
 class FixtureClient extends NativeClaudeClient {
   readonly inventory: readonly NativeClaudeSession[];
+  readonly resumes: string[] = [];
+  override async startBackground(input: Parameters<NativeClaudeClient["startBackground"]>[0]) {
+    if (input.sessionId) this.resumes.push(input.sessionId);
+    return super.startBackground(input);
+  }
   constructor(kind: "interactive" | "background") {
     super();
     this.inventory = [
@@ -52,12 +63,13 @@ it.layer(IdAllocator.layer)("Claude native adapter", (it) => {
   it.effect("attaches an existing native background worker without query/resume subprocesses", () =>
     Effect.scoped(
       Effect.gen(function* () {
+        const client = new FixtureClient("background");
         const adapter = yield* makeNativeClaudeAdapter({
           instanceId,
           binaryPath: "never-executed",
           configDirectory: "/nonexistent-claude-fixture",
           environment: {},
-          client: new FixtureClient("background"),
+          client,
         });
         const runtime = yield* adapter.openSession({
           threadId,
@@ -95,6 +107,52 @@ it.layer(IdAllocator.layer)("Claude native adapter", (it) => {
         });
         expect(result.nativeThreadRef?.nativeId).toBe(nativeId);
         expect(result.id).toBe(existingProviderThread.id);
+        const send = yield* Effect.exit(
+          runtime.startTurn({
+            threadId,
+            providerThread: result,
+            modelSelection,
+            runtimePolicy,
+            runId: RunId.make("run-test"),
+            runOrdinal: 1,
+            providerTurnOrdinal: 1,
+            attemptId: RunAttemptId.make("attempt-test"),
+            rootNodeId: NodeId.make("node-test"),
+            message: {
+              createdBy: "user",
+              creationSource: "web",
+              messageId: MessageId.make("message-test"),
+              text: "Continue",
+              attachments: [],
+            },
+            appThread: {
+              id: threadId,
+              projectId: ProjectId.make("project-test"),
+              title: "Shared",
+              createdBy: "user",
+              creationSource: "web",
+              providerInstanceId: instanceId,
+              modelSelection,
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+              activeProviderThreadId: result.id,
+              lineage: { rootThreadId: threadId, parentThreadId: null, relationshipToParent: null },
+              forkedFrom: null,
+              createdAt: now,
+              updatedAt: now,
+              archivedAt: null,
+              settledOverride: null,
+              settledAt: null,
+              lastVisitedAt: null,
+              deletedAt: null,
+            },
+          }),
+        );
+        // The absent transcript stops sending, but an observed thread must first reclaim its worker.
+        expect(Exit.isFailure(send)).toBe(true);
+        expect(client.resumes).toEqual([nativeId, nativeId]);
         const approval = yield* Effect.exit(
           runtime.respondToRuntimeRequest({ requestId: "unused" as never }),
         );
@@ -106,7 +164,7 @@ it.layer(IdAllocator.layer)("Claude native adapter", (it) => {
   );
 
   it.effect(
-    "refuses a live foreground session and explains backgrounding instead of spawning a second writer",
+    "observes a live foreground session but explains backgrounding instead of spawning a second writer",
     () =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -145,6 +203,11 @@ it.layer(IdAllocator.layer)("Claude native adapter", (it) => {
             createdAt: now,
             updatedAt: now,
           };
+          const observed = yield* runtime.resumeThread({
+            providerThread: existingProviderThread,
+            threadId,
+          });
+          expect(observed.nativeThreadRef?.nativeId).toBe(nativeId);
           const outcome = yield* Effect.exit(
             runtime.ensureThread({
               threadId,
@@ -178,4 +241,32 @@ describe("native reply correlation", () => {
     expect(nativeClaudeMatchesPendingTurn(own, pending)).toBe(true);
     expect(nativeClaudeMatchesPendingTurn({ ...own, id: "existing" }, pending)).toBe(false);
   });
+});
+
+it("settles foreground observations from canonical turns without background daemon status", () => {
+  const foreground: NativeClaudeSession = {
+    kind: "interactive",
+    cwd: "/work",
+    startedAt: 1,
+    sessionId: nativeId,
+    pid: 42,
+  };
+  expect(
+    nativeClaudeObservedTurnIsTerminal({ status: "running", completedAt: null }, foreground),
+  ).toBe(false);
+  expect(
+    nativeClaudeObservedTurnIsTerminal({ status: "completed", completedAt: 2 }, foreground),
+  ).toBe(true);
+  expect(
+    nativeClaudeObservedTurnIsTerminal({ status: "running", completedAt: null }, undefined),
+  ).toBe(false);
+  expect(
+    nativeClaudeObservedTurnIsTerminal({ status: "interrupted", completedAt: null }, undefined),
+  ).toBe(true);
+  expect(
+    nativeClaudeObservedTurnIsTerminal(
+      { status: "running", completedAt: null },
+      { ...foreground, kind: "background", id: "1234abcd", status: "waiting" },
+    ),
+  ).toBe(false);
 });

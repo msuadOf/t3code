@@ -100,6 +100,23 @@ describe("V2 session presentation", () => {
     expect(derivePhase(runtimeWithStatus("waiting"))).toBe("running");
     expect(deriveCanInterruptRunningThread(true, runtimeWithStatus("waiting"))).toBe(true);
 
+    for (const status of ["running", "waiting"] as const) {
+      expect(
+        deriveCanInterruptRunningThread(true, {
+          ...runtimeWithStatus(status, runId),
+          supportsInterrupt: false,
+        }),
+      ).toBe(false);
+    }
+    for (const status of ["queued", "preparing", "starting"] as const) {
+      expect(
+        deriveCanInterruptRunningThread(true, {
+          ...runtimeWithStatus(status, runId),
+          supportsInterrupt: false,
+        }),
+      ).toBe(true);
+    }
+
     expect(deriveCanInterruptRunningThread(true, null)).toBe(false);
   });
 

@@ -16,14 +16,22 @@ this to a directory and its descendants; an empty value includes all directories
 in that Claude configuration. Directory filtering does not delete transcripts or
 stop native work.
 
-For an already running foreground conversation, use `/background` in its terminal.
-Then open that conversation in T3 Code and use `claude attach <id>` in the terminal.
-Both clients observe the same background worker. T3 sends text when that worker is
-idle. Creating a new conversation in T3 also creates a native background worker.
+Running foreground conversations can be observed in T3 without starting another
+Claude process. Replies and thinking blocks follow the canonical transcript;
+closing the terminal during a turn shows it as interrupted. To also send input
+from T3 while preserving the session UUID, exit the foreground CLI and continue
+that conversation in T3, then use `claude attach <id>` in the CLI. Both clients
+use the same background worker. Alternatively, use `/background` in the terminal
+and select its resulting native session in T3: the CLI may assign that session a
+new UUID. T3 sends text when the worker is idle. Creating a new conversation in
+T3 also creates a native background worker.
 
-To reopen a historical conversation that has no running worker, start it on the
-host with `claude --bg --resume <session-id>`, using the same `CLAUDE_CONFIG_DIR` as
-T3. T3 then attaches to that worker. Closing T3 leaves native work running.
+Opening a historical conversation in T3 continues its original session UUID. T3
+asks the native CLI to claim an inactive conversation with `--bg --resume`, or
+uses native `attach` to wake a stopped background job. Saved sessions keep their
+own model, permission, and environment options. If another CLI process wins the
+claim and Claude creates a copy, T3 stops that copy and reports the conflict
+without sending your message to it. Closing T3 leaves native work running.
 
 The current native daemon integration has these limits:
 

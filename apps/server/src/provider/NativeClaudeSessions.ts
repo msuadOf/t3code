@@ -131,8 +131,8 @@ export function nativeClaudeHistory(entries: readonly Entry[]): readonly NativeH
     }
     if (
       entry.type === "assistant" &&
-      message.stop_reason !== "tool_use" &&
-      message.stop_reason !== null
+      typeof message.stop_reason === "string" &&
+      message.stop_reason !== "tool_use"
     )
       turn.completedAt = timestamp(entry.timestamp, turn.startedAt);
   }
@@ -238,8 +238,7 @@ export class NativeClaudeSessions {
         createdAt: timestamp(first.timestamp, metadata.birthtimeMs),
         updatedAt: timestamp(last?.timestamp, metadata.mtimeMs),
         archived: false,
-        attachable:
-          activeById.get(id)?.kind === "background" && activeById.get(id)?.id !== undefined,
+        canObserveActive: activeById.has(id),
         active: (() => {
           const live = activeById.get(id);
           return (
@@ -265,10 +264,12 @@ export class NativeClaudeSessions {
       const live = (inventory ?? this.lastInventory ?? (await this.client.listSessions())).find(
         (session) => session.sessionId === sessionId,
       );
-      if (history.length === 0 || !live) return history;
+      if (history.length === 0) return history;
       return history.map((turn, index) => {
         if (index !== history.length - 1) return turn;
-        if (live.status === "busy" || live.state === "blocked" || live.status === "waiting")
+        if (!live)
+          return turn.status === "running" ? { ...turn, status: "interrupted" as const } : turn;
+        if (live.status === "busy" || live.status === "waiting")
           return { ...turn, status: "running" as const, completedAt: null };
         if (live.state === "failed") return { ...turn, status: "failed" as const };
         if (live.state === "stopped") return { ...turn, status: "interrupted" as const };

@@ -2,7 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
-import { NativeClaudeClient } from "./NativeClaudeClient.ts";
+import { NativeClaudeClient, type NativeClaudeSession } from "./NativeClaudeClient.ts";
 import { NativeClaudeSessions } from "./NativeClaudeSessions.ts";
 import { describe, expect, it } from "@effect/vitest";
 import { decodeNativeClaudeTranscript, nativeClaudeHistory } from "./NativeClaudeSessions.ts";
@@ -96,10 +96,16 @@ it("keeps a live user turn and an unfinished tool turn running until an end_turn
     status: "running",
     completedAt: null,
   });
+  expect(
+    nativeClaudeHistory([
+      first,
+      { ...tool, message: { content: [{ type: "text", text: "partial response" }] } },
+    ])[0],
+  ).toMatchObject({ status: "running", completedAt: null });
 });
 
 it.effect(
-  "reuses discovery inventory and treats idle status as a completed turn while worker state remains working",
+  "observes foreground turns without a writer and keeps idle background lifecycle separate from turn status",
   () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -130,20 +136,21 @@ it.effect(
           "\n",
       );
       let reads = 0;
+      let inventory: readonly NativeClaudeSession[] = [
+        {
+          kind: "background",
+          cwd: "/work",
+          startedAt: 1,
+          sessionId,
+          id: "11111111",
+          status: "idle",
+          state: "blocked",
+        },
+      ];
       class Client extends NativeClaudeClient {
         override async listSessions() {
           reads += 1;
-          return [
-            {
-              kind: "background" as const,
-              cwd: "/work",
-              startedAt: 1,
-              sessionId,
-              id: "11111111",
-              status: "idle",
-              state: "working",
-            },
-          ];
+          return inventory;
         }
       }
       const source = new NativeClaudeSessions(root, new Client());
@@ -156,5 +163,32 @@ it.effect(
       });
       yield* Effect.promise(() => source.history(sessionId));
       expect(reads).toBe(1);
+      inventory = [{ kind: "interactive", cwd: "/work", startedAt: 1, sessionId, pid: 42 }];
+      const file = path.join(directory, `${sessionId}.jsonl`);
+      yield* fs.writeFileString(
+        file,
+        (yield* fs.readFileString(file)) +
+          JSON.stringify({
+            type: "user",
+            uuid: "foreground-user",
+            parentUuid: "assistant",
+            sessionId,
+            cwd: "/work",
+            message: { content: "continue from terminal" },
+          }) +
+          "\n",
+      );
+      const foreground = yield* Effect.promise(() => source.list());
+      expect(foreground[0]).toMatchObject({ active: true, canObserveActive: true });
+      expect((yield* Effect.promise(() => source.history(sessionId))).at(-1)).toMatchObject({
+        status: "running",
+        completedAt: null,
+      });
+      inventory = [];
+      yield* Effect.promise(() => source.list());
+      expect((yield* Effect.promise(() => source.history(sessionId))).at(-1)).toMatchObject({
+        status: "interrupted",
+        completedAt: null,
+      });
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

@@ -164,3 +164,103 @@ fi
     await NodeFSP.rm(directory, { recursive: true, force: true });
   }
 });
+
+async function withLauncher(
+  script: (directory: string) => string,
+  test: (client: NativeClaudeClient, directory: string) => Promise<void>,
+) {
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-claude-claim-"));
+  const binary = NodePath.join(directory, "fake-claude");
+  await NodeFSP.writeFile(binary, `#!/bin/sh\n${script(directory)}`, { mode: 0o700 });
+  try {
+    await test(new NativeClaudeClient({ binaryPath: binary }), directory);
+  } finally {
+    await NodeFSP.rm(directory, { recursive: true, force: true });
+  }
+}
+
+describe("Claude canonical history claim", () => {
+  it("resumes an inactive full UUID without model or other overrides that would fork saved options", async () => {
+    await withLauncher(
+      (directory) => `
+if [ "$1" = "agents" ]; then
+  if [ -f '${directory}/ready' ]; then printf '%s' '${JSON.stringify([{ ...session, status: "idle" }])}'; else printf '[]'; fi
+elif [ "$1" = "--bg" ]; then
+  [ "$#" = "3" ] && [ "$2" = "--resume" ] && [ "$3" = '${session.sessionId}' ] || exit 41
+  touch '${directory}/ready'
+  printf 'backgrounded · 1234abcd (idle — send a prompt to start)\n'
+else exit 42
+fi
+`,
+      async (client, directory) => {
+        const resumed = await client.startBackground({
+          cwd: directory,
+          sessionId: session.sessionId!,
+          resume: true,
+          model: "must-not-override-saved-options",
+          permissionMode: "default",
+          settings: "{}",
+        });
+        expect(resumed.sessionId).toBe(session.sessionId);
+      },
+    );
+  });
+
+  it("wakes a stopped job with a disposable non-forcing CLI attach and retains its UUID", async () => {
+    await withLauncher(
+      (directory) => `
+if [ "$1" = "agents" ]; then
+  if [ -f '${directory}/ready' ]; then printf '%s' '${JSON.stringify([{ ...session, status: "idle", state: "working", pid: 42 }])}'; else printf '%s' '${JSON.stringify([{ ...session, state: "stopped" }])}'; fi
+elif [ "$1" = "attach" ] && [ "$2" = "1234abcd" ]; then
+  touch '${directory}/ready'
+  while read input; do :; done
+else exit 42
+fi
+`,
+      async (client, directory) => {
+        const resumed = await client.startBackground({
+          cwd: directory,
+          sessionId: session.sessionId!,
+          resume: true,
+        });
+        expect(resumed).toMatchObject({
+          sessionId: session.sessionId,
+          id: session.id,
+          pid: 42,
+          state: "working",
+        });
+      },
+    );
+  });
+
+  it("stops a native fallback copy without attaching or sending to a different UUID", async () => {
+    const copied = {
+      ...session,
+      id: "ffffffff",
+      sessionId: "ffffffff-1234-1234-1234-123456789abc",
+      status: "idle",
+    };
+    await withLauncher(
+      (directory) => `
+printf '%s\n' "$*" >> '${directory}/calls'
+if [ "$1" = "agents" ]; then
+  if [ -f '${directory}/ready' ]; then printf '%s' '${JSON.stringify([copied])}'; else printf '[]'; fi
+elif [ "$1" = "--bg" ]; then
+  touch '${directory}/ready'
+  printf 'backgrounded · ffffffff (idle — send a prompt to start)\n'
+elif [ "$1" = "stop" ] && [ "$2" = "ffffffff" ]; then exit 0
+else exit 42
+fi
+`,
+      async (client, directory) => {
+        await expect(
+          client.startBackground({ cwd: directory, sessionId: session.sessionId!, resume: true }),
+        ).rejects.toMatchObject({ code: "ESESSIONCOPY" });
+        const calls = await NodeFSP.readFile(NodePath.join(directory, "calls"), "utf8");
+        expect(calls).toContain("stop ffffffff");
+        expect(calls).not.toContain("attach");
+        expect(calls).not.toContain("reply");
+      },
+    );
+  });
+});

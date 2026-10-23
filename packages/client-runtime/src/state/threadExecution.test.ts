@@ -189,6 +189,37 @@ describe("thread execution presentation", () => {
     expect(threadRuntimeHasInterruptibleRun(runtime)).toBe(true);
   });
 
+  it("honors the current session interrupt capability while retaining preparation cancellation", () => {
+    const providerSession = (instanceId: ProviderInstanceId, supportsInterrupt: boolean) =>
+      ({
+        providerInstanceId: instanceId,
+        driver: "claude-code",
+        capabilities: { turns: { supportsInterrupt } },
+        lastError: null,
+      }) as never;
+    const sessions = [
+      providerSession(v2Projection.thread.providerInstanceId, false),
+      providerSession(ProviderInstanceId.make("unrelated-provider"), true),
+    ];
+    for (const status of ["running", "preparing", "starting"] as const) {
+      const runtime = deriveThreadRuntime({
+        ...v2Projection,
+        runs: [run("native-turn", 1, status)],
+        providerSessions: sessions,
+        updatedAt: now,
+      });
+      expect(runtime?.supportsInterrupt).toBe(false);
+      expect(threadRuntimeHasInterruptibleRun(runtime)).toBe(status !== "running");
+    }
+    const supported = deriveThreadRuntime({
+      ...v2Projection,
+      runs: [run("supported-turn", 1, "running")],
+      providerSessions: [providerSession(v2Projection.thread.providerInstanceId, true)],
+      updatedAt: now,
+    });
+    expect(threadRuntimeHasInterruptibleRun(supported)).toBe(true);
+  });
+
   it("marks an open run whose provider turn already ended", () => {
     const attemptId = RunAttemptId.make("attempt-open");
     const openRun = { ...run("run-open", 1, "running"), activeAttemptId: attemptId };

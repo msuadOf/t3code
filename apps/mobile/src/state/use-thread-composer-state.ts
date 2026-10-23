@@ -430,9 +430,11 @@ export function useThreadComposerState() {
   }, [editedRunId, selectedThreadKey, selectedThreadRuns]);
 
   const activeThreadBusy = threadRuntimeIsActive(selectedThreadRuntime);
-  const interruptibleRunId = threadRuntimeHasInterruptibleRun(selectedThreadRuntime)
-    ? (selectedThreadRuntime?.activeRunId ?? null)
-    : null;
+  // The shell has no provider capabilities; wait for detail before offering Stop.
+  const interruptibleRunId =
+    selectedThreadProjection && threadRuntimeHasInterruptibleRun(selectedThreadRuntime)
+      ? (selectedThreadRuntime?.activeRunId ?? null)
+      : null;
 
   const cancelQueuedRunEdit = () => {
     if (selectedThreadKey === null || savingQueuedEditRef.current) return;

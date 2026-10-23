@@ -412,6 +412,26 @@ it.effect(
 );
 
 it.effect(
+  "opens a passive observer for an active Claude foreground session without starting a writer",
+  () =>
+    Effect.gen(function* () {
+      const session = { ...native("foreground-cli", "/host/repo", true), canObserveActive: true };
+      const f = fixture([
+        provider(claude, claudeDriver, {
+          list: Effect.succeed([session]),
+          history: () => Effect.succeed([]),
+        }),
+      ]);
+      const context = yield* Layer.build(f.layer);
+      yield* Effect.gen(function* () {
+        yield* (yield* NativeSessionSync.NativeSessionSync).sync;
+        assert.deepEqual(f.opened, [{ instanceId: claude, nativeId: session.id }]);
+        assert.deepEqual(f.resumed, f.opened);
+      }).pipe(Effect.provide(context));
+    }).pipe(Effect.scoped),
+);
+
+it.effect(
   "applies native metadata edges while preserving unchanged-source local titles and archives",
   () =>
     Effect.gen(function* () {
@@ -500,6 +520,14 @@ it.effect(
         yield* sync.sync;
         assert.equal((yield* store.getThread(id)).title, "Next native rename");
         assert.isNull((yield* store.getThread(id)).archivedAt);
+        session = { ...session, model: "claude-sonnet-native" };
+        yield* sync.sync;
+        assert.equal((yield* store.getThread(id)).modelSelection.model, "claude-sonnet-native");
+        assert.equal((yield* store.getThread(id)).title, "Next native rename");
+        assert.isNull((yield* store.getThread(id)).archivedAt);
+        session = { ...session, model: "claude-opus-native" };
+        yield* sync.sync;
+        assert.equal((yield* store.getThread(id)).modelSelection.model, "claude-opus-native");
         const legacy = yield* store.getThread(id);
         yield* sink.write({
           events: [

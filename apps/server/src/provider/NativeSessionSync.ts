@@ -227,19 +227,33 @@ const make = Effect.gen(function* () {
             // A first observation establishes the source baseline. Only later
             // native changes replace metadata; unchanged source values must not
             // overwrite a title or archive action made in T3.
-            if (imported && previousMetadata !== undefined) {
-              const titleChanged = previousMetadata.title !== native.title;
-              const archiveChanged = previousMetadata.archived !== native.archived;
+            if (imported) {
+              const titleChanged =
+                previousMetadata !== undefined && previousMetadata.title !== native.title;
+              const archiveChanged =
+                previousMetadata !== undefined && previousMetadata.archived !== native.archived;
+              // Claude's existing worker owns model selection. Its persisted replies
+              // must also correct stale/default selections after a server restart.
+              const model =
+                instance.driverKind === "claudeAgent" &&
+                native.model !== undefined &&
+                native.model.length > 0
+                  ? native.model
+                  : target.appThread.modelSelection.model;
+              const modelChanged = target.appThread.modelSelection.model !== model;
               const title = titleChanged
                 ? native.title.trim() || `${instance.driverKind} session`
                 : target.appThread.title;
               const archiveStateChanged =
                 archiveChanged && (target.appThread.archivedAt !== null) !== native.archived;
-              if (title !== target.appThread.title || archiveStateChanged) {
+              if (title !== target.appThread.title || archiveStateChanged || modelChanged) {
                 const now = yield* DateTime.now;
                 target.appThread = {
                   ...target.appThread,
                   title,
+                  modelSelection: modelChanged
+                    ? { ...target.appThread.modelSelection, model }
+                    : target.appThread.modelSelection,
                   archivedAt: archiveStateChanged
                     ? native.archived
                       ? now
@@ -341,7 +355,7 @@ const make = Effect.gen(function* () {
             // Only providers that can attach the existing worker may observe live work.
             if (
               native.active &&
-              (instance.driverKind === "opencode" || native.attachable === true)
+              (instance.driverKind === "opencode" || native.canObserveActive === true)
             ) {
               const runtime = yield* manager.open({
                 threadId: target.appThread.id,
