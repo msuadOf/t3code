@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: fork-macos-release-${{ github.ref }}
+  group: fork-macos-release
   cancel-in-progress: false
 
 jobs:
@@ -26,6 +26,7 @@ jobs:
     timeout-minutes: 90
     outputs:
       version: ${{ steps.version.outputs.version }}
+      commit: ${{ steps.version.outputs.commit }}
     env:
       RELEASE_VERSION: ${{ inputs.version || (github.event_name == 'push' && github.ref_name) || '' }}
       T3CODE_TELEMETRY_CHANNEL: dev
@@ -47,6 +48,16 @@ jobs:
             echo "Release version must match the unchanged upstream server and desktop package versions." >&2
             exit 1
           fi
+          release_tag="codex-v$RELEASE_VERSION"
+          existing_tag="$(git ls-remote --tags origin "refs/tags/$release_tag")"
+          if [[ -n "$existing_tag" ]]; then
+            # Rebuilding an existing release must use its original source commit.
+            git fetch --no-tags --depth=1 origin "refs/tags/$release_tag"
+            git checkout --detach FETCH_HEAD
+            test "$(/usr/bin/plutil -extract version raw apps/server/package.json)" = "$RELEASE_VERSION"
+            test "$(/usr/bin/plutil -extract version raw apps/desktop/package.json)" = "$RELEASE_VERSION"
+          fi
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
           echo "version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
       - name: Setup Vite+
@@ -100,7 +111,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RELEASE_VERSION: ${{ needs.build.outputs.version }}
-      RELEASE_COMMIT: ${{ github.sha }}
+      RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -117,6 +128,19 @@ jobs:
 
           SHA256SUMS.txt contains the archive checksums. This preview does not configure an upstream automatic update feed or publish to npm, hosted T3, or an app store.
           NOTES
-          gh release create "codex-v$RELEASE_VERSION" release/*.dmg release/*.zip release/SHA256SUMS.txt \
-            --target "$RELEASE_COMMIT" --title "Shared Codex $RELEASE_VERSION (macOS arm64)" \
-            --notes-file release-notes.md --prerelease --latest=false
+          (cd release && sha256sum -c SHA256SUMS.txt)
+          release_tag="codex-v$RELEASE_VERSION"
+          release_tags="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[].tag_name')"
+          if [[ $'\n'"$release_tags"$'\n' == *$'\n'"$release_tag"$'\n'* ]]; then
+            tagged_commit="$(gh api "repos/$GH_REPO/commits/$release_tag" --jq .sha)"
+            if [[ "$tagged_commit" != "$RELEASE_COMMIT" ]]; then
+              echo "Refusing to replace assets from a different source commit." >&2
+              exit 1
+            fi
+            gh release upload "$release_tag" release/*.dmg release/*.zip --clobber
+            gh release upload "$release_tag" release/SHA256SUMS.txt --clobber
+          else
+            gh release create "$release_tag" release/*.dmg release/*.zip release/SHA256SUMS.txt \
+              --target "$RELEASE_COMMIT" --title "Shared Codex $RELEASE_VERSION (macOS arm64)" \
+              --notes-file release-notes.md --prerelease --latest=false
+          fi
