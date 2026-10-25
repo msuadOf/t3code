@@ -2227,7 +2227,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       return { delivered, stopped };
     });
 
-    const onWake = Effect.fnUntraced(function* (state: ThreadState) {
+    const onWake = Effect.fnUntraced(function* (state: ThreadState, snapshot = false) {
       if (
         connection.shared &&
         input.onExternalTurn !== undefined &&
@@ -2251,6 +2251,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           text: prompt.text,
           cwd: state.directory,
           nativeStatus: "inProgress",
+          ...(snapshot ? { snapshot: true } : {}),
         });
         if (turnInput !== undefined) {
           yield* beginTurn(state, turnInput, false, {
@@ -2643,6 +2644,22 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
      * still the previous execution's, so no `idle` means the turn was interrupted.
      */
     const reconcile = Effect.gen(function* () {
+      // An idle T3 client can miss the CLI's entire execution-start event.
+      const sharedActive =
+        connection.shared && input.onExternalTurn !== undefined
+          ? yield* client.session.active()
+          : undefined;
+      if (sharedActive !== undefined) {
+        for (const [sessionId, state] of threads) {
+          if (
+            sessionId in sharedActive &&
+            state.active === undefined &&
+            state.subagent === undefined
+          ) {
+            yield* onWake(state, true);
+          }
+        }
+      }
       // A subagent's turn ends before the turn that waits on it, so the
       // deepest sessions are read back first.
       const running = [...threads]
@@ -2657,11 +2674,12 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         background.length === 0 &&
         busy.size === 0 &&
         !marked &&
-        strays.size === 0
+        strays.size === 0 &&
+        sharedActive === undefined
       ) {
         return;
       }
-      const active = yield* client.session.active();
+      const active = sharedActive ?? (yield* client.session.active());
       for (const sessionId of busy) if (!(sessionId in active)) busy.delete(sessionId);
       for (const state of threads.values()) {
         if (state.unsettled && !(state.sessionId in active)) state.unsettledStarted = true;
@@ -2705,7 +2723,11 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         yield* Effect.forkIn(stopStrays(thread), sessionScope);
       }
       const listed = new Map<string, Set<string>>();
-      for (const sessionId of Object.keys(active)) {
+      const requestSessions = new Set([
+        ...Object.keys(active),
+        ...(sharedActive === undefined ? [] : threads.keys()),
+      ]);
+      for (const sessionId of requestSessions) {
         if (ownerOf(sessionId) === undefined) continue;
         const sessionID = Session.ID.make(sessionId);
         const [permissions, forms] = yield* Effect.all([
@@ -2743,7 +2765,21 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       yield* Scope.close(previous, Exit.void);
       // A restarted server forgot T3's MCP servers; the next turn adds them again.
       for (const state of threads.values()) state.mcp = undefined;
-      yield* lock.withPermit(reconcile).pipe(Effect.timeout(RECONCILE_TIMEOUT));
+      yield* lock
+        .withPermit(
+          Effect.gen(function* () {
+            const previousFailure = streamFailure;
+            streamFailure = undefined;
+            yield* reconcile.pipe(
+              Effect.onError(() =>
+                Effect.sync(() => {
+                  streamFailure = previousFailure;
+                }),
+              ),
+            );
+          }),
+        )
+        .pipe(Effect.timeout(RECONCILE_TIMEOUT));
       return stream;
     }).pipe(
       Effect.retry({ times: RECONNECT_ATTEMPTS - 1, schedule: Schedule.spaced(RECONNECT_DELAY) }),
@@ -3602,7 +3638,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           if (connection.shared && state.active === undefined) {
             const active = yield* client.session.active();
             if (sessionId in active) {
-              yield* onWake(state);
+              yield* onWake(state, true);
               yield* backfill(sessionId, state);
               yield* reconcile;
             }

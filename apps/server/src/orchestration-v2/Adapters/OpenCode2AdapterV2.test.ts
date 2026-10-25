@@ -519,6 +519,89 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       }).pipe(Effect.scoped, Effect.provide(IdAllocator.layer)),
   );
 
+  it.effect("recovers a CLI turn and approval missed by an idle shared client", () =>
+    Effect.gen(function* () {
+      const prompt = {
+        id: "msg_cli_disconnected",
+        type: "user",
+        text: "Started from CLI while disconnected",
+        time: { created: 1790656601410 },
+      };
+      let adopted: ProviderAdapter.ProviderAdapterV2ExternalTurnInput | undefined;
+      const runtime = yield* openCode2ReplayRuntime(
+        [
+          ...opening,
+          out("session.get", { sessionID: SESSION }),
+          replyData("session.get", sessionInfo()),
+          out("session.active"),
+          replyData("session.active", {}),
+          { type: "runtime_exit", status: "success" },
+          out("event.subscribe"),
+          out("session.active"),
+          replyData("session.active", { [SESSION]: { type: "running" } }),
+          out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+          reply("message.list", { data: [prompt], cursor: {} }),
+          out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+          reply("message.list", { data: [history.data[1], prompt], cursor: {} }),
+          ...openRequests([shellAsk.data]),
+          out("permission.reply", {
+            sessionID: SESSION,
+            requestID: shellAsk.data.id,
+            decision: "once",
+          }),
+          reply("permission.reply", null),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ],
+        {
+          shared: true,
+          external: true,
+          onExternalTurn: (native) => {
+            adopted = native;
+            return Effect.gen(function* () {
+              return turnInput(providerThread(yield* DateTime.now));
+            });
+          },
+        },
+      );
+      yield* runtime.resumeThread({
+        providerThread: providerThread(yield* DateTime.now),
+        threadId,
+        modelSelection: bigPickle,
+        runtimePolicy: policy(),
+      });
+      const collected = yield* runtime.events.pipe(
+        Stream.tap((entry) =>
+          entry.type === "runtime_request.updated" && entry.runtimeRequest.status === "pending"
+            ? runtime.respondToRuntimeRequest({
+                requestId: entry.runtimeRequest.id,
+                decision: "accept",
+              })
+            : Effect.void,
+        ),
+        Stream.takeUntil((entry) => entry.type === "turn.terminal"),
+        Stream.runCollect,
+      );
+      assert.equal(adopted?.nativeTurnId, prompt.id);
+      assert.equal(adopted?.snapshot, true);
+      assert.isTrue(
+        collected.some(
+          (entry) =>
+            entry.type === "runtime_request.updated" &&
+            entry.runtimeRequest.nativeRequestRef?.nativeId === shellAsk.data.id,
+        ),
+      );
+      assert.isTrue(
+        collected.some(
+          (entry) =>
+            entry.type === "turn_item.updated" &&
+            "text" in entry.turnItem &&
+            entry.turnItem.text === "391 is not prime: it's the product 17 × 23.",
+        ),
+      );
+      assert.deepInclude(collected.at(-1), { type: "turn.terminal", status: "completed" });
+    }).pipe(Effect.scoped, Effect.provide(IdAllocator.layer)),
+  );
+
   it.effect("switches the session's model and variant before a turn that changed them", () =>
     Effect.gen(function* () {
       const { runtime, thread } = yield* resumed([
