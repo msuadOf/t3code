@@ -438,7 +438,6 @@ export class NativeClaudeClient {
     readonly model?: string;
     readonly permissionMode?: string;
     readonly resume?: boolean;
-    readonly settings?: string;
   }): Promise<NativeClaudeSession> {
     if (this.options.platform === "win32")
       throw new NativeClaudeError(
@@ -473,7 +472,6 @@ export class NativeClaudeClient {
         : [
             ...(input.model ? ["--model", input.model] : []),
             ...(input.permissionMode ? ["--permission-mode", input.permissionMode] : []),
-            ...(input.settings ? ["--settings", input.settings] : []),
           ]),
     ];
     const output = await this.runCLI(args, input.cwd);

@@ -263,7 +263,6 @@ fi
           resume: true,
           model: "must-not-override-saved-options",
           permissionMode: "default",
-          settings: "{}",
         });
         expect(resumed.sessionId).toBe(session.sessionId);
       },
