@@ -78,19 +78,17 @@ it.effect(
                   writes.push(...events);
                   for (const event of events) {
                     if (event.type === "run.created")
-                      projection = { ...projection, runs: projection.runs.concat(event.payload) };
+                      Object.assign(projection, { runs: projection.runs.concat(event.payload) });
                     if (event.type === "run-attempt.created")
-                      projection = {
-                        ...projection,
+                      Object.assign(projection, {
                         attempts: projection.attempts.concat(event.payload),
-                      };
+                      });
                     if (event.type === "node.updated")
-                      projection = { ...projection, nodes: projection.nodes.concat(event.payload) };
+                      Object.assign(projection, { nodes: projection.nodes.concat(event.payload) });
                     if (event.type === "checkpoint-scope.created")
-                      projection = {
-                        ...projection,
+                      Object.assign(projection, {
                         checkpointScopes: projection.checkpointScopes.concat(event.payload),
-                      };
+                      });
                   }
                   return [];
                 }),
