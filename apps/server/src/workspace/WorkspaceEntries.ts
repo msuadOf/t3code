@@ -275,7 +275,8 @@ export const make = Effect.gen(function* () {
         candidates,
         Effect.fnUntraced(function* (entry) {
           const target = yield* entryType(parentPath, entry);
-          return target?.type.isDirectory()
+          return target?.type.isDirectory() &&
+            (!entry.isSymbolicLink() || !target.realPath.split(path.sep).includes(".git"))
             ? [{ name: entry.name, fullPath: path.join(parentPath, entry.name) }]
             : [];
         }),

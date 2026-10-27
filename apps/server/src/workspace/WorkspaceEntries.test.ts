@@ -679,6 +679,9 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         yield* fs.symlink(target, path.join(cwd, "project-link"));
+        yield* fs.makeDirectory(path.join(target, ".git", "objects"), { recursive: true });
+        yield* fs.symlink(path.join(target, ".git"), path.join(cwd, "metadata"));
+        yield* fs.symlink(path.join(target, ".git", "objects"), path.join(cwd, "objects"));
         yield* fs.symlink(path.join(target, "missing"), path.join(cwd, "broken"));
         const entries = yield* WorkspaceEntries.WorkspaceEntries;
         const result = yield* entries.browse({ partialPath: yield* appendSeparator(cwd) });
