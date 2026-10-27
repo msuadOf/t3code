@@ -36,8 +36,21 @@ hides discovered sessions without deleting their history or stopping CLI work.
 
 To use another existing OpenCode server, set **Server URL** and its password in
 provider settings. The CLI must attach to that same server to share live work.
-T3 Code uses only the configured password for an explicit server URL. If connection
-checks fail, check the URL, credentials, and OpenCode version, then refresh status.
+T3 Code uses only the configured password for an explicit server URL. On the
+server machine, open that same server and session in the terminal:
+
+```sh
+opencode --server http://127.0.0.1:4096 --session <native-session-id>
+```
+
+Use the actual **Server URL** and the same server credentials in the CLI's
+environment. The session ID belongs to OpenCode; the server password is separate
+from T3's pairing token. If connection checks fail, check the URL, credentials,
+and OpenCode version, then refresh status.
+
+CLI work can continue while T3 is disconnected. On reconnect, T3 reads the native
+history, current execution, and pending questions or approvals so work that began
+during the disconnect can reappear without submitting its prompt again.
 
 A native background service owns its own credentials. The password field applies
 to an explicit server URL; it does not replace the native service's password.
