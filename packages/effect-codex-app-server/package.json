@@ -26,6 +26,10 @@
     "./errors": {
       "types": "./src/errors.ts",
       "import": "./src/errors.ts"
+    },
+    "./daemon": {
+      "types": "./src/daemon.ts",
+      "import": "./src/daemon.ts"
     }
   },
   "scripts": {
@@ -35,13 +39,15 @@
     "probe": "node test/examples/codex-app-server-probe.ts"
   },
   "dependencies": {
+    "@effect/platform-node": "catalog:",
     "effect": "catalog:"
   },
   "devDependencies": {
     "@effect/openapi-generator": "catalog:",
-    "@effect/platform-node": "catalog:",
     "@effect/vitest": "catalog:",
     "@types/node": "catalog:",
-    "vite-plus": "catalog:"
+    "@types/ws": "catalog:",
+    "vite-plus": "catalog:",
+    "ws": "catalog:"
   }
 }

@@ -3527,11 +3527,14 @@ function runBackgroundItemScenario(
   key: string,
   makeEvents: (ids: BackgroundScenarioIds) => ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>,
   options?: {
+    readonly external?: boolean;
     readonly keepEventStreamOpen?: boolean;
     readonly loadInheritedBackgroundTurnItems?: () => Effect.Effect<
       ReadonlyArray<{ readonly id: TurnItemId; readonly runId: RunId }>
     >;
     readonly onSubscribe?: Effect.Effect<void>;
+    readonly onObservationClosed?: Effect.Effect<void>;
+    readonly skipStart?: boolean;
     readonly onEventsConsumed?: Effect.Effect<void>;
     readonly afterEvents?: (
       activity: PreviewAgentActivity.PreviewAgentActivity["Service"],
@@ -3599,8 +3602,15 @@ function runBackgroundItemScenario(
 
     yield* Effect.gen(function* () {
       const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
-      yield* runExecution.startRootRun({
+      const execute = options?.external
+        ? runExecution.observeExternalRun
+        : runExecution.startRootRun;
+      yield* execute({
         commandId: CommandId.make(`command:${key}`),
+        ...(options?.onObservationClosed === undefined
+          ? {}
+          : { onObservationClosed: options.onObservationClosed }),
+        ...(options?.skipStart ? { shouldStartProviderTurn: () => Effect.succeed(false) } : {}),
         appThread: rootAppThread(ids.threadId),
         providerSessionId: ProviderSessionId.make(`session:${key}`),
         session: {
@@ -3625,7 +3635,10 @@ function runBackgroundItemScenario(
               close: Deferred.succeed(ingestionDone, undefined),
             };
           }),
-          startTurn: () => Effect.void,
+          startTurn: () =>
+            options?.external
+              ? Effect.die("External observation started a second native turn")
+              : Effect.void,
         } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
         run: {
           id: ids.runId,
@@ -3674,8 +3687,10 @@ function runBackgroundItemScenario(
       });
     }).pipe(Effect.provide(layerTest));
 
-    const closed = yield* Deferred.await(ingestionDone).pipe(Effect.timeoutOption("2 seconds"));
-    assert.isTrue(Option.isSome(closed), "event ingestion fiber did not finish");
+    if (!options?.skipStart) {
+      const closed = yield* Deferred.await(ingestionDone).pipe(Effect.timeoutOption("2 seconds"));
+      assert.isTrue(Option.isSome(closed), "event ingestion fiber did not finish");
+    }
     return yield* Ref.get(observed);
   });
 }
@@ -3725,5 +3740,51 @@ it.effect("keeps a failed root's still-running native children live while the ru
       written.some((event) => event.type === "subagent.updated"),
       "a child that outlives the failed root must not be settled with it",
     );
+  }),
+);
+
+it.effect(
+  "observes and finalizes an externally started native turn without sending another input",
+  () =>
+    Effect.gen(function* () {
+      const observed = yield* runBackgroundItemScenario(
+        "external-live-run",
+        (ids) => [
+          backgroundTurnItemEvent(ids, "command_execution", "running", 1),
+          backgroundTurnItemEvent(ids, "command_execution", "completed", 2),
+          rootTerminalEvent(ids, "completed"),
+        ],
+        { external: true },
+      );
+      assert.deepEqual(observed, ["turn_item:running", "turn_item:completed", "root-finalized"]);
+    }),
+);
+
+it.effect("releases external observation when its event subscription closes", () =>
+  Effect.gen(function* () {
+    const released = yield* Deferred.make<void>();
+    yield* runBackgroundItemScenario(
+      "external-observation-closed",
+      (ids) => [rootTerminalEvent(ids, "completed")],
+      {
+        external: true,
+        onObservationClosed: Deferred.succeed(released, undefined).pipe(Effect.asVoid),
+      },
+    );
+    const result = yield* Deferred.await(released).pipe(Effect.timeoutOption("2 seconds"));
+    assert.isTrue(Option.isSome(result), "external observation was not released");
+  }),
+);
+
+it.effect("releases external observation when preparation exits before subscription", () =>
+  Effect.gen(function* () {
+    const released = yield* Deferred.make<void>();
+    yield* runBackgroundItemScenario("external-preparation-exit", () => [], {
+      external: true,
+      skipStart: true,
+      onObservationClosed: Deferred.succeed(released, undefined).pipe(Effect.asVoid),
+    });
+    const result = yield* Deferred.await(released).pipe(Effect.timeoutOption("2 seconds"));
+    assert.isTrue(Option.isSome(result), "external observation was not released");
   }),
 );

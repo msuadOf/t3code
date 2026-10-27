@@ -103,6 +103,59 @@ const noSpawn = ChildProcessSpawner.make(() =>
 const encodeCredentials = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 it.layer(layerTest)("CodexDriver", (it) => {
+  it.effect("separates continuation identities for distinct shared daemon endpoints", () =>
+    Effect.gen(function* () {
+      const create = (endpoint: string) =>
+        CodexDriver.create({
+          instanceId: ProviderInstanceId.make(
+            endpoint.endsWith("one") ? "daemon-one" : "daemon-two",
+          ),
+          displayName: "Shared Codex",
+          enabled: false,
+          environment: [],
+          config: {
+            ...CodexDriver.defaultConfig(),
+            setupMode: "existing",
+            homePath: "/same-home",
+            daemonEndpoint: endpoint,
+          },
+        });
+      const one = yield* create("unix:///tmp/one");
+      const two = yield* create("unix:///tmp/two");
+      expect(one.continuationIdentity.continuationKey).not.toBe(
+        two.continuationIdentity.continuationKey,
+      );
+    }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn), Effect.scoped),
+  );
+  it.effect(
+    "uses the existing CLI home from provider environment without creating an auth overlay",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "codex-direct-home-" });
+        const cliHome = NodePath.join(directory, "cli-home");
+        const shadow = NodePath.join(directory, "unused-shadow");
+        const instance = yield* CodexDriver.create({
+          instanceId: ProviderInstanceId.make("direct-existing"),
+          displayName: "Existing CLI",
+          enabled: false,
+          environment: [{ name: "CODEX_HOME", value: cliHome, sensitive: false }],
+          config: {
+            ...CodexDriver.defaultConfig(),
+            setupMode: "existing",
+            homePath: "",
+            shadowHomePath: shadow,
+          },
+        });
+        expect(instance.continuationIdentity.continuationKey).toBe(`codex:home:${cliHome}`);
+        expect(yield* fs.exists(shadow)).toBe(false);
+        expect(yield* fs.exists(cliHome)).toBe(false);
+      }).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn),
+        Effect.scoped,
+      ),
+  );
+
   const checkManagedAccount = (replacementTiming: "unchanged" | "during-probe") =>
     Effect.gen(function* () {
       const instanceId = ProviderInstanceId.make("restored-managed-account");
@@ -265,7 +318,7 @@ it.layer(layerTest)("CodexDriver", (it) => {
         yield* Deferred.await(observedAccount);
 
         const threadId = ThreadId.make("managed-account-thread");
-        yield* instance.orchestrationAdapter
+        const open = yield* instance.orchestrationAdapter
           .openSession({
             threadId,
             providerSessionId: ProviderSessionId.make("managed-account-session"),
@@ -277,15 +330,8 @@ it.layer(layerTest)("CodexDriver", (it) => {
             }),
           })
           .pipe(Effect.scoped, Effect.exit);
-        expect(launches).toHaveLength(1);
-        const launch = launches[0]!;
-        expect(launch.settings.binaryPath).toBe(executable.executablePath);
-        expect(launch.settings.launchArgs).toContain("openai_token_sharing");
-        expect(launch.environment.ACCESS_TOKEN).toBeUndefined();
-        expect(launch.settings.launchArgs).toContain("__managed-chatgpt-token");
-        expect(launch.settings.launchArgs).not.toContain("dummy-owned-access");
-        expect(launch.environment.OPENAI_API_KEY).toBeUndefined();
-        expect(launch.environment.CODEX_HOME).toBe(launch.settings.homePath);
+        expect(Exit.isFailure(open)).toBe(true);
+        expect(launches).toHaveLength(0);
         const before = yield* instance.auth!.subscribe("test-owner").pipe(Stream.runHead);
         expect(Option.getOrThrow(before).phase).toBe("idle");
         yield* instance.auth!.logout(Effect.void);

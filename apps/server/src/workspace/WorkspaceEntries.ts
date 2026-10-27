@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import type * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 
 import * as Context from "effect/Context";
@@ -22,11 +23,12 @@ import type {
   ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { isExplicitRelativePath, isWindowsAbsolutePath } from "@t3tools/shared/path";
+import { isExplicitRelativePath, isWindowsAbsolutePath, isNetworkPath } from "@t3tools/shared/path";
 import { normalizeSearchQuery } from "@t3tools/shared/searchRanking";
 
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as KnownWorkspaces from "./KnownWorkspaces.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 import * as WorkspaceSearchIndex from "./WorkspaceSearchIndex.ts";
 
@@ -198,6 +200,44 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  // Inspect each link before following it: stat/realpath can authenticate to a UNC host on Windows.
+  const entryType = Effect.fnUntraced(function* (parent: string, entry: NodeFS.Dirent) {
+    const absolutePath = path.join(parent, entry.name);
+    if (!entry.isSymbolicLink()) return { type: entry, realPath: absolutePath };
+    return yield* Effect.tryPromise({
+      try: async () => {
+        let current = path.parse(absolutePath).root;
+        const splitSegments = (value: string) => value.split(path.sep === "\\" ? /[\\/]/ : "/");
+        const segments = splitSegments(absolutePath.slice(current.length));
+        let links = 0;
+        while (segments.length > 0) {
+          const segment = segments.shift()!;
+          if (segment === "" || segment === ".") continue;
+          if (segment === "..") {
+            current = path.dirname(current);
+            continue;
+          }
+          const candidate = path.join(current, segment);
+          const type = await NodeFSP.lstat(candidate);
+          if (type.isSymbolicLink()) {
+            if (++links > 40) return null;
+            const target = await NodeFSP.readlink(candidate);
+            if (isNetworkPath(target)) return null;
+            if (path.isAbsolute(target)) current = path.parse(target).root;
+            const relativeTarget = path.isAbsolute(target) ? target.slice(current.length) : target;
+            segments.unshift(...splitSegments(relativeTarget));
+            continue;
+          }
+          current = candidate;
+          if (segments.length === 0) return { type, realPath: current };
+          if (!type.isDirectory()) return null;
+        }
+        return { type: await NodeFSP.lstat(current), realPath: current };
+      },
+      catch: () => null,
+    }).pipe(Effect.orElseSucceed(() => null));
+  });
+
   const browse: WorkspaceEntries["Service"]["browse"] = Effect.fn("WorkspaceEntries.browse")(
     function* (input) {
       const resolvedInputPath = yield* resolveBrowseTarget(input, path);
@@ -226,23 +266,26 @@ export const make = Effect.gen(function* () {
 
       const showHidden = endsWithSeparator || prefix.startsWith(".");
       const lowerPrefix = prefix.toLowerCase();
-      const entries: Array<{ readonly name: string; readonly fullPath: string }> = [];
-      for (const dirent of dirents) {
-        if (
-          dirent.isDirectory() &&
-          dirent.name.toLowerCase().startsWith(lowerPrefix) &&
-          (showHidden || !dirent.name.startsWith("."))
-        ) {
-          entries.push({
-            name: dirent.name,
-            fullPath: path.join(parentPath, dirent.name),
-          });
-        }
-      }
+      const candidates = dirents.filter(
+        (entry) =>
+          entry.name.toLowerCase().startsWith(lowerPrefix) &&
+          (showHidden || !entry.name.startsWith(".")),
+      );
+      const entries = yield* Effect.forEach(
+        candidates,
+        Effect.fnUntraced(function* (entry) {
+          const target = yield* entryType(parentPath, entry);
+          return target?.type.isDirectory() &&
+            (!entry.isSymbolicLink() || !target.realPath.split(path.sep).includes(".git"))
+            ? [{ name: entry.name, fullPath: path.join(parentPath, entry.name) }]
+            : [];
+        }),
+        { concurrency: 8 },
+      );
 
       return {
         parentPath,
-        entries: entries.toSorted((left, right) => left.name.localeCompare(right.name)),
+        entries: entries.flat().toSorted((left, right) => left.name.localeCompare(right.name)),
       };
     },
   );
@@ -303,37 +346,74 @@ export const make = Effect.gen(function* () {
                   relativePath: directoryPath,
                 })
                 .pipe(Effect.mapError(toError));
-        const { entries, throughSymlink } = yield* Effect.tryPromise({
+        const { children, directory, root, throughSymlink } = yield* Effect.tryPromise({
           try: async () => {
             const root = await NodeFSP.realpath(normalizedCwd);
             const directory = await NodeFSP.realpath(target.absolutePath);
             const relative = path.relative(root, directory);
             if (
-              relative === ".." ||
-              relative.startsWith(`..${path.sep}`) ||
-              path.isAbsolute(relative) ||
+              (isNetworkPath(directory) && !KnownWorkspaces.isWithinRoot(path, directory, root)) ||
               relative.split(path.sep).includes(".git") ||
               target.relativePath.split("/").includes(".git")
             ) {
-              throw new Error("Directory must be inside the workspace and outside .git.");
+              throw new Error(
+                "Directory must be outside .git and network targets must stay inside the workspace.",
+              );
             }
             const children = await NodeFSP.readdir(directory, { withFileTypes: true });
             return {
-              entries: children.flatMap((child): ProjectEntry[] => {
-                if (child.name === ".git" || (!child.isDirectory() && !child.isFile())) return [];
-                return [
-                  {
-                    path: target.relativePath ? `${target.relativePath}/${child.name}` : child.name,
-                    kind: child.isDirectory() ? "directory" : "file",
-                  },
-                ];
-              }),
+              children,
+              directory,
+              root,
               // Git refuses to classify paths beyond a symbolic link.
               throughSymlink: relative !== target.relativePath.split("/").join(path.sep),
             };
           },
           catch: toError,
         });
+        let ancestors: Promise<ReadonlyArray<string>> | undefined;
+        const readAncestors = async () => {
+          const paths = [root];
+          let candidate = normalizedCwd;
+          for (const segment of target.relativePath.split("/").filter(Boolean)) {
+            candidate = path.join(candidate, segment);
+            paths.push(await NodeFSP.realpath(candidate));
+          }
+          return paths;
+        };
+        const entries = (yield* Effect.forEach(
+          children,
+          Effect.fnUntraced(function* (child) {
+            if (child.name === ".git") return [];
+            const resolved = yield* entryType(directory, child);
+            if (!resolved) return [];
+            const { type, realPath: real } = resolved;
+            if (!type.isDirectory() && !type.isFile()) return [];
+            if (child.isSymbolicLink()) {
+              const allowed = yield* Effect.tryPromise({
+                try: async () => {
+                  if (real.split(path.sep).includes(".git")) return false;
+                  if (isNetworkPath(real) && !KnownWorkspaces.isWithinRoot(path, real, root))
+                    return false;
+                  if (!type.isDirectory()) return true;
+                  ancestors ??= readAncestors();
+                  return !(await ancestors).some((ancestor) =>
+                    KnownWorkspaces.isWithinRoot(path, ancestor, real),
+                  );
+                },
+                catch: () => false,
+              }).pipe(Effect.orElseSucceed(() => false));
+              if (!allowed) return [];
+            }
+            return [
+              {
+                path: target.relativePath ? `${target.relativePath}/${child.name}` : child.name,
+                kind: type.isDirectory() ? "directory" : "file",
+              } satisfies ProjectEntry,
+            ];
+          }),
+          { concurrency: 8 },
+        )).flat();
         // stdin avoids argument limits; ignore classification is optional without git/repositories.
         const checkIgnore = (paths: ReadonlyArray<string>) =>
           vcsProcess

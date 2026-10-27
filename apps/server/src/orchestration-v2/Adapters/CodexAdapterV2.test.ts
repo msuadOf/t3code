@@ -32,6 +32,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexReplay from "effect-codex-app-server/replay";
 import type * as CodexSchema from "effect-codex-app-server/schema";
+import * as CodexErrors from "effect-codex-app-server/errors";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Crypto from "effect/Crypto";
@@ -915,6 +916,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       Effect.void,
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
+    onExternalTurn?: ProviderAdapter.ProviderAdapterV2OpenSessionInput["onExternalTurn"],
+    closed?: CodexClient.CodexAppServerClient["Service"]["closed"],
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -943,6 +946,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   (client) =>
                     ({
                       ...client,
+                      ...(closed === undefined ? {} : { closed }),
                       request: (method, params) =>
                         onRequest(method, params).pipe(
                           Effect.andThen(client.request(method, params)),
@@ -972,6 +976,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       });
       const threadId = ThreadId.make(`thread-${transcript.scenario}`);
       const runtime = yield* adapter.openSession({
+        ...(onExternalTurn === undefined ? {} : { onExternalTurn }),
         threadId,
         providerSessionId: ProviderSessionId.make(`provider-session-${transcript.scenario}`),
         modelSelection: CODEX_TEST_MODEL_SELECTION,
@@ -2034,7 +2039,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ),
   );
 
-  it.effect("resumes a provider thread without requesting or decoding its history", () =>
+  it.effect("resumes with an atomic snapshot without overwriting native thread settings", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const scenario = "codex-resume-metadata";
@@ -2056,8 +2061,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 method: "thread/resume",
                 params: {
                   threadId: nativeThreadId,
-                  excludeTurns: true,
-                  config: CodexAdapterV2.CODEX_THREAD_CONFIG,
                 },
               },
             },
@@ -2082,6 +2085,354 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
         ),
+      ),
+    ),
+  );
+
+  it.effect.each(["inProgress", "completed"] as const)(
+    "attaches a %s CLI turn from the resume snapshot without starting another turn",
+    (nativeStatus) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scenario = "codex-live-external-resume";
+          const nativeThreadId = `native-${scenario}`;
+          const nativeTurnId = "cli-owned-turn";
+          const observed: Array<ProviderAdapter.ProviderAdapterV2ExternalTurnInput> = [];
+          let externalInput: ProviderAdapter.ProviderAdapterV2TurnInput | undefined;
+          const transcript = makeCodexReplayTranscript({
+            scenario,
+            entries: [
+              ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "CLI input" }).slice(
+                0,
+                5,
+              ),
+              {
+                type: "expect_outbound",
+                label: "subscribe without settings overrides",
+                frame: {
+                  id: 3,
+                  method: "thread/resume",
+                  params: { threadId: nativeThreadId },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "atomic running snapshot",
+                frame: {
+                  id: 3,
+                  result: {
+                    thread: {
+                      id: nativeThreadId,
+                      updatedAt: 1782622440,
+                      turns: [makeCodexReplayTurn({ id: nativeTurnId, status: nativeStatus })],
+                    },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "CLI output",
+                frame: {
+                  method: "item/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turnId: nativeTurnId,
+                    completedAtMs: 1782622450000,
+                    item: {
+                      id: "cli-answer",
+                      type: "agentMessage",
+                      text: "Shared live answer",
+                      phase: "final_answer",
+                      memoryCitation: null,
+                    },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "CLI terminal",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                  },
+                },
+              },
+            ],
+          });
+          const harness = yield* makeCodexReplayHarness(
+            transcript,
+            undefined,
+            undefined,
+            undefined,
+            (turn) =>
+              Effect.sync(() => {
+                observed.push(turn);
+                return externalInput;
+              }),
+          );
+          externalInput = makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("attempt-external"),
+            text: "CLI input",
+          });
+          yield* harness.runtime.resumeThread({ providerThread: harness.providerThread });
+          yield* harness.firstTerminal;
+          if (nativeStatus === "inProgress")
+            yield* harness.until(() =>
+              harness.events.some(
+                (event) =>
+                  event.type === "message.updated" && event.message.text === "Shared live answer",
+              ),
+            );
+          assert.equal(observed.length, 1);
+          assert.equal(observed[0]?.nativeTurnId, nativeTurnId);
+          assert.equal(harness.terminalEvents()[0]?.status, "completed");
+          if (nativeStatus === "inProgress")
+            assert.isTrue(
+              harness.events.some(
+                (event) =>
+                  event.type === "message.updated" && event.message.text === "Shared live answer",
+              ),
+            );
+        }),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect("resolves an approval answered by another daemon client without replying again", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const scenario = "codex-shared-approval-resolved";
+        const nativeThreadId = `native-${scenario}`;
+        const nativeTurnId = "shared-approval-turn";
+        const transcript = makeCodexReplayTranscript({
+          scenario,
+          entries: [
+            ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "Check files" }),
+            {
+              type: "emit_inbound",
+              label: "shared approval",
+              frame: {
+                id: 900,
+                method: "item/commandExecution/requestApproval",
+                params: {
+                  threadId: nativeThreadId,
+                  turnId: nativeTurnId,
+                  itemId: "command-one",
+                  approvalId: "not-the-rpc-id",
+                  command: "cat README.md",
+                  startedAtMs: 1782622441000,
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              label: "barrier after the UI saw approval",
+              frame: {
+                id: 4,
+                method: "thread/resume",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "another client resolved the real RPC id",
+              frame: {
+                method: "serverRequest/resolved",
+                params: { threadId: nativeThreadId, requestId: 900 },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "barrier response",
+              frame: {
+                id: 4,
+                result: { thread: { id: nativeThreadId, updatedAt: 1782622440 } },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "completed",
+              frame: {
+                method: "turn/completed",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                },
+              },
+            },
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        const turn = makeCodexTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("shared-approval-attempt"),
+          text: "Check files",
+        });
+        yield* harness.runtime.startTurn(turn);
+        yield* harness.until(() =>
+          harness.events.some(
+            (event) =>
+              event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+          ),
+        );
+        yield* harness.runtime.resumeThread({ providerThread: harness.providerThread });
+        yield* harness.firstTerminal;
+        const states = harness.events.flatMap((event) =>
+          event.type === "runtime_request.updated" ? [event.runtimeRequest.status] : [],
+        );
+        assert.deepEqual(states, ["pending", "resolved"]);
+        assert.isTrue(
+          harness.events.some(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "approval_request" &&
+              event.turnItem.status === "completed",
+          ),
+        );
+      }),
+    ).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect("reports a native rewind while idle without starting or interrupting a turn", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const scenario = "codex-idle-native-rewind";
+        const nativeThreadId = `native-${scenario}`;
+        const transcript = makeCodexReplayTranscript({
+          scenario,
+          entries: [
+            ...codexReplayPreamble({
+              nativeThreadId,
+              nativeTurnId: "unused",
+              prompt: "unused",
+            }).slice(0, 5),
+            {
+              type: "expect_outbound",
+              label: "subscribe before CLI rewind",
+              frame: {
+                id: 3,
+                method: "thread/resume",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "subscribed",
+              frame: {
+                id: 3,
+                result: { thread: { id: nativeThreadId, updatedAt: 1782622440 } },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "CLI reverted history",
+              frame: {
+                method: "thread/reverted",
+                params: { threadId: nativeThreadId },
+              },
+            },
+            {
+              type: "expect_outbound",
+              label: "read retained turn identities",
+              frame: {
+                id: 4,
+                method: "thread/turns/list",
+                params: {
+                  threadId: nativeThreadId,
+                  cursor: null,
+                  limit: 100,
+                  sortDirection: "asc",
+                  itemsView: "summary",
+                },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "retained turn identities",
+              frame: {
+                id: 4,
+                result: {
+                  data: [makeCodexReplayTurn({ id: "retained-cli-turn", status: "completed" })],
+                  nextCursor: null,
+                },
+              },
+            },
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        yield* harness.runtime.resumeThread({ providerThread: harness.providerThread });
+        yield* harness.until(() =>
+          harness.events.some(
+            (event) =>
+              event.type === "provider_thread.updated" && event.retainedNativeTurnIds !== undefined,
+          ),
+        );
+        const rewinds = harness.events.flatMap((event) =>
+          event.type === "provider_thread.updated" && event.retainedNativeTurnIds !== undefined
+            ? [event]
+            : [],
+        );
+        assert.equal(rewinds.length, 1);
+        assert.deepEqual(rewinds[0]?.retainedNativeTurnIds, ["retained-cli-turn"]);
+        assert.equal(rewinds[0]?.providerThread.id, harness.providerThread.id);
+      }),
+    ).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
+
+  it.effect("fails its event stream when a shared daemon connection closes while idle", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const scenario = "codex-idle-daemon-disconnect";
+        const closed = yield* Deferred.make<CodexErrors.CodexAppServerError>();
+        const transcript = makeCodexReplayTranscript({
+          scenario,
+          entries: codexReplayPreamble({
+            nativeThreadId: "disconnect-thread",
+            nativeTurnId: "unused",
+            prompt: "unused",
+          }).slice(0, 5),
+        });
+        const harness = yield* makeCodexReplayHarness(
+          transcript,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          Deferred.await(closed),
+        );
+        const failure = harness.runtime.events.pipe(
+          Stream.runDrain,
+          Effect.flip,
+          Effect.forkScoped,
+        );
+        const failureFiber = yield* failure;
+        yield* Deferred.succeed(closed, new CodexErrors.CodexAppServerInputStreamEndedError({}));
+        const error = yield* Fiber.join(failureFiber);
+        assert.equal(error._tag, "ProviderAdapterEventStreamError");
+        if (error._tag === "ProviderAdapterEventStreamError")
+          assert.equal(error.providerSessionId, harness.runtime.providerSessionId);
+      }),
+    ).pipe(
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
       ),
     ),
   );
@@ -2112,10 +2463,6 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         const nativeThreadId = "saved-thread";
         const params = {
           threadId: nativeThreadId,
-          excludeTurns: true,
-          cwd: CODEX_TEST_RUNTIME_POLICY.cwd,
-          model: CODEX_TEST_MODEL_SELECTION.model,
-          config: CodexAdapterV2.CODEX_THREAD_CONFIG,
         };
         const entries: Array<CodexReplay.CodexAppServerReplayEntry> = [
           ...codexReplayPreamble({
@@ -2147,7 +2494,16 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               frame:
                 failAt === 4
                   ? { id: 4, error: { code: -32600, message: finalError } }
-                  : { id: 4, result: { thread: { turns: [{ type: "unknown-history-item" }] } } },
+                  : {
+                      id: 4,
+                      result: {
+                        thread: {
+                          turns: [
+                            makeCodexReplayTurn({ id: "archived-history", status: "completed" }),
+                          ],
+                        },
+                      },
+                    },
             },
           );
         }
@@ -2170,7 +2526,9 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                         thread: {
                           id: nativeThreadId,
                           updatedAt: 1782622450,
-                          turns: [{ type: "unknown-history-item" }],
+                          turns: [
+                            makeCodexReplayTurn({ id: "archived-history", status: "completed" }),
+                          ],
                         },
                       },
                     },
@@ -2844,8 +3202,9 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         yield* unload;
         assert.isTrue(yield* harness.hasPendingBackgroundWork);
         yield* unload;
-        assert.equal(yield* harness.hasPendingBackgroundWork, retainContext);
+        // RPC responses can arrive before the ordered notification consumer.
         yield* Deferred.await(interrupted);
+        assert.equal(yield* harness.hasPendingBackgroundWork, retainContext);
         yield* unload;
         if (retainContext) yield* Deferred.await(monitorCompleted);
         assert.deepEqual(

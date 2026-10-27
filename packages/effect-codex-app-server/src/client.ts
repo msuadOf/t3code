@@ -1,6 +1,9 @@
 import * as Context from "effect/Context";
+import type * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stdio from "effect/Stdio";
@@ -40,6 +43,7 @@ export class CodexAppServerClient extends Context.Service<
   CodexAppServerClient,
   {
     readonly raw: CodexAppServerClientRaw;
+    readonly closed?: Effect.Effect<CodexError.CodexAppServerError>;
     readonly request: <M extends CodexRpc.ClientRequestMethod>(
       method: M,
       payload: CodexRpc.ClientRequestParamsByMethod[M],
@@ -52,6 +56,7 @@ export class CodexAppServerClient extends Context.Service<
       method: M,
       handler: (
         payload: CodexRpc.ServerRequestParamsByMethod[M],
+        requestId: string | number,
       ) => Effect.Effect<
         CodexRpc.ServerRequestResponsesByMethod[M],
         CodexError.CodexAppServerError
@@ -80,6 +85,7 @@ export class CodexAppServerClient extends Context.Service<
 
 type ServerRequestHandler = (
   payload: unknown,
+  requestId: string | number,
 ) => Effect.Effect<unknown, CodexError.CodexAppServerError>;
 type ServerNotificationHandler = (
   payload: unknown,
@@ -99,6 +105,9 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
   options: CodexAppServerClientOptions = {},
   terminationError?: Effect.Effect<CodexError.CodexAppServerError>,
 ): Effect.fn.Return<CodexAppServerClient["Service"], never, Scope.Scope> {
+  const closed = yield* Deferred.make<CodexError.CodexAppServerError>();
+  const transportClosed = yield* Deferred.make<CodexError.CodexAppServerError>();
+  const notifications = yield* Queue.unbounded<Effect.Effect<void>, Cause.Done<void>>();
   const requestHandlers = new Map<string, ServerRequestHandler>();
   const notificationHandlers = new Map<string, Array<ServerNotificationHandler>>();
   let unknownRequestHandler:
@@ -185,7 +194,9 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
       const handler = requestHandlers.get(method);
 
       return decodeOptionalPayload(method, payloadSchema, request.params).pipe(
-        Effect.flatMap((decoded) => runHandler(handler, decoded, method)),
+        Effect.flatMap((decoded) =>
+          runHandler(handler && ((value) => handler(value, request.id)), decoded, method),
+        ),
         Effect.flatMap((result) => encodeOptionalPayload(method, responseSchema, result)),
       );
     }
@@ -195,14 +206,40 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
       : Effect.fail(CodexError.CodexAppServerRequestError.methodNotFound(request.method));
   };
 
+  // Handlers can await a resume reply or issue another RPC. Keep their ordered
+  // execution off the input reader so the awaited response can still be decoded.
+  yield* Stream.fromQueue(notifications).pipe(
+    Stream.runForEach((dispatch) => dispatch),
+    Effect.andThen(Deferred.await(transportClosed)),
+    Effect.flatMap((error) => Deferred.succeed(closed, error)),
+    Effect.forkScoped,
+  );
+
   const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
     stdio,
     ...(terminationError ? { terminationError } : {}),
     ...(options.logIncoming !== undefined ? { logIncoming: options.logIncoming } : {}),
     ...(options.logOutgoing !== undefined ? { logOutgoing: options.logOutgoing } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
-    onNotification: dispatchNotification,
-    onRequest: dispatchRequest,
+    shouldHandleRequest: (request) =>
+      requestHandlers.has(request.method) || unknownRequestHandler !== undefined,
+    // The protocol has already failed pending RPCs, releasing resume barriers.
+    // Drain notifications read before EOF before exposing closure to adapters.
+    onTermination: (error) =>
+      Deferred.succeed(transportClosed, error).pipe(
+        Effect.andThen(Queue.end(notifications)),
+        Effect.asVoid,
+      ),
+    onNotification: (notification) =>
+      Queue.offer(notifications, dispatchNotification(notification)).pipe(Effect.asVoid),
+    onRequest: Effect.fn("CodexClient.dispatchOrderedRequest")(function* (request) {
+      // Requests must observe earlier item notifications (approval paths, etc.)
+      // but their possibly long user interaction must not hold the queue.
+      const ready = yield* Deferred.make<void>();
+      yield* Queue.offer(notifications, Deferred.succeed(ready, undefined).pipe(Effect.asVoid));
+      yield* Deferred.await(ready);
+      return yield* dispatchRequest(request);
+    }),
   });
 
   const request = <M extends CodexRpc.ClientRequestMethod>(
@@ -230,6 +267,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     );
 
   return CodexAppServerClient.of({
+    closed: Deferred.await(closed),
     raw: {
       notifications: transport.incomingNotifications,
       requests: transport.incomingRequests,

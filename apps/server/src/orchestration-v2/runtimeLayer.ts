@@ -45,6 +45,7 @@ import * as ProviderSwitchService from "./ProviderSwitchService.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
 import * as ProviderTurnStartService from "./ProviderTurnStartService.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
+import * as ExternalCodexRuns from "./ExternalCodexRuns.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
@@ -133,23 +134,6 @@ const layerCommandOutputHubProvided = CommandOutputHub.layer.pipe(
   Layer.provide(Layer.merge(layerEventSinkProvided, ProjectionStore.layer)),
 );
 
-const layerProviderSessionManagerProvided = ProviderSessionManager.layer.pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      layerCommandOutputHubProvided,
-      layerProviderAdapterRegistryProvided,
-      layerEventSinkProvided,
-      IdAllocator.layer,
-      layerProviderEventIngestorProvided,
-      ProjectionStore.layer,
-    ),
-  ),
-);
-
-const layerProviderAuthServiceProvided = ProviderAuthService.layer.pipe(
-  Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
-);
-
 const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -162,6 +146,35 @@ const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
       TurnItemPositionStore.layer,
     ),
   ),
+);
+
+const layerExternalCodexRunsProvided = ExternalCodexRuns.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      ProjectionStore.layer,
+      layerEventSinkProvided,
+      IdAllocator.layer,
+      layerRunExecutionServiceProvided,
+    ),
+  ),
+);
+
+const layerProviderSessionManagerProvided = ProviderSessionManager.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerExternalCodexRunsProvided,
+      layerCommandOutputHubProvided,
+      layerProviderAdapterRegistryProvided,
+      layerEventSinkProvided,
+      IdAllocator.layer,
+      layerProviderEventIngestorProvided,
+      ProjectionStore.layer,
+    ),
+  ),
+);
+
+const layerProviderAuthServiceProvided = ProviderAuthService.layer.pipe(
+  Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
 );
 
 const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pipe(
@@ -349,6 +362,7 @@ const layerMcpAppRequestsProvided = McpAppRequests.layer.pipe(
 );
 
 export const layer = Layer.mergeAll(
+  layerExternalCodexRunsProvided,
   layerCommandOutputHubProvided,
   layerOrchestratorProvided,
   layerMcpAppRequestsProvided,

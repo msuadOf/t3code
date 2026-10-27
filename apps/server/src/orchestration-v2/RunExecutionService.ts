@@ -550,6 +550,7 @@ export type RunExecutionServiceV2Error = typeof RunExecutionServiceV2Error.Type;
 
 export interface RunExecutionServiceV2StartRootRunInput {
   readonly commandId: CommandId;
+  readonly onObservationClosed?: Effect.Effect<void>;
   readonly appThread: OrchestrationV2AppThread;
   readonly providerSessionId: ProviderSessionId;
   readonly session: ProviderAdapter.ProviderAdapterV2SessionRuntime;
@@ -577,6 +578,9 @@ export interface RunExecutionServiceV2StartRootRunInput {
 }
 
 export interface RunExecutionServiceV2Shape {
+  readonly observeExternalRun: (
+    input: RunExecutionServiceV2StartRootRunInput,
+  ) => Effect.Effect<void, RunExecutionServiceV2Error>;
   readonly startRootRun: (
     input: RunExecutionServiceV2StartRootRunInput,
   ) => Effect.Effect<void, RunExecutionServiceV2Error>;
@@ -873,8 +877,11 @@ export const layer: Layer.Layer<
       },
     );
 
-    return RunExecutionServiceV2.of({
-      startRootRun: Effect.fn("RunExecutionService.startRootRun")(function* (input) {
+    const runner = {
+      executeRootRun: Effect.fn("RunExecutionService.executeRootRun")(function* (
+        input: RunExecutionServiceV2StartRootRunInput,
+        external = false,
+      ) {
         const rootTurnOrigin: ProviderEventIngestor.ProviderTurnOrigin = {
           createdBy: input.message.createdBy,
           creationSource: input.message.creationSource,
@@ -920,21 +927,22 @@ export const layer: Layer.Layer<
                   .responseStreamingMode,
             ),
           );
-          yield* checkpointService
-            .captureBaseline({
-              scope: input.checkpointScope,
-              ordinalWithinScope: Math.max(0, input.run.ordinal - 1),
-            })
-            .pipe(
-              Effect.catchCauseIf(
-                (cause) => !Cause.hasInterruptsOnly(cause),
-                (_cause) =>
-                  Effect.logWarning(
-                    "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
-                    { runId: input.run.id },
-                  ),
-              ),
-            );
+          if (!external)
+            yield* checkpointService
+              .captureBaseline({
+                scope: input.checkpointScope,
+                ordinalWithinScope: Math.max(0, input.run.ordinal - 1),
+              })
+              .pipe(
+                Effect.catchCauseIf(
+                  (cause) => !Cause.hasInterruptsOnly(cause),
+                  (_cause) =>
+                    Effect.logWarning(
+                      "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
+                      { runId: input.run.id },
+                    ),
+                ),
+              );
           if (
             input.shouldStartProviderTurn !== undefined &&
             !(yield* input.shouldStartProviderTurn())
@@ -986,6 +994,7 @@ export const layer: Layer.Layer<
           ),
         );
         if (responseStreamingMode === null) {
+          yield* input.onObservationClosed ?? Effect.void;
           return;
         }
         const terminalEvent = yield* Ref.make<ProviderTerminalEvent | null>(null);
@@ -1503,9 +1512,9 @@ export const layer: Layer.Layer<
                 const providerThread = yield* Ref.get(latestProviderThread);
                 const routing = yield* Ref.get(eventRouting);
                 const rootProviderTurn = yield* Ref.get(latestRootProviderTurn);
-                // Stop background work too; the failed consumer cannot persist terminal events.
+                // An external client's turn remains owned by that client.
                 const abandonedProviderTurn =
-                  routing.rootProviderTurnId !== null && !routing.rootTurnEnded
+                  !external && routing.rootProviderTurnId !== null && !routing.rootTurnEnded
                     ? yield* input.session
                         .interruptTurn({
                           providerThread,
@@ -1599,8 +1608,13 @@ export const layer: Layer.Layer<
           ),
           Effect.ensuring(endPreviewActivity),
           Effect.ensuring(eventSubscription.close),
+          Effect.ensuring(input.onObservationClosed ?? Effect.void),
           Effect.forkDetach,
         );
+
+        // An external client already started this turn. Subscription must exist before
+        // the adapter publishes its context, without sending another native input.
+        if (external) return;
 
         // A provider turn is a sign that the session is still alive. Keep
         // its already-issued MCP credential valid even when the agent goes
@@ -1734,7 +1748,15 @@ export const layer: Layer.Layer<
           ),
         );
       }),
-    } satisfies RunExecutionServiceV2Shape);
+    };
+    return RunExecutionServiceV2.of({
+      startRootRun: Effect.fn("RunExecutionServiceV2.startRootRun")((input) =>
+        runner.executeRootRun(input),
+      ),
+      observeExternalRun: Effect.fn("RunExecutionServiceV2.observeExternalRun")((input) =>
+        runner.executeRootRun(input, true),
+      ),
+    });
   }),
 );
 

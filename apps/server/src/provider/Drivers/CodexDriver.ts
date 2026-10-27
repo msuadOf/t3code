@@ -45,11 +45,6 @@ import {
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "@t3tools/provider-core/server/snapshotSettings";
-import {
-  codexContinuationIdentity,
-  materializeCodexShadowHome,
-  resolveCodexHomeLayout,
-} from "./CodexHomeLayout.ts";
 import { makeManagedCodexProvider } from "./CodexManagedProvider.ts";
 import { codexUsageReader } from "./codexUsage.ts";
 import * as CodexInstallation from "../CodexInstallation.ts";
@@ -57,6 +52,7 @@ import * as CodexManagedTokenBroker from "../CodexManagedTokenBroker.ts";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as CodexDaemonConnection from "../CodexDaemonConnection.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("codex");
@@ -134,9 +130,31 @@ export const CodexDriver: ProviderDriver<
     const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
     const modelCatalog = yield* ModelCatalog.ModelCatalog;
     const currentCatalog = modelCatalog.current(DRIVER_KIND);
-    const processEnv = yield* mergeProviderInstanceEnvironment(environment);
-    const homeLayout = yield* resolveCodexHomeLayout(config);
-    const continuationIdentity = codexContinuationIdentity(homeLayout);
+    const processEnv = yield* mergeProviderInstanceEnvironment(
+      environment,
+      yield* HostProcess.Environment,
+    );
+    const home = yield* HostProcess.HomeDirectory;
+    const sharedHomePath = pathService.resolve(
+      expandHomePath(
+        config.homePath.trim() || processEnv.CODEX_HOME || pathService.join(home, ".codex"),
+        home,
+      ),
+    );
+    const connection = CodexDaemonConnection.resolveConnection(
+      {
+        homePath: sharedHomePath,
+        ...(config.daemonEndpoint === undefined ? {} : { endpoint: config.daemonEndpoint }),
+        environment: processEnv,
+      },
+      pathService,
+    );
+    const continuationIdentity = {
+      driverKind: DRIVER_KIND,
+      continuationKey: connection.managed
+        ? `codex:home:${sharedHomePath}`
+        : `codex:endpoint:${connection.endpoint}`,
+    };
     const stampIdentity = withInstanceIdentity({
       instanceId,
       driverKind: DRIVER_KIND,
@@ -144,31 +162,18 @@ export const CodexDriver: ProviderDriver<
       accentColor,
       continuationGroupKey: continuationIdentity.continuationKey,
     });
-    yield* materializeCodexShadowHome(homeLayout).pipe(
-      Effect.mapError(
-        (cause) =>
-          new ProviderDriverError({
-            driver: DRIVER_KIND,
-            instanceId,
-            detail: cause.message,
-            cause,
-          }),
-      ),
-    );
     const effectiveConfig = {
       ...config,
       enabled,
       binaryPath: expandHomePath(config.binaryPath, yield* HostProcess.HomeDirectory),
-      homePath: homeLayout.effectiveHomePath ?? "",
+      homePath: sharedHomePath,
+      shadowHomePath: "",
     } satisfies CodexSettings;
     const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
-      resolveProviderMaintenanceCapabilitiesEffect(
-        makeCodexMaintenanceResolver(homeLayout.sharedHomePath),
-        {
-          binaryPath: effectiveConfig.binaryPath,
-          env: processEnv,
-        },
-      ).pipe(
+      resolveProviderMaintenanceCapabilitiesEffect(makeCodexMaintenanceResolver(sharedHomePath), {
+        binaryPath: effectiveConfig.binaryPath,
+        env: processEnv,
+      }).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(FileSystem.FileSystem, fileSystem),
         Effect.provideService(Path.Path, pathService),
@@ -182,7 +187,7 @@ export const CodexDriver: ProviderDriver<
         accentColor,
         environment,
         enabled,
-        config,
+        config: effectiveConfig,
       },
       { onUsageLimits: (update) => snapshot.applyUsageLimits(update) },
     ).pipe(
@@ -260,6 +265,9 @@ export const CodexDriver: ProviderDriver<
             probeCodexSkillsForCwd({
               binaryPath: effectiveConfig.binaryPath,
               homePath: effectiveConfig.homePath,
+              ...(effectiveConfig.daemonEndpoint === undefined
+                ? {}
+                : { daemonEndpoint: effectiveConfig.daemonEndpoint }),
               launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
               cwd,
               environment: processEnv,
@@ -267,6 +275,8 @@ export const CodexDriver: ProviderDriver<
               Effect.scoped,
               Effect.timeout("20 seconds"),
               Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.provideService(Path.Path, pathService),
             ),
           ]).pipe(
             Effect.map(([machineSnapshot, skills]) => ({ ...machineSnapshot, skills })),
@@ -281,10 +291,11 @@ export const CodexDriver: ProviderDriver<
             ),
           );
 
-    // Redemption spends account credit; serialize by the auth.json directory, keep one idempotency key
-    // until the outcome, and bound the wait so a hung app-server cannot hold the account lock.
-    // Auth overlays use effectiveHomePath; the continuation key would conflate them with shared homes.
-    const accountKey = homeLayout.effectiveHomePath ?? homeLayout.sharedHomePath;
+    // Redemption spends something on the user's account. It serialises on
+    // the account (instances sharing a Codex home share the credit), keeps
+    // one idempotency key until Codex reports an outcome, and is bounded so
+    // a hung app-server cannot hold the account lock.
+    const accountKey = sharedHomePath;
     const consumeResetCredit: NonNullable<ProviderInstance["consumeResetCredit"]> = () =>
       resetCreditCoordinator
         .redeem(accountKey, (idempotencyKey) =>
@@ -292,6 +303,9 @@ export const CodexDriver: ProviderDriver<
             const { client } = yield* withCodexAppServerClient({
               binaryPath: effectiveConfig.binaryPath,
               homePath: effectiveConfig.homePath,
+              ...(effectiveConfig.daemonEndpoint === undefined
+                ? {}
+                : { daemonEndpoint: effectiveConfig.daemonEndpoint }),
               launchArgs: resolveCodexLaunchArgs(effectiveConfig.launchArgs, processEnv),
               cwd: process.cwd(),
               environment: processEnv,
@@ -304,6 +318,8 @@ export const CodexDriver: ProviderDriver<
         )
         .pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, pathService),
           Effect.mapError(
             (cause) =>
               new ProviderDriverError({

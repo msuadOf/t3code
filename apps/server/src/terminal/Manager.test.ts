@@ -1269,11 +1269,11 @@ it.layer(
       expectedHome: "/configured/codex",
     },
     {
-      name: "Codex shadow home",
+      name: "Codex shared home even when a shadow was configured",
       driver: "codex",
       variable: "CODEX_HOME",
       config: { homePath: "/configured/codex", shadowHomePath: "/configured/codex-shadow" },
-      expectedHome: "/configured/codex-shadow",
+      expectedHome: "/configured/codex",
     },
     {
       name: "Claude home",

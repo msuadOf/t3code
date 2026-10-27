@@ -2533,6 +2533,14 @@ it.effect("ProviderSessionManagerV2 releases sessions when provider event stream
       assert.isTrue(Option.isNone(liveSession));
       assert.equal(runtimeState.closeCount, 1);
       assert.equal(projection.providerSessions.at(-1)?.status, "error");
+      const replacement = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      assert.notStrictEqual(replacement, runtime);
+      assert.equal((yield* Ref.get(state)).openCount, 2);
     });
 
     yield* effect.pipe(
@@ -2985,9 +2993,9 @@ it.effect("ProviderSessionManagerV2 persists session-scoped runtime requests wit
   }),
 );
 
-it.effect(
-  "ProviderSessionManagerV2 opens one shared runtime, broadcasts events, and detaches threads independently",
-  () =>
+it.effect.each([false, true])(
+  "ProviderSessionManagerV2 shares a runtime and detaches threads with preserveNativeWork=%s",
+  (preserveNativeWork) =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
       const effect = Effect.gen(function* () {
@@ -3131,10 +3139,10 @@ it.effect(
 
         assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, []);
 
-        yield* manager.detach({ providerSessionId, threadId: firstThreadId });
+        yield* manager.detach({ providerSessionId, threadId: firstThreadId, preserveNativeWork });
         assert.isTrue(Option.isSome(yield* manager.get(providerSessionId)));
         assert.equal((yield* Ref.get(state)).closeCount, 0);
-        assert.equal((yield* Ref.get(state)).interruptCount, 1);
+        assert.equal((yield* Ref.get(state)).interruptCount, preserveNativeWork ? 0 : 1);
         assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, ["native-thread"]);
 
         yield* manager.detach({ providerSessionId, threadId: secondThreadId });
