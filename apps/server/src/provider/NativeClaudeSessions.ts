@@ -41,18 +41,17 @@ function timestamp(value: unknown, fallback: number): number {
 
 /** Follow the last persisted conversation leaf so abandoned /rewind branches are not replayed. */
 function conversationBranch(entries: readonly Entry[]): readonly Entry[] {
-  const messages = entries.filter(
-    (entry) =>
-      (entry.type === "user" || entry.type === "assistant") &&
-      typeof entry.uuid === "string" &&
-      entry.isSidechain !== true,
+  const nodes = entries.filter(
+    (entry) => typeof entry.uuid === "string" && entry.isSidechain !== true,
   );
+  const parents = new Set(nodes.map((entry) => entry.parentUuid));
   const byId = new Map(
     entries
       .filter((entry) => typeof entry.uuid === "string")
       .map((entry) => [entry.uuid as string, entry]),
   );
-  let cursor = messages.at(-1);
+  // Native persistence can flush an assistant before its buffered user/attachment ancestors.
+  let cursor = nodes.findLast((entry) => !parents.has(entry.uuid));
   const selected: Entry[] = [];
   const seen = new Set<string>();
   while (cursor && typeof cursor.uuid === "string" && !seen.has(cursor.uuid)) {

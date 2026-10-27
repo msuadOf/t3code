@@ -29,12 +29,41 @@ then select the resulting session in T3. The CLI may assign that background sess
 a new UUID. T3 can wake a stopped background job through native `attach`; saved
 sessions retain their own model, permission, and environment options.
 
+### Answer questions and approvals from T3
+
+New conversations created in T3 include shared HTTP hooks. Questions and supported
+permission requests appear as interactive requests in the connected clients.
+Permission choices apply once; change persistent permission rules in Claude itself.
+
+A background worker started without these hooks still shares its conversation,
+but its questions and approvals stay in the CLI. To start a CLI-owned worker with
+T3 controls, use the settings path printed in the T3 server log under
+`Claude shared-session hook settings`:
+
+```sh
+claude --settings '/path/from/server/log/settings.json' --bg
+claude attach <id>
+```
+
+Run those commands on the same host as the T3 server. The generated settings keep
+the hook endpoint and its local key together; treat that file as private. Existing
+workers do not automatically load newly written hooks. Start with the settings
+above or explicitly review and reload hook changes in Claude before expecting
+remote questions and approvals.
+
+T3 must be observing the conversation for the hooks to wait for a remote answer.
+Otherwise the CLI handles the request normally. Closing the native request expires
+its T3 control; a repeated answer cannot approve another request. If the server
+stops during a question, the native hook falls back to the CLI. Restarting the same
+T3 environment preserves the endpoint used by existing workers.
+
 The current native daemon integration has these limits:
 
 - Replies, tool output, and thinking blocks appear after Claude persists them.
   Live reasoning token streaming is unavailable.
-- Answer permission dialogs and questions in `claude attach`. T3's structured
-  approval buttons are unavailable for native Claude sessions.
+- Questions use a blocking pre-tool hook. While it waits for T3, Claude may defer
+  its native question dialog. Native cancellation and hook failure remain CLI paths.
+- Workers started without shared hooks keep questions and permissions in `claude attach`.
 - T3 can interrupt an observed running background turn through the native terminal.
   It checks the current turn and worker before sending Ctrl+C. The native terminal
   protocol cannot atomically target a turn, so avoid racing an interrupt with a new

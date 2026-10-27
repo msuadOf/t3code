@@ -203,3 +203,24 @@ it.effect(
       });
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it("follows an assistant leaf flushed before its user and attachment ancestors", () => {
+  const history = nativeClaudeHistory([
+    {
+      type: "assistant",
+      uuid: "answer",
+      parentUuid: "attachment",
+      message: {
+        content: [
+          { type: "tool_use", id: "question", name: "AskUserQuestion", input: { questions: [] } },
+        ],
+        stop_reason: "tool_use",
+      },
+    },
+    { type: "user", uuid: "prompt", parentUuid: null, message: { content: "hello" } },
+    { type: "attachment", uuid: "attachment", parentUuid: "prompt" },
+  ]);
+  expect(history).toHaveLength(1);
+  expect(history[0]?.id).toBe("prompt");
+  expect(history[0]?.items.map((item) => item.type)).toEqual(["user", "tool"]);
+});

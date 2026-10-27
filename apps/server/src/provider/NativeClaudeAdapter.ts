@@ -18,6 +18,14 @@ import * as Queue from "effect/Queue";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import * as Cause from "effect/Cause";
+import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
+import * as PubSub from "effect/PubSub";
+import type { NativeClaudeHooks, NativeClaudeHookRequest } from "./NativeClaudeHooks.ts";
+import {
+  makeNativeClaudeHookArtifacts,
+  nativeClaudeHookResponse,
+} from "./NativeClaudeHookArtifacts.ts";
 import {
   NativeClaudeClient,
   NativeClaudeError,
@@ -116,6 +124,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
   readonly binaryPath: string;
   readonly environment: NodeJS.ProcessEnv;
   readonly client?: NativeClaudeClient;
+  readonly hooks?: NativeClaudeHooks["Service"];
 }) {
   const allocator = yield* IdAllocator.IdAllocatorV2;
   const platform = yield* HostProcess.Platform;
@@ -128,6 +137,18 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
       environment: options.environment,
     });
   const source = new NativeClaudeSessions(options.configDirectory, client);
+  const capabilities = options.hooks
+    ? {
+        ...nativeClaudeCapabilities,
+        approvals: {
+          ...nativeClaudeCapabilities.approvals,
+          supportsCommandApproval: true,
+          supportsFileReadApproval: true,
+          supportsFileChangeApproval: true,
+        },
+        planning: { ...nativeClaudeCapabilities.planning, supportsStructuredQuestions: true },
+      }
+    : nativeClaudeCapabilities;
   const error = (cause: unknown) =>
     new ProviderAdapter.ProviderAdapterProtocolError({
       driver,
@@ -143,7 +164,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
   return {
     instanceId: options.instanceId,
     driver,
-    getCapabilities: () => Effect.succeed(nativeClaudeCapabilities),
+    getCapabilities: () => Effect.succeed(capabilities),
     planSelectionTransition: () => Effect.succeed({ type: "restart_session" as const }),
     openSession: Effect.fn("NativeClaudeAdapter.openSession")(function* (input) {
       const now = yield* DateTime.now;
@@ -154,10 +175,32 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         status: "ready",
         cwd: input.runtimePolicy.cwd ?? process.cwd(),
         model: input.modelSelection.model,
-        capabilities: nativeClaudeCapabilities,
+        capabilities,
         createdAt: now,
         updatedAt: now,
         lastError: null,
+      };
+      const scope = yield* Scope.Scope;
+      const watched = new Set<string>();
+      const hookRequests = new Map<
+        string,
+        {
+          hook: NativeClaudeHookRequest;
+          artifacts: Effect.Success<ReturnType<typeof makeNativeClaudeHookArtifacts>>;
+        }
+      >();
+      const itemOrdinals = new Map<string, Map<string, number>>();
+      const itemOrdinal = (turnId: string, itemId: string) => {
+        let items = itemOrdinals.get(turnId);
+        if (!items) {
+          items = new Map();
+          itemOrdinals.set(turnId, items);
+        }
+        const existing = items.get(itemId);
+        if (existing !== undefined) return existing;
+        const ordinal = items.size + 1;
+        items.set(itemId, ordinal);
+        return ordinal;
       };
       const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event, Cause.Done>();
       const threads = new Map<string, OrchestrationV2ProviderThread>();
@@ -197,6 +240,37 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         }
         return Queue.offer(events, event).pipe(Effect.asVoid);
       };
+      const emitHook = Effect.fn("NativeClaudeAdapter.emitHook")(function* (
+        artifacts: Effect.Success<ReturnType<typeof makeNativeClaudeHookArtifacts>>,
+      ) {
+        yield* emit({ type: "node.updated", driver, node: artifacts.node });
+        yield* emit({ type: "runtime_request.updated", driver, runtimeRequest: artifacts.request });
+        yield* emit({ type: "turn_item.updated", driver, turnItem: artifacts.item });
+      });
+      const expireHook = Effect.fn("NativeClaudeAdapter.expireHook")(function* (id: string) {
+        const pending = hookRequests.get(id);
+        if (!pending) return;
+        hookRequests.delete(id);
+        const now = yield* DateTime.now;
+        yield* emitHook({
+          node: { ...pending.artifacts.node, status: "cancelled", completedAt: now },
+          request: {
+            ...pending.artifacts.request,
+            status: "expired",
+            resolvedAt: now,
+            responseCapability: {
+              type: "not_resumable",
+              reason: "The native hook is no longer waiting.",
+            },
+          },
+          item: {
+            ...pending.artifacts.item,
+            status: "cancelled",
+            completedAt: now,
+            updatedAt: now,
+          },
+        });
+      });
       const nativeId = (thread: OrchestrationV2ProviderThread) =>
         thread.nativeThreadRef?.nativeId ?? "";
       const jobFor = (thread: OrchestrationV2ProviderThread) =>
@@ -210,12 +284,19 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
           requireNativeClaudeBackgroundId(job);
           return job;
         });
+      const observation = yield* Semaphore.make(1);
       const hydrate = Effect.fn("NativeClaudeAdapter.observe")(function* () {
         const inventory = yield* attempt(() => client.listSessions());
         for (const [id, thread] of threads) {
           const history = yield* attempt(() => source.history(id, inventory)).pipe(
             Effect.orElseSucceed(() => []),
           );
+          const nativeHooks = options.hooks ? yield* options.hooks.pending(id) : [];
+          const pendingIds = new Set(nativeHooks.map((hook) => hook.id));
+          for (const [requestId, entry] of hookRequests) {
+            if (entry.hook.sessionId === id && !pendingIds.has(entry.hook.id))
+              yield* expireHook(requestId);
+          }
           const pending = active.get(id);
           const terminalJob = inventory.find((session) => session.sessionId === id);
           if (
@@ -278,7 +359,10 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
             const owner = ownership.input;
             const providerTurnId = allocator.derive.providerTurn({ driver, nativeTurnId: turn.id });
             const startedAt = DateTime.makeUnsafe(turn.startedAt);
-            const job = inventory.find((session) => session.sessionId === id);
+            const job =
+              turn.id === history.at(-1)?.id
+                ? inventory.find((session) => session.sessionId === id)
+                : undefined;
             const finished = nativeClaudeObservedTurnIsTerminal(turn, job, ownership.interrupted);
             const nativeFailure = turn.status === "failed" || job?.state === "failed";
             const wasInterrupted =
@@ -321,7 +405,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                 providerTurnId,
                 nativeItemRef: { driver, nativeId: item.id, strength: "strong" as const },
                 parentItemId: null,
-                ordinal: ++ordinal,
+                ordinal: (ordinal = itemOrdinal(turn.id, item.id)),
                 status: item.status,
                 title: item.title ?? null,
                 startedAt,
@@ -368,6 +452,25 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                 };
               yield* emit({ type: "turn_item.updated", driver, turnItem: projected });
             }
+            for (const hook of nativeHooks) {
+              if (turn.id !== history.at(-1)?.id) continue;
+              if ([...hookRequests.values()].some((entry) => entry.hook.id === hook.id)) continue;
+              // JSONL can lag the callback; bind only after its native tool belongs to this turn.
+              if (hook.toolUseId && !turn.items.some((item) => item.id === hook.toolUseId))
+                continue;
+              if (finished) continue;
+              const artifacts = yield* makeNativeClaudeHookArtifacts(
+                hook,
+                owner,
+                providerTurnId,
+                itemOrdinal(turn.id, `hook:${hook.id}`),
+              ).pipe(
+                Effect.provideService(IdAllocator.IdAllocatorV2, allocator),
+                Effect.mapError(error),
+              );
+              hookRequests.set(String(artifacts.request.id), { hook, artifacts });
+              yield* emitHook(artifacts);
+            }
             if (finished) {
               const common = {
                 type: "turn.terminal" as const,
@@ -400,7 +503,16 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
             }
           }
         }
-      });
+      }, observation.withPermit);
+      if (options.hooks) {
+        const changes = yield* options.hooks.subscribeChanges;
+        yield* PubSub.take(changes).pipe(
+          Effect.andThen(hydrate),
+          Effect.catch(() => Effect.logWarning("Claude native hook projection failed")),
+          Effect.forever,
+          Effect.forkScoped,
+        );
+      }
       yield* hydrate().pipe(
         Effect.catch(() =>
           Effect.logWarning("Claude native observer failed; check native worker availability"),
@@ -413,6 +525,10 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
       ) {
         const id = nativeId(thread);
         threads.set(id, thread);
+        if (options.hooks && !watched.has(id)) {
+          yield* options.hooks.observe(id, scope);
+          watched.add(id);
+        }
         const history = yield* attempt(() => source.history(id)).pipe(
           Effect.orElseSucceed(() => []),
         );
@@ -439,6 +555,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                 : {}),
               cwd: request.runtimePolicy.cwd ?? process.cwd(),
               model: request.modelSelection.model,
+              ...(options.hooks ? { settings: options.hooks.settings } : {}),
               resume: existing !== undefined,
             }),
           );
@@ -528,10 +645,44 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
           ownership.interrupted = true;
           yield* hydrate();
         }),
-        respondToRuntimeRequest: () =>
-          unsupported(
-            "Claude's native daemon does not expose structured approval replies. Answer this permission or question in claude attach; no approval was sent.",
-          ),
+        respondToRuntimeRequest: Effect.fn("NativeClaudeAdapter.respondToRuntimeRequest")(
+          function* (request) {
+            const pending = hookRequests.get(String(request.requestId));
+            if (!options.hooks || !pending)
+              return yield* unsupported(
+                "No live Claude hook owns this request; no approval was sent. Answer in claude attach if the worker was started without shared hooks.",
+              );
+            const response = nativeClaudeHookResponse(pending.hook, request);
+            if (!response)
+              return yield* unsupported(
+                "This request needs complete answers or a one-time approval decision; no approval was sent.",
+              );
+            if (!(yield* options.hooks.answer(pending.hook.id, response))) {
+              yield* expireHook(String(request.requestId));
+              return yield* unsupported(
+                "Claude is no longer waiting for this request; no approval was sent.",
+              );
+            }
+            hookRequests.delete(String(request.requestId));
+            const now = yield* DateTime.now;
+            yield* emitHook({
+              node: { ...pending.artifacts.node, status: "completed", completedAt: now },
+              request: {
+                ...pending.artifacts.request,
+                status: "resolved",
+                resolvedAt: now,
+                ...(request.decision ? { decision: request.decision } : {}),
+                ...(request.answers ? { answers: request.answers } : {}),
+              },
+              item: {
+                ...pending.artifacts.item,
+                status: "completed",
+                completedAt: now,
+                updatedAt: now,
+              },
+            });
+          },
+        ),
         readThreadSnapshot: ({ providerThread }) =>
           attempt(() => source.history(nativeId(providerThread))).pipe(
             Effect.map((history) => ({

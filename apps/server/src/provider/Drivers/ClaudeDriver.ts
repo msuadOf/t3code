@@ -1,4 +1,5 @@
 import { makeClaudeScopedLimitNames } from "../claudeUsageLimits.ts";
+import { makeNativeClaudeHooks } from "../NativeClaudeHooks.ts";
 import { makeNativeClaudeAdapter } from "../NativeClaudeAdapter.ts";
 import { NativeClaudeClient } from "../NativeClaudeClient.ts";
 import { NativeClaudeSessions } from "../NativeClaudeSessions.ts";
@@ -170,9 +171,27 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     });
 
     const scopedLimitNames = yield* makeClaudeScopedLimitNames;
+    const hooks = yield* makeNativeClaudeHooks(
+      path.join(stateDir, "claude-native-hooks", encodeURIComponent(instanceId)),
+    ).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderDriverError({
+            driver: DRIVER_KIND,
+            instanceId,
+            detail: "Failed to open Claude shared-session hook broker.",
+            cause,
+          }),
+      ),
+    );
+    yield* Effect.logInfo("Claude shared-session hook settings", {
+      instanceId,
+      settingsPath: hooks.settingsPath,
+    });
     const orchestrationAdapter = yield* makeNativeClaudeAdapter({
       instanceId,
       configDirectory: configDir,
+      hooks,
       binaryPath: effectiveConfig.binaryPath,
       environment: { ...processEnv, CLAUDE_CONFIG_DIR: configDir },
     }).pipe(
