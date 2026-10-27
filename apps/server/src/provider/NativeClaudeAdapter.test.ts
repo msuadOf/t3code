@@ -228,7 +228,7 @@ describe("Claude native capability boundary", () => {
   it("does not advertise token deltas or a structured permission control that native daemon does not provide", () => {
     expect(nativeClaudeCapabilities.streaming.streamsReasoning).toBe(false);
     expect(nativeClaudeCapabilities.approvals.supportsCommandApproval).toBe(false);
-    expect(nativeClaudeCapabilities.turns.supportsInterrupt).toBe(false);
+    expect(nativeClaudeCapabilities.turns.supportsInterrupt).toBe(true);
   });
 });
 
@@ -269,4 +269,19 @@ it("settles foreground observations from canonical turns without background daem
       { ...foreground, kind: "background", id: "1234abcd", status: "waiting" },
     ),
   ).toBe(false);
+});
+
+it("settles an acknowledged interrupt only after the native worker returns to idle", () => {
+  const turn = { status: "running", completedAt: null };
+  const job: NativeClaudeSession = {
+    kind: "background",
+    cwd: "/work",
+    startedAt: 1,
+    sessionId: nativeId,
+    pid: 42,
+    status: "busy",
+  };
+  expect(nativeClaudeObservedTurnIsTerminal(turn, job, true)).toBe(false);
+  expect(nativeClaudeObservedTurnIsTerminal(turn, { ...job, status: "idle" }, false)).toBe(false);
+  expect(nativeClaudeObservedTurnIsTerminal(turn, { ...job, status: "idle" }, true)).toBe(true);
 });

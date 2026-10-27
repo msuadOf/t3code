@@ -39,8 +39,12 @@ The current native daemon integration has these limits:
   Live reasoning token streaming is unavailable.
 - Answer permission dialogs and questions in `claude attach`. T3's structured
   approval buttons are unavailable for native Claude sessions.
-- Interrupt and steer work from the attached CLI. T3 cannot safely target one
-  native turn with the daemon's current terminal-control protocol.
+- T3 can interrupt an observed running background turn through the native terminal.
+  It checks the current turn and worker before sending Ctrl+C. The native terminal
+  protocol cannot atomically target a turn, so avoid racing an interrupt with a new
+  CLI submission. The temporary control attachment may briefly resize the terminal;
+  the daemon restores the remaining attachment's dimensions when it disconnects.
+  Steering remains available through `claude attach`.
 - Send from T3 while the worker is idle. Avoid submitting identical text from T3
   and the CLI simultaneously: the native reply acknowledgement has no request ID
   to distinguish those submissions.

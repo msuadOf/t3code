@@ -105,6 +105,70 @@ describe("Claude native shared-session transport", () => {
     );
   });
 
+  it("interrupts the same busy worker through a disposable native terminal", async () => {
+    let received: Record<string, unknown> | undefined;
+    let resolveInput!: (input: Buffer) => void;
+    const input = new Promise<Buffer>((resolve) => {
+      resolveInput = resolve;
+    });
+    const busy = { ...session, pid: 42, status: "busy" };
+    await withDaemon(
+      (socket, request) => {
+        received = request;
+        socket.once("data", resolveInput);
+        socket.write('{"ok":true,"op":"attach"}\n');
+      },
+      async (client) => {
+        client.listSessions = async () => [busy];
+        await client.interrupt(busy);
+        expect(await input).toEqual(Buffer.from([3]));
+      },
+    );
+    expect(received).toEqual({
+      proto: 1,
+      op: "attach",
+      short: session.id,
+      auth: "test-control-key",
+      cols: 80,
+      rows: 24,
+    });
+  });
+
+  it("does not send terminal control to an idle worker", async () => {
+    let attached = false;
+    await withDaemon(
+      (socket) => {
+        attached = true;
+        socket.end('{"ok":true,"op":"attach"}\n');
+      },
+      async (client) => {
+        const idle = { ...session, pid: 42, status: "idle" };
+        client.listSessions = async () => [idle];
+        await expect(client.interrupt(idle)).rejects.toMatchObject({ code: "EIDLE" });
+      },
+    );
+    expect(attached).toBe(false);
+  });
+
+  it("does not interrupt a replacement worker after terminal attachment", async () => {
+    let written = false;
+    const busy = { ...session, pid: 42, status: "busy" };
+    await withDaemon(
+      (socket) => {
+        socket.on("data", () => {
+          written = true;
+        });
+        socket.write('{"ok":true,"op":"attach"}\n');
+      },
+      async (client) => {
+        let reads = 0;
+        client.listSessions = async () => [{ ...busy, pid: ++reads === 1 ? 42 : 43 }];
+        await expect(client.interrupt(busy)).rejects.toMatchObject({ code: "EOWNER" });
+      },
+    );
+    expect(written).toBe(false);
+  });
+
   it("keeps subscribe terminal output separate from structured agent deltas", async () => {
     await withDaemon(
       (socket) => {

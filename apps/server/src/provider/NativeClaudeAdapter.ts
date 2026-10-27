@@ -40,11 +40,13 @@ export const nativeClaudeMatchesPendingTurn = (
 export const nativeClaudeObservedTurnIsTerminal = (
   turn: { readonly status: string; readonly completedAt: number | null },
   job: NativeClaudeSession | undefined,
+  interrupted = false,
 ): boolean =>
   turn.status === "failed" ||
   turn.status === "interrupted" ||
   job?.state === "failed" ||
   job?.state === "stopped" ||
+  (interrupted && job?.status === "idle") ||
   (turn.completedAt !== null &&
     (job?.kind !== "background" || job.status === "idle" || job.state === "done"));
 
@@ -65,7 +67,7 @@ export const nativeClaudeCapabilities = {
   },
   turns: {
     ...ClaudeProviderCapabilitiesV2.turns,
-    supportsInterrupt: false,
+    supportsInterrupt: true,
     supportsActiveSteering: false,
     activeSteeringInterruptsTools: false,
     terminalStatusQuality: "weak" as const,
@@ -277,7 +279,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
             const providerTurnId = allocator.derive.providerTurn({ driver, nativeTurnId: turn.id });
             const startedAt = DateTime.makeUnsafe(turn.startedAt);
             const job = inventory.find((session) => session.sessionId === id);
-            const finished = nativeClaudeObservedTurnIsTerminal(turn, job);
+            const finished = nativeClaudeObservedTurnIsTerminal(turn, job, ownership.interrupted);
             const nativeFailure = turn.status === "failed" || job?.state === "failed";
             const wasInterrupted =
               ownership.interrupted || turn.status === "interrupted" || job?.state === "stopped";
@@ -504,10 +506,28 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
           unsupported(
             "Claude native daemon cannot atomically target a turn for steering. Use claude attach to send input to the current worker.",
           ),
-        interruptTurn: () =>
-          unsupported(
-            "Claude native daemon cannot atomically target a turn for interruption. Use Ctrl+C in claude attach; no interrupt was sent.",
-          ),
+        interruptTurn: Effect.fn("NativeClaudeAdapter.interruptTurn")(function* (request) {
+          const id = nativeId(request.providerThread);
+          const ownership = active.get(id);
+          if (
+            ownership?.nativeTurnId === undefined ||
+            allocator.derive.providerTurn({ driver, nativeTurnId: ownership.nativeTurnId }) !==
+              request.providerTurnId
+          ) {
+            return yield* unsupported(
+              "This Claude turn is no longer active; no interrupt was sent.",
+            );
+          }
+          const inventory = yield* attempt(() => client.listSessions());
+          const history = yield* attempt(() => source.history(id, inventory));
+          const job = inventory.find((session) => session.sessionId === id);
+          if (job === undefined || history.at(-1)?.id !== ownership.nativeTurnId) {
+            return yield* unsupported("Claude's active turn changed; no interrupt was sent.");
+          }
+          yield* attempt(() => client.interrupt(job));
+          ownership.interrupted = true;
+          yield* hydrate();
+        }),
         respondToRuntimeRequest: () =>
           unsupported(
             "Claude's native daemon does not expose structured approval replies. Answer this permission or question in claude attach; no approval was sent.",

@@ -504,8 +504,37 @@ export class NativeClaudeClient {
   }
 
   async interrupt(session: NativeClaudeSession): Promise<void> {
+    const short = requireNativeClaudeBackgroundId(session);
+    const verify = async () => {
+      const current = (await this.listSessions()).find(
+        (candidate) => candidate.sessionId === session.sessionId,
+      );
+      if (
+        session.sessionId === undefined ||
+        session.pid === undefined ||
+        current?.kind !== "background" ||
+        current.id !== short ||
+        current.pid !== session.pid ||
+        current.state === "stopped" ||
+        current.state === "failed"
+      ) {
+        throw new NativeClaudeError(
+          "EOWNER",
+          "Claude's native worker changed; no interrupt was sent.",
+        );
+      }
+      if (current.status !== "busy") {
+        throw new NativeClaudeError(
+          "EIDLE",
+          "Claude is not running a turn; no interrupt was sent.",
+        );
+      }
+    };
+    await verify();
+    // Native attach requires dimensions. Closing it restores the remaining attacher's size.
     const terminal = await this.attach(session, { cols: 80, rows: 24 });
     try {
+      await verify();
       await new Promise<void>((resolve, reject) =>
         terminal.write("\u0003", (error) => (error ? reject(error) : resolve())),
       );
