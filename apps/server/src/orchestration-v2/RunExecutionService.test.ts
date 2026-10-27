@@ -1942,7 +1942,7 @@ it.effect(
               ingestNormalized: (input) =>
                 Ref.update(ingested, (current) => [...current, input.event]).pipe(Effect.as([])),
             }),
-            ServerSettings.layerTest(),
+            ServerSettings.layerTest({ responseStreamingMode: "paragraph" }),
           ),
         ),
       );

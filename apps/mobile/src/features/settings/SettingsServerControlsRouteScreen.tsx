@@ -110,6 +110,11 @@ const STREAMING_CHOICES: ReadonlyArray<{
   readonly description: string;
 }> = [
   {
+    mode: "token",
+    label: "Show text as it arrives",
+    description: "Text and thinking appear as the agent generates them.",
+  },
+  {
     mode: "turn",
     label: "After the turn",
     description: "Show the answer when the agent finishes.",

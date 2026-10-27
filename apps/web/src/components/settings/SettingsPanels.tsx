@@ -101,11 +101,13 @@ import { searchableSetting } from "./settingsSearch";
 import { BackgroundActivitySettingsRow } from "./BackgroundActivitySettings";
 
 const RESPONSE_STREAMING_MODE_LABELS: Record<ResponseStreamingMode, string> = {
+  token: "Show text as it arrives",
   turn: "Wait for the full response",
   paragraph: "Show finished paragraphs",
 };
 
 const RESPONSE_STREAMING_MODE_DESCRIPTIONS: Record<ResponseStreamingMode, string> = {
+  token: "Text and thinking appear as the agent generates them.",
   turn: "Text appears once the agent finishes its turn.",
   paragraph: "Each paragraph or code block appears as soon as it is complete.",
 };
@@ -1231,7 +1233,7 @@ export function GeneralSettingsPanel() {
             <Select
               value={mixedResponseStreamingMode ? null : settings.responseStreamingMode}
               onValueChange={(value) => {
-                if (value === "turn" || value === "paragraph") {
+                if (value === "token" || value === "turn" || value === "paragraph") {
                   updateSettings({ responseStreamingMode: value });
                 }
               }}
@@ -1244,6 +1246,9 @@ export function GeneralSettingsPanel() {
                 </SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value="token">
+                  {RESPONSE_STREAMING_MODE_LABELS.token}
+                </SelectItem>
                 <SelectItem hideIndicator value="turn">
                   {RESPONSE_STREAMING_MODE_LABELS.turn}
                 </SelectItem>

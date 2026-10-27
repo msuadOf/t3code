@@ -176,7 +176,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       }),
     ).pipe(Effect.provide(layerServerSettings())),
   );
-  it.effect("migrates saved token delivery to paragraph buffering without resetting settings", () =>
+  it.effect("preserves token streaming and project-specific display choices", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
       const fs = yield* FileSystem.FileSystem;
@@ -195,10 +195,10 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       );
 
       const settings = yield* service.getSettings;
-      assert.equal(settings.responseStreamingMode, "paragraph");
+      assert.equal(settings.responseStreamingMode, "token");
       assert.isFalse(settings.enableAgentBrowserAccess);
       assert.deepEqual(settings.projectSettingsOverrides, {
-        [ProjectId.make("legacy")]: { responseStreamingMode: "paragraph", defaultAutoPull: true },
+        [ProjectId.make("legacy")]: { responseStreamingMode: "token", defaultAutoPull: true },
         [ProjectId.make("buffered")]: { responseStreamingMode: "turn" },
         [ProjectId.make("inherited")]: { defaultAutoPull: false },
       });

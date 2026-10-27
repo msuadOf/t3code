@@ -87,6 +87,7 @@ export function makeAssistantStreamingFilter(mode: ResponseStreamingMode) {
     event: ProviderAdapter.ProviderAdapterV2Event,
     now: number,
   ): ProviderAdapter.ProviderAdapterV2Event | null => {
+    if (mode === "token") return event;
     if (
       event.type === "node.updated" &&
       event.node.kind === "assistant_message" &&
