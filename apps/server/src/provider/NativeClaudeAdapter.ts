@@ -464,6 +464,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                 owner,
                 providerTurnId,
                 itemOrdinal(turn.id, `hook:${hook.id}`),
+                input.providerSessionId,
               ).pipe(
                 Effect.provideService(IdAllocator.IdAllocatorV2, allocator),
                 Effect.mapError(error),
@@ -508,14 +509,18 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         const changes = yield* options.hooks.subscribeChanges;
         yield* PubSub.take(changes).pipe(
           Effect.andThen(hydrate),
-          Effect.catch(() => Effect.logWarning("Claude native hook projection failed")),
+          Effect.catch((cause) =>
+            Effect.logWarning("Claude native hook projection failed", { cause }),
+          ),
           Effect.forever,
           Effect.forkScoped,
         );
       }
       yield* hydrate().pipe(
-        Effect.catch(() =>
-          Effect.logWarning("Claude native observer failed; check native worker availability"),
+        Effect.catch((cause) =>
+          Effect.logWarning("Claude native observer failed; check native worker availability", {
+            cause,
+          }),
         ),
         Effect.repeat(Schedule.spaced("1 second")),
         Effect.forkScoped,

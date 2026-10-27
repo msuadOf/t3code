@@ -4,6 +4,7 @@ import {
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2TurnItem,
   type ProviderTurnId,
+  type ProviderSessionId,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -67,16 +68,16 @@ export function nativeClaudeHookResponse(
 
 export const makeNativeClaudeHookArtifacts = Effect.fn("NativeClaudeHookArtifacts.make")(function* (
   hook: NativeClaudeHookRequest,
-  owner: ProviderAdapter.ProviderAdapterV2TurnInput,
+  owner: Pick<ProviderAdapter.ProviderAdapterV2TurnInput, "threadId" | "runId" | "rootNodeId"> & {
+    readonly providerThread: Pick<
+      ProviderAdapter.ProviderAdapterV2TurnInput["providerThread"],
+      "id"
+    >;
+  },
   providerTurnId: ProviderTurnId,
   ordinal: number,
+  providerSessionId: ProviderSessionId,
 ) {
-  const providerSessionId = owner.providerThread.providerSessionId;
-  if (providerSessionId === null)
-    return yield* new ProviderAdapter.ProviderAdapterProtocolError({
-      driver,
-      detail: "Claude hook has no owning provider session.",
-    });
   const allocator = yield* IdAllocator.IdAllocatorV2;
   const createdAt = yield* DateTime.now;
   const id = yield* allocator.allocate.runtimeRequest({

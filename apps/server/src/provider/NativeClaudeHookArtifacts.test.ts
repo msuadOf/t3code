@@ -1,6 +1,19 @@
 import { expect, it } from "@effect/vitest";
-import { RuntimeRequestId } from "@t3tools/contracts";
-import { nativeClaudeHookResponse } from "./NativeClaudeHookArtifacts.ts";
+import {
+  RuntimeRequestId,
+  ThreadId,
+  RunId,
+  NodeId,
+  ProviderThreadId,
+  ProviderTurnId,
+  ProviderSessionId,
+} from "@t3tools/contracts";
+import {
+  makeNativeClaudeHookArtifacts,
+  nativeClaudeHookResponse,
+} from "./NativeClaudeHookArtifacts.ts";
+import * as Effect from "effect/Effect";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type { NativeClaudeHookRequest } from "./NativeClaudeHooks.ts";
 
 const permission: NativeClaudeHookRequest = {
@@ -47,3 +60,28 @@ it("requires complete question answers and retains the native question input", (
     },
   });
 });
+
+it.effect(
+  "binds discovered CLI requests to the observing runtime rather than the unbound thread",
+  () =>
+    Effect.gen(function* () {
+      const sessionId = ProviderSessionId.make("observing-runtime");
+      const result = yield* makeNativeClaudeHookArtifacts(
+        permission,
+        {
+          threadId: ThreadId.make("shared-thread"),
+          runId: RunId.make("shared-run"),
+          rootNodeId: NodeId.make("root"),
+          providerThread: { id: ProviderThreadId.make("discovered-provider-thread") },
+        },
+        ProviderTurnId.make("native-turn"),
+        2,
+        sessionId,
+      );
+      expect(result.request.responseCapability).toEqual({
+        type: "live",
+        providerSessionId: sessionId,
+      });
+      expect(result.node.providerThreadId).toBe("discovered-provider-thread");
+    }).pipe(Effect.provide(IdAllocator.layer)),
+);
