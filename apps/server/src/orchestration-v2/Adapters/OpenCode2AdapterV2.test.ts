@@ -2361,6 +2361,110 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("keeps text and reasoning accumulated before reconnect when native deltas resume", () =>
+    Effect.gen(function* () {
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, id: PROMPT_ID, text: "<any>" }),
+        promptAccepted,
+        ...reconnected({ [SESSION]: { type: "running" } }, undefined, {
+          finish: undefined,
+          content: [
+            { type: "reasoning", text: "Before reconnect" },
+            { type: "text", text: "TOKEN00 TOKEN01 " },
+          ],
+        }),
+        ...openRequests([]),
+        event("session.reasoning.delta", {
+          sessionID: SESSION,
+          assistantMessageID: "msg_assistant_gap",
+          ordinal: 0,
+          delta: " and after",
+        }),
+        event("session.text.delta", {
+          sessionID: SESSION,
+          assistantMessageID: "msg_assistant_gap",
+          ordinal: 0,
+          delta: "TOKEN02 ",
+        }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const events = yield* runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(turnInput(thread));
+      const collected = yield* Fiber.join(events);
+      const texts = collected.flatMap((event) =>
+        event.type === "turn_item.updated" &&
+        (event.turnItem.type === "assistant_message" || event.turnItem.type === "reasoning")
+          ? [event.turnItem.text]
+          : [],
+      );
+      assert.includeMembers(texts, ["TOKEN00 TOKEN01 TOKEN02 ", "Before reconnect and after"]);
+      assert.deepInclude(collected.at(-1), { type: "turn.terminal", status: "completed" });
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "preserves received deltas when native history has empty in-flight text during reconnect",
+    () =>
+      Effect.gen(function* () {
+        const { runtime, thread } = yield* resumed([
+          out("session.prompt", { sessionID: SESSION, id: PROMPT_ID, text: "<any>" }),
+          promptAccepted,
+          event("session.reasoning.delta", {
+            sessionID: SESSION,
+            assistantMessageID: "msg_assistant_gap",
+            ordinal: 0,
+            delta: "Before reconnect",
+          }),
+          event("session.text.delta", {
+            sessionID: SESSION,
+            assistantMessageID: "msg_assistant_gap",
+            ordinal: 0,
+            delta: "TOKEN00 TOKEN01 ",
+          }),
+          ...reconnected({ [SESSION]: { type: "running" } }, undefined, {
+            finish: undefined,
+            content: [
+              { type: "reasoning", text: "" },
+              { type: "text", text: "" },
+            ],
+          }),
+          ...openRequests([]),
+          event("session.reasoning.delta", {
+            sessionID: SESSION,
+            assistantMessageID: "msg_assistant_gap",
+            ordinal: 0,
+            delta: " and after",
+          }),
+          event("session.text.delta", {
+            sessionID: SESSION,
+            assistantMessageID: "msg_assistant_gap",
+            ordinal: 0,
+            delta: "TOKEN02 ",
+          }),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ]);
+        const events = yield* runtime.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* runtime.startTurn(turnInput(thread));
+        const collected = yield* Fiber.join(events);
+        const texts = collected.flatMap((event) =>
+          event.type === "turn_item.updated" &&
+          (event.turnItem.type === "assistant_message" || event.turnItem.type === "reasoning")
+            ? [event.turnItem.text]
+            : [],
+        );
+        assert.includeMembers(texts, ["TOKEN00 TOKEN01 TOKEN02 ", "Before reconnect and after"]);
+        assert.deepInclude(collected.at(-1), { type: "turn.terminal", status: "completed" });
+      }).pipe(Effect.scoped),
+  );
+
   it.effect("keeps a turn still running after a reconnect open for its next events", () =>
     Effect.gen(function* () {
       const { runtime, thread } = yield* resumed([

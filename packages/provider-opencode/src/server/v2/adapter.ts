@@ -2607,7 +2607,21 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         for (const part of message.content) {
           if (part.type === "text" || part.type === "reasoning") {
             const block = { assistantMessageID: message.id, ordinal: ordinals[part.type]++ };
-            yield* emitText(state, turn, block, part.type, () => part.text, true);
+            // An unfinished snapshot seeds the delta accumulator. Marking it complete
+            // discards its prefix, so the next native delta replaces the visible text.
+            const completed =
+              idle !== undefined ||
+              message.time.completed !== undefined ||
+              message.finish !== undefined;
+            yield* emitText(
+              state,
+              turn,
+              block,
+              part.type,
+              // Native history may retain an empty or older value until the block ends.
+              (current) => (!completed && current.startsWith(part.text) ? current : part.text),
+              completed,
+            );
             continue;
           }
           if (part.type !== "tool") continue;
