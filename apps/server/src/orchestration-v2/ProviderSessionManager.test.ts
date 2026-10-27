@@ -4,6 +4,11 @@ import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import {
   EnvironmentId,
+  RunId,
+  RunAttemptId,
+  NodeId,
+  MessageId,
+  CheckpointScopeId,
   type ModelSelection,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
@@ -324,10 +329,9 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly mcpConfigs?: Ref.Ref<
       ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
     >;
-    readonly beforeOpen?: (input: {
-      readonly providerSessionId: ProviderSessionId;
-      readonly initialProviderItemIdentityVersion?: 2;
-    }) => Effect.Effect<void>;
+    readonly beforeOpen?: (
+      input: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
+    ) => Effect.Effect<void>;
     readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
     readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
     readonly backgroundTasksEndWithProcess?: boolean;
@@ -465,10 +469,9 @@ function layerTest(input: {
   readonly mcpConfigs?: Ref.Ref<
     ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
   >;
-  readonly beforeOpen?: (input: {
-    readonly providerSessionId: ProviderSessionId;
-    readonly initialProviderItemIdentityVersion?: 2;
-  }) => Effect.Effect<void>;
+  readonly beforeOpen?: (
+    input: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
+  ) => Effect.Effect<void>;
   readonly failReleaseEventWrites?: boolean;
   readonly flakyReleaseWrites?: FlakyReleaseWrites;
   readonly pauseAttachWrite?: Parameters<typeof layerPausingAttachEventSink>[0];
@@ -3509,4 +3512,175 @@ it.effect(
       });
       assert.isFalse(denied?.capabilities?.has("device"));
     }),
+);
+
+it.effect("native progress preserves root metadata and rejects foreign or terminal work", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    let progress:
+      | NonNullable<ProviderAdapter.ProviderAdapterV2OpenSessionInput["onNativeTurnProgress"]>
+      | undefined;
+    const effect = Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("native-progress");
+      const otherThreadId = ThreadId.make("other-native-progress");
+      const sessionId = yield* ids.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId: sessionId,
+        now,
+      });
+      const runId = RunId.make("native-progress-run");
+      const rootNodeId = NodeId.make("native-progress-root");
+      const attemptId = RunAttemptId.make("native-progress-attempt");
+      const run = {
+        id: runId,
+        threadId,
+        ordinal: 1,
+        providerInstanceId: modelSelection.instanceId,
+        modelSelection,
+        providerThreadId: providerThread.id,
+        userMessageId: MessageId.make("native-progress-message"),
+        rootNodeId,
+        activeAttemptId: attemptId,
+        status: "running" as const,
+        requestedAt: now,
+        startedAt: now,
+        completedAt: null,
+        checkpointId: null,
+        contextHandoffId: null,
+      };
+      const node = {
+        id: rootNodeId,
+        threadId,
+        runId,
+        parentNodeId: null,
+        rootNodeId,
+        kind: "root_turn" as const,
+        status: "running" as const,
+        countsForRun: true,
+        providerThreadId: providerThread.id,
+        providerTurnId: null,
+        nativeItemRef: null,
+        runtimeRequestId: null,
+        checkpointScopeId: CheckpointScopeId.make("native-progress-scope"),
+        startedAt: now,
+        completedAt: null,
+      };
+      yield* sink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now }),
+          yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: otherThreadId, now }),
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: providerThread,
+          },
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "run.created",
+            threadId,
+            occurredAt: now,
+            payload: run,
+          },
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "run-attempt.created",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: attemptId,
+              runId,
+              nativeThreadId: "native-thread",
+              attemptOrdinal: 1,
+              rootNodeId,
+              providerInstanceId: modelSelection.instanceId,
+              providerThreadId: providerThread.id,
+              providerTurnId: null,
+              reason: "initial",
+              status: "running",
+              startedAt: now,
+              completedAt: null,
+            },
+          },
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "node.updated",
+            threadId,
+            occurredAt: now,
+            payload: node,
+          },
+        ],
+      });
+      yield* manager.open({
+        threadId,
+        providerSessionId: sessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      assert.isDefined(progress);
+      if (!progress) return;
+      const input = {
+        threadId,
+        providerThreadId: providerThread.id,
+        runId,
+        rootNodeId,
+        status: "waiting" as const,
+      };
+      assert.isFalse(yield* progress({ ...input, threadId: otherThreadId }));
+      assert.isTrue(yield* progress(input));
+      const waiting = (yield* store.getThreadRecords(threadId, ["nodes"])).nodes[0]!;
+      assert.deepEqual(waiting, { ...node, status: "waiting" });
+      const sequence = (yield* store.getShellSnapshot()).snapshotSequence;
+      assert.isTrue(yield* progress(input));
+      assert.equal((yield* store.getShellSnapshot()).snapshotSequence, sequence);
+      assert.isTrue(yield* progress({ ...input, status: "running" }));
+      assert.deepEqual((yield* store.getThreadRecords(threadId, ["nodes"])).nodes[0], node);
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "run.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...run, status: "completed", completedAt: now },
+          },
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "node.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...node, status: "completed", completedAt: now },
+          },
+        ],
+      });
+      assert.isFalse(yield* progress(input));
+      assert.equal(
+        (yield* store.getThreadRecords(threadId, ["nodes"])).nodes[0]?.status,
+        "completed",
+      );
+    });
+    yield* effect.pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 10000,
+          beforeOpen: (input) =>
+            Effect.sync(() => {
+              progress = input.onNativeTurnProgress;
+            }),
+        }),
+      ),
+    );
+  }).pipe(Effect.scoped),
 );

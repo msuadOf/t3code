@@ -146,7 +146,8 @@ export function nativeClaudeHistory(entries: readonly Entry[]): readonly NativeH
           type: "tool" as const,
           status: "running" as const,
           title: typeof block.name === "string" ? block.name : "Tool",
-          text: JSON.stringify(block.input ?? {}),
+          input: object(block.input) ? block.input : {},
+          text: "",
         };
         toolItems.set(tool.id, { turn, index: turn.items.length });
         turn.items.push(tool);
@@ -277,10 +278,7 @@ export class NativeClaudeSessions {
         canObserveActive: activeById.has(id),
         active: (() => {
           const live = activeById.get(id);
-          return (
-            live !== undefined &&
-            (live.pid !== undefined || live.state === "working" || live.state === "blocked")
-          );
+          return live !== undefined && (live.status === "busy" || live.status === "waiting");
         })(),
       });
     }

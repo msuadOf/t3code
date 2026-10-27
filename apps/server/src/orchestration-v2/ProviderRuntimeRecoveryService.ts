@@ -82,6 +82,7 @@ function usesSharedNativeService(projection: ProjectionStore.ProjectionRuntimeRe
       thread.id === projection.thread.activeProviderThreadId &&
       thread.nativeThreadRef !== null &&
       (thread.driver === "codex" ||
+        thread.driver === "claudeAgent" ||
         projection.providerSessions.some(
           (session) =>
             session.id === thread.providerSessionId &&

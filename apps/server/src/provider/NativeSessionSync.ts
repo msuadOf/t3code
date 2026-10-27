@@ -18,6 +18,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as ExternalNativeRuns from "../orchestration-v2/ExternalNativeRuns.ts";
@@ -208,7 +209,38 @@ const make = Effect.gen(function* () {
           typeof raw.sharedSessionRoot === "string"
             ? expandHomePath(raw.sharedSessionRoot.trim(), home)
             : undefined;
-        for (const native of yield* source.list) {
+        const sessions = [...(yield* source.list)];
+        if (instance.driverKind === "claudeAgent") {
+          // The native daemon can forget a stopped job while its JSONL and T3 run
+          // remain. Reconcile only known owners; never import ordinary CLI history.
+          const discovered = new Set(sessions.map((session) => session.id));
+          for (const [nativeId, threadId] of owners) {
+            if (discovered.has(nativeId)) continue;
+            const records = yield* store.getThreadRecords(threadId, ["runs"]);
+            if (!records.runs.some((run) => run.status === "running" || run.status === "starting"))
+              continue;
+            const context = yield* store.getThreadProviderContext(threadId, instance.instanceId);
+            const project = Option.getOrUndefined(
+              yield* projects.getById(context.thread.projectId),
+            );
+            const cwd =
+              context.thread.worktreePath ??
+              context.providerSessions[0]?.cwd ??
+              project?.workspaceRoot;
+            if (!cwd) continue;
+            sessions.push({
+              id: nativeId,
+              cwd,
+              title: context.thread.title,
+              createdAt: DateTime.toEpochMillis(context.thread.createdAt),
+              updatedAt: DateTime.toEpochMillis(yield* DateTime.now),
+              archived: context.thread.archivedAt !== null,
+              active: false,
+              canObserveActive: true,
+            });
+          }
+        }
+        for (const native of sessions) {
           yield* Effect.gen(function* () {
             const owner = owners.get(native.id);
             const visible = isWithinSharedRoot(path, native.cwd, root);
@@ -315,7 +347,7 @@ const make = Effect.gen(function* () {
               previous.archived !== native.archived;
             // Active sessions need live reconciliation. Periodic full refreshes
             // cover providers whose summary timestamps do not change per item.
-            let recoverIdleRun = false;
+            let recoverRunningRun = false;
             if (native.active || changed || scan % 20 === 0) {
               const turns = yield* source.history(native.id);
               yield* externalRuns.reconcileSnapshot({
@@ -335,9 +367,8 @@ const make = Effect.gen(function* () {
                 "nodes",
                 "checkpointScopes",
               ]);
-              recoverIdleRun =
-                instance.driverKind === "opencode" &&
-                !native.active &&
+              recoverRunningRun =
+                (instance.driverKind === "opencode" || instance.driverKind === "claudeAgent") &&
                 existing.runs.some(
                   (run) =>
                     run.providerThreadId === target.providerThread.id && run.status === "running",
@@ -362,7 +393,7 @@ const make = Effect.gen(function* () {
             }
             // Only providers that can attach the existing worker may observe live work.
             if (
-              (native.active || recoverIdleRun) &&
+              (native.active || recoverRunningRun) &&
               (instance.driverKind === "opencode" || native.canObserveActive === true)
             ) {
               const runtime = yield* manager.open({
@@ -380,7 +411,9 @@ const make = Effect.gen(function* () {
                 initialProviderItemIdentityVersion: 2,
               });
               yield* runtime.resumeThread({
-                providerThread: target.providerThread,
+                providerThread: recoverRunningRun
+                  ? { ...target.providerThread, status: "active" }
+                  : target.providerThread,
                 threadId: target.appThread.id,
               });
             }

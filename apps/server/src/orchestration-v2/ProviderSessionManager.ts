@@ -2189,8 +2189,90 @@ export const layerWithOptions = (
               });
               const sessionScope = yield* Scope.fork(sessionScopes);
               yield* agentScope.clear(input.threadId);
+              let nativeProgressRuntime:
+                | ProviderAdapter.ProviderAdapterV2SessionRuntime
+                | undefined;
               const runtime = yield* adapter
                 .openSession({
+                  onNativeTurnProgress: Effect.fn("ProviderSessionManager.nativeTurnProgress")(
+                    function* (progress) {
+                      const entry = (yield* Ref.get(sessions)).get(key);
+                      if (
+                        !entry ||
+                        entry.runtime !== nativeProgressRuntime ||
+                        !entry.attachedThreadIds.has(progress.threadId)
+                      )
+                        return false;
+                      return yield* Effect.gen(function* () {
+                        const current = (yield* Ref.get(sessions)).get(key);
+                        if (current !== entry) return false;
+                        const records = yield* projectionStore.getThreadRecords(progress.threadId, [
+                          "nodes",
+                          "runs",
+                          "attempts",
+                          "providerThreads",
+                        ]);
+                        const node = records.nodes.find((node) => node.id === progress.rootNodeId);
+                        const run = records.runs.find((run) => run.id === progress.runId);
+                        const thread = records.providerThreads.find(
+                          (thread) => thread.id === progress.providerThreadId,
+                        );
+                        const attempt = records.attempts.find(
+                          (attempt) => attempt.id === run?.activeAttemptId,
+                        );
+                        if (
+                          !node ||
+                          !run ||
+                          !thread ||
+                          !attempt ||
+                          run.status !== "running" ||
+                          thread.providerSessionId !== entry.runtime.providerSessionId ||
+                          thread.providerInstanceId !== entry.runtime.instanceId ||
+                          run.providerThreadId !== thread.id ||
+                          run.rootNodeId !== node.id ||
+                          attempt.rootNodeId !== node.id ||
+                          attempt.providerThreadId !== thread.id ||
+                          attempt.status !== "running" ||
+                          node.kind !== "root_turn" ||
+                          node.runId !== run.id ||
+                          node.providerThreadId !== thread.id ||
+                          (node.status !== "running" && node.status !== "waiting")
+                        )
+                          return false;
+                        if (node.status === progress.status) return true;
+                        const committed = yield* eventSink.writeIfRunCurrent({
+                          threadId: progress.threadId,
+                          runId: run.id,
+                          activeAttemptId: attempt.id,
+                          expectedStatus: "running",
+                          events: [
+                            {
+                              id: yield* idAllocator.allocate.event({
+                                threadId: progress.threadId,
+                              }),
+                              type: "node.updated",
+                              threadId: progress.threadId,
+                              runId: run.id,
+                              nodeId: node.id,
+                              driver: entry.runtime.driver,
+                              providerInstanceId: entry.runtime.instanceId,
+                              occurredAt: yield* DateTime.now,
+                              payload: { ...node, status: progress.status },
+                            },
+                          ],
+                        });
+                        return committed.committed;
+                      }).pipe(entry.requestEventPermit.withPermits(1));
+                    },
+                    (effect) =>
+                      effect.pipe(
+                        Effect.catch(() =>
+                          Effect.logWarning("Could not project native worker progress").pipe(
+                            Effect.as(false),
+                          ),
+                        ),
+                      ),
+                  ),
                   ...(Option.isNone(externalNativeRuns)
                     ? {}
                     : {
@@ -2268,6 +2350,7 @@ export const layerWithOptions = (
               const eventSubscribers = yield* Ref.make<
                 ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
               >(new Map());
+              nativeProgressRuntime = runtime;
               const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
               const now = yield* Clock.currentTimeMillis;
               const entry: LiveSessionEntry = {

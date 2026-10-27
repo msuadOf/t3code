@@ -1378,6 +1378,8 @@ it.effect.each([
   { driver: "codex", origin: "T3" },
   { driver: "opencode", origin: "T3" },
   { driver: "opencode", origin: "CLI" },
+  { driver: "claudeAgent", origin: "T3" },
+  { driver: "claudeAgent", origin: "CLI" },
 ] as const)(
   "leaves shared $driver $origin work to its native service across startup and shutdown",
   ({ driver, origin }) => {

@@ -94,6 +94,7 @@ const fixture = (driver: ProviderDriverKind): NativeSessionHistoryInput => ({
           id: "tool-1",
           type: "tool",
           title: "Bash",
+          input: { command: "git status" },
           text: "git status: clean",
           status: "completed",
         },
@@ -142,6 +143,12 @@ for (const provider of ["claudeAgent", "opencode"] as const) {
               nativeItemId: "reason-1",
             }),
           );
+          const tool = records.turnItems.find((item) => item.type === "dynamic_tool");
+          assert.equal(tool?.type, "dynamic_tool");
+          if (tool?.type === "dynamic_tool") {
+            assert.deepEqual(tool.input, { command: "git status" });
+            assert.equal(tool.output, "git status: clean");
+          }
           assert.equal(records.providerTurns[0]?.nativeTurnRef?.driver, input.driver);
           assert.equal(DateTime.toEpochMillis(records.runs[0]!.startedAt!), 110000);
           assert.deepEqual(mapHistory({ ...input, existing: records }, allocator), []);

@@ -58,6 +58,7 @@ export const nativeClaudeCapabilities = {
     ...ClaudeProviderCapabilitiesV2.sessions,
     supportsMultipleProviderThreadsPerSession: true,
     supportsModelSwitchInSession: false,
+    runtimeSurvivesHostRestart: true,
   },
   threads: {
     ...ClaudeProviderCapabilitiesV2.threads,
@@ -68,6 +69,7 @@ export const nativeClaudeCapabilities = {
   },
   turns: {
     ...ClaudeProviderCapabilitiesV2.turns,
+    exposesNativeTurnId: true,
     supportsInterrupt: true,
     supportsActiveSteering: false,
     activeSteeringInterruptsTools: false,
@@ -101,6 +103,10 @@ export const nativeClaudeCapabilities = {
     ...ClaudeProviderCapabilitiesV2.tools,
     supportsMcpTools: false,
     supportsDynamicToolCallbacks: false,
+  },
+  identity: {
+    ...ClaudeProviderCapabilitiesV2.identity,
+    nativeTurnIds: "strong" as const,
   },
   checkpointing: {
     ...ClaudeProviderCapabilitiesV2.checkpointing,
@@ -189,6 +195,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         }
       >();
       const eventSignatures = new Map<string, string>();
+      const progressStates = new Map<string, "running" | "waiting">();
       const emit = (event: ProviderAdapter.ProviderAdapterV2Event) => {
         if (
           event.type === "turn_item.updated" ||
@@ -273,7 +280,14 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                 startedAt: DateTime.makeUnsafe(turn.startedAt),
                 text: turn.items.find((item) => item.type === "user")?.text ?? "",
                 ...(input.runtimePolicy.cwd ? { cwd: input.runtimePolicy.cwd } : {}),
-                nativeStatus: turn.completedAt ? "completed" : "inProgress",
+                nativeStatus: nativeClaudeObservedTurnIsTerminal(turn, terminalJob)
+                  ? turn.status === "failed" || terminalJob?.state === "failed"
+                    ? "failed"
+                    : turn.status === "interrupted" || terminalJob?.state === "stopped"
+                      ? "interrupted"
+                      : "completed"
+                  : "inProgress",
+                snapshot: true,
               });
               if (adopted) {
                 ownership = { input: adopted, nativeTurnId: turn.id, interrupted: false };
@@ -310,6 +324,19 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                   : "completed"
               : "running";
             const completedAt = finished ? yield* DateTime.now : null;
+            if (!finished && input.onNativeTurnProgress) {
+              const progress = job?.status === "waiting" ? "waiting" : "running";
+              if (progressStates.get(owner.rootNodeId) !== progress) {
+                const applied = yield* input.onNativeTurnProgress({
+                  threadId: owner.threadId,
+                  providerThreadId: thread.id,
+                  runId: owner.runId,
+                  rootNodeId: owner.rootNodeId,
+                  status: progress,
+                });
+                if (applied) progressStates.set(owner.rootNodeId, progress);
+              }
+            } else if (finished) progressStates.delete(owner.rootNodeId);
             const providerTurn: OrchestrationV2ProviderTurn = {
               id: providerTurnId,
               providerThreadId: thread.id,
@@ -341,7 +368,12 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                 nativeItemRef: { driver, nativeId: item.id, strength: "strong" as const },
                 parentItemId: null,
                 ordinal: (ordinal = itemOrdinal(turn.id, item.id)),
-                status: item.status,
+                status:
+                  finished && item.status === "running"
+                    ? nativeFailure
+                      ? "failed"
+                      : "cancelled"
+                    : item.status,
                 title: item.title ?? null,
                 startedAt,
                 completedAt,
@@ -382,7 +414,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                   ...common,
                   type: "dynamic_tool",
                   toolName: item.title ?? "Tool",
-                  input: {},
+                  input: item.input ?? {},
                   output: item.text,
                 };
               yield* emit({ type: "turn_item.updated", driver, turnItem: projected });
@@ -433,16 +465,21 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         thread: OrchestrationV2ProviderThread,
       ) {
         const id = nativeId(thread);
+        if (!observed.has(id)) {
+          const history = yield* attempt(() => source.history(id)).pipe(
+            Effect.orElseSucceed(() => []),
+          );
+          // An active T3 turn can finish while this daemon is offline. Keep its last
+          // native turn observable so adoption recovers the original run/attempt.
+          const recoverLast = thread.status === "active" || history.at(-1)?.status === "running";
+          observed.set(
+            id,
+            new Set((recoverLast ? history.slice(0, -1) : history).map((turn) => turn.id)),
+          );
+        }
         threads.set(id, thread);
-        const history = yield* attempt(() => source.history(id)).pipe(
-          Effect.orElseSucceed(() => []),
-        );
-        const stillRunning = history.at(-1)?.status === "running";
-        observed.set(
-          id,
-          new Set((stillRunning ? history.slice(0, -1) : history).map((turn) => turn.id)),
-        );
         yield* emit({ type: "provider_thread.updated", driver, providerThread: thread });
+        yield* hydrate();
         return thread;
       });
       const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {

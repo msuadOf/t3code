@@ -221,7 +221,12 @@ export const mapHistory = (
       nativeItemRef: { driver, nativeId: item.id, strength: "strong" as const },
       parentItemId: null,
       ordinal: ++ordinal,
-      status: item.status,
+      status:
+        !active && item.status === "running"
+          ? turn.status === "failed"
+            ? "failed"
+            : "cancelled"
+          : item.status,
       title: item.title ?? null,
       startedAt,
       completedAt,
@@ -304,7 +309,7 @@ export const mapHistory = (
           ...base(item),
           type: "dynamic_tool",
           toolName: item.title || "Tool",
-          input: {},
+          input: item.input ?? {},
           output: item.text,
         });
       }

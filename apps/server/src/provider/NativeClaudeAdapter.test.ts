@@ -1,3 +1,8 @@
+import * as Layer from "effect/Layer";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { describe, expect, it } from "@effect/vitest";
 import {
   ProviderInstanceId,
@@ -58,6 +63,33 @@ class FixtureClient extends NativeClaudeClient {
     return this.inventory;
   }
 }
+
+const fixtureAppThread = (
+  now: DateTime.Utc,
+  providerThreadId: ProviderThreadId,
+): ProviderAdapter.ProviderAdapterV2TurnInput["appThread"] => ({
+  id: threadId,
+  projectId: ProjectId.make("project-test"),
+  title: "Shared",
+  createdBy: "user",
+  creationSource: "web",
+  providerInstanceId: instanceId,
+  modelSelection,
+  runtimeMode: "approval-required",
+  interactionMode: "default",
+  branch: null,
+  worktreePath: null,
+  activeProviderThreadId: providerThreadId,
+  lineage: { rootThreadId: threadId, parentThreadId: null, relationshipToParent: null },
+  forkedFrom: null,
+  createdAt: now,
+  updatedAt: now,
+  archivedAt: null,
+  settledOverride: null,
+  settledAt: null,
+  lastVisitedAt: null,
+  deletedAt: null,
+});
 
 it.layer(IdAllocator.layer)("Claude native adapter", (it) => {
   it.effect("attaches an existing native background worker without query/resume subprocesses", () =>
@@ -125,29 +157,7 @@ it.layer(IdAllocator.layer)("Claude native adapter", (it) => {
               text: "Continue",
               attachments: [],
             },
-            appThread: {
-              id: threadId,
-              projectId: ProjectId.make("project-test"),
-              title: "Shared",
-              createdBy: "user",
-              creationSource: "web",
-              providerInstanceId: instanceId,
-              modelSelection,
-              runtimeMode: "approval-required",
-              interactionMode: "default",
-              branch: null,
-              worktreePath: null,
-              activeProviderThreadId: result.id,
-              lineage: { rootThreadId: threadId, parentThreadId: null, relationshipToParent: null },
-              forkedFrom: null,
-              createdAt: now,
-              updatedAt: now,
-              archivedAt: null,
-              settledOverride: null,
-              settledAt: null,
-              lastVisitedAt: null,
-              deletedAt: null,
-            },
+            appThread: fixtureAppThread(now, result.id),
           }),
         );
         // The absent transcript stops sending, but an observed thread must first reclaim its worker.
@@ -285,3 +295,109 @@ it("settles an acknowledged interrupt only after the native worker returns to id
   expect(nativeClaudeObservedTurnIsTerminal(turn, { ...job, status: "idle" }, false)).toBe(false);
   expect(nativeClaudeObservedTurnIsTerminal(turn, { ...job, status: "idle" }, true)).toBe(true);
 });
+
+// Reopening an observer must recover the same native turn even if it ended while T3 was down.
+it.effect.each(["completed", "failed", "interrupted"] as const)(
+  "recovers an offline %s native turn without sending input or replaying older history",
+  (status) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped();
+      const directory = path.join(root, "projects", "workspace");
+      yield* fs.makeDirectory(directory, { recursive: true });
+      const entries = [
+        { type: "user", uuid: "old-user", parentUuid: null, message: { content: "old" } },
+        {
+          type: "assistant",
+          uuid: "old-answer",
+          parentUuid: "old-user",
+          message: { content: "old answer", stop_reason: "end_turn" },
+        },
+        {
+          type: "user",
+          uuid: "current-user",
+          parentUuid: "old-answer",
+          message: { content: "current" },
+        },
+        {
+          type: "assistant",
+          uuid: "current-answer",
+          parentUuid: "current-user",
+          message: { content: "current answer", stop_reason: "end_turn" },
+        },
+      ];
+      yield* fs.writeFileString(
+        path.join(directory, `${nativeId}.jsonl`),
+        entries
+          .map((entry) =>
+            JSON.stringify({
+              ...entry,
+              sessionId: nativeId,
+              cwd: "/work",
+              timestamp: "2026-10-23T00:00:01Z",
+            }),
+          )
+          .join("\n") + "\n",
+      );
+      const client = new FixtureClient("background");
+      const job = client.inventory[0]!;
+      // The same worker is idle or has stopped; its final JSONL record is already durable.
+      Object.assign(job, {
+        state: status === "failed" ? "failed" : status === "interrupted" ? "stopped" : "done",
+      });
+      const adopted: ProviderAdapter.ProviderAdapterV2ExternalTurnInput[] = [];
+      const adapter = yield* makeNativeClaudeAdapter({
+        instanceId,
+        configDirectory: root,
+        binaryPath: "never-executed",
+        environment: {},
+        client,
+      });
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("recovery-session"),
+        modelSelection,
+        runtimePolicy,
+        onExternalTurn: (turn) =>
+          Effect.sync(() => {
+            adopted.push(turn);
+            return undefined;
+          }),
+      });
+      const now = DateTime.makeUnsafe(1);
+      const providerThread = {
+        id: ProviderThreadId.make("recovery-thread"),
+        driver: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: instanceId,
+        providerSessionId: runtime.providerSessionId,
+        appThreadId: threadId,
+        nativeThreadRef: {
+          driver: ProviderDriverKind.make("claudeAgent"),
+          nativeId,
+          strength: "strong" as const,
+        },
+        nativeConversationHeadRef: null,
+        status: "active" as const,
+        ownerNodeId: null,
+        firstRunOrdinal: null,
+        lastRunOrdinal: null,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      yield* runtime.resumeThread({ threadId, providerThread });
+      expect(adopted).toHaveLength(1);
+      expect(adopted[0]).toMatchObject({
+        nativeTurnId: "current-user",
+        nativeStatus: status,
+        snapshot: true,
+      });
+      yield* runtime.resumeThread({ threadId, providerThread });
+      expect(adopted).toHaveLength(1);
+      expect(client.resumes).toEqual([]);
+      // Closing the observer's scope owns no worker teardown or input operation.
+      expect((yield* adapter.getCapabilities()).sessions.runtimeSurvivesHostRestart).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
+);

@@ -416,6 +416,14 @@ export interface ProviderAdapterV2ExternalTurnInput {
 }
 
 export interface ProviderAdapterV2OpenSessionInput {
+  /** Native worker state, separate from semantic output or actionable approvals. */
+  readonly onNativeTurnProgress?: (input: {
+    readonly threadId: ThreadId;
+    readonly providerThreadId: ProviderThreadId;
+    readonly runId: RunId;
+    readonly rootNodeId: NodeId;
+    readonly status: "running" | "waiting";
+  }) => Effect.Effect<boolean>;
   readonly onExternalTurn?: (
     input: ProviderAdapterV2ExternalTurnInput,
   ) => Effect.Effect<ProviderAdapterV2TurnInput | undefined, ProviderAdapterProtocolError>;

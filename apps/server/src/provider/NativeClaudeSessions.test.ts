@@ -67,6 +67,7 @@ describe("Claude native transcript projection", () => {
     expect(history[0]?.items[2]).toMatchObject({
       id: "tool",
       status: "completed",
+      input: { file_path: "/work/a" },
       text: "file content",
     });
     expect(history[0]?.items.some((item) => item.text === "discarded")).toBe(false);
@@ -95,6 +96,10 @@ it("keeps a live user turn and an unfinished tool turn running until an end_turn
   expect(nativeClaudeHistory([first, tool])[0]).toMatchObject({
     status: "running",
     completedAt: null,
+  });
+  expect(nativeClaudeHistory([first, tool])[0]?.items[1]).toMatchObject({
+    input: { command: "pwd" },
+    text: "",
   });
   expect(
     nativeClaudeHistory([
@@ -156,6 +161,7 @@ it.effect(
       const source = new NativeClaudeSessions(root, new Client());
       const sessions = yield* Effect.promise(() => source.list());
       expect(sessions).toHaveLength(1);
+      expect(sessions[0]?.active).toBe(false);
       const history = yield* Effect.promise(() => source.history(sessionId));
       expect(history[0]).toMatchObject({
         status: "completed",

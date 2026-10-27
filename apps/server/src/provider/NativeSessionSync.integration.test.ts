@@ -19,6 +19,7 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
@@ -79,6 +80,7 @@ const provider = (
 const fixture = (instances: ReadonlyArray<ProviderInstance>) => {
   const opened: Array<{ instanceId: ProviderInstanceId; nativeId: string }> = [];
   const resumed: Array<{ instanceId: ProviderInstanceId; nativeId: string }> = [];
+  const resumedStatuses: string[] = [];
   const detached: Array<{ threadId: ThreadId; preserveNativeWork: boolean | undefined }> = [];
   const reconciled: Array<
     Parameters<ExternalNativeRuns.ExternalNativeRuns["Service"]["reconcileSnapshot"]>[0]
@@ -106,6 +108,10 @@ const fixture = (instances: ReadonlyArray<ProviderInstance>) => {
       listInstances: Effect.succeed(instances),
     }),
     Layer.mock(ProjectService.ProjectService)({
+      getById: (id) =>
+        Effect.succeed(
+          Option.fromNullishOr([...projects.values()].find((project) => project.id === id)),
+        ),
       bootstrap: (input) =>
         Effect.sync(() => {
           bootstrapped.push({
@@ -151,6 +157,7 @@ const fixture = (instances: ReadonlyArray<ProviderInstance>) => {
             }: Parameters<ProviderAdapter.ProviderAdapterV2SessionRuntime["resumeThread"]>[0]) =>
               Effect.sync(() => {
                 resumed.push(identity);
+                resumedStatuses.push(providerThread.status);
                 return providerThread;
               }),
           } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
@@ -161,6 +168,7 @@ const fixture = (instances: ReadonlyArray<ProviderInstance>) => {
     layer: NativeSessionSync.layer.pipe(Layer.provideMerge(dependencies)),
     opened,
     resumed,
+    resumedStatuses,
     detached,
     reconciled,
     bootstrapped,
@@ -411,70 +419,86 @@ it.effect(
   },
 );
 
-it.effect("reattaches an idle OpenCode session with a previously running T3 run", () =>
-  Effect.gen(function* () {
-    let session = native("finished-while-offline");
-    const f = fixture([
-      provider(opencode, opencodeDriver, {
-        list: Effect.sync(() => [session]),
-        history: () => Effect.succeed(history(session.id, "opencode")),
-      }),
-    ]);
-    const context = yield* Layer.build(f.layer);
-    yield* Effect.gen(function* () {
-      const sync = yield* NativeSessionSync.NativeSessionSync;
-      const store = yield* ProjectionStore.ProjectionStoreV2;
-      const sink = yield* EventSink.EventSinkV2;
-      const ids = yield* IdAllocator.IdAllocatorV2;
-      const id = ids.derive.threadFromProviderThread({
-        driver: opencodeDriver,
-        providerInstanceId: opencode,
-        nativeThreadId: session.id,
-      });
-      yield* sync.sync;
-      const records = yield* store.getThreadRecords(id, ["runs", "providerThreads"]);
-      const run = records.runs[0]!;
-      const providerThread = records.providerThreads[0]!;
-      const now = yield* DateTime.now;
-      yield* sink.write({
-        events: [
-          {
-            id: EventId.make("offline-run-active"),
-            type: "run.updated",
-            threadId: id,
-            runId: run.id,
-            occurredAt: now,
-            payload: { ...run, status: "waiting", completedAt: null },
-          },
-          {
-            id: EventId.make("offline-thread-active"),
-            type: "provider-thread.updated",
-            threadId: id,
-            occurredAt: now,
-            payload: { ...providerThread, status: "active" },
-          },
-        ],
-      });
-      session = { ...session, updatedAt: session.updatedAt + 1 };
-      yield* sync.sync;
-      assert.deepEqual(f.resumed, []);
-      yield* sink.write({
-        events: [
-          {
-            id: EventId.make("offline-run-running"),
-            type: "run.updated",
-            threadId: id,
-            runId: run.id,
-            occurredAt: now,
-            payload: { ...run, status: "running", completedAt: null },
-          },
-        ],
-      });
-      session = { ...session, updatedAt: session.updatedAt + 1 };
-      yield* sync.sync;
-      assert.deepEqual(f.resumed, [{ instanceId: opencode, nativeId: session.id }]);
-    }).pipe(Effect.provide(context));
-  }).pipe(Effect.scoped),
+it.effect.each([
+  { instanceId: opencode, driver: opencodeDriver, missingWorker: false },
+  { instanceId: claude, driver: claudeDriver, missingWorker: false },
+  { instanceId: claude, driver: claudeDriver, missingWorker: true },
+])(
+  "reattaches an idle $driver session with a previously running T3 run (missing=$missingWorker)",
+  ({ instanceId, driver, missingWorker }) =>
+    Effect.gen(function* () {
+      let missing = false;
+      let session = { ...native("finished-while-offline"), canObserveActive: true };
+      const f = fixture([
+        provider(instanceId, driver, {
+          list: Effect.sync(() => (missing ? [] : [session])),
+          history: () => Effect.succeed(history(session.id, "opencode")),
+        }),
+      ]);
+      const context = yield* Layer.build(f.layer);
+      yield* Effect.gen(function* () {
+        const sync = yield* NativeSessionSync.NativeSessionSync;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const id = ids.derive.threadFromProviderThread({
+          driver,
+          providerInstanceId: instanceId,
+          nativeThreadId: session.id,
+        });
+        yield* sync.sync;
+        const records = yield* store.getThreadRecords(id, ["runs", "providerThreads"]);
+        const run = records.runs[0]!;
+        const providerThread = records.providerThreads[0]!;
+        const now = yield* DateTime.now;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("offline-run-active"),
+              type: "run.updated",
+              threadId: id,
+              runId: run.id,
+              occurredAt: now,
+              payload: { ...run, status: "waiting", completedAt: null },
+            },
+            {
+              id: EventId.make("offline-thread-active"),
+              type: "provider-thread.updated",
+              threadId: id,
+              occurredAt: now,
+              payload: { ...providerThread, status: "active" },
+            },
+          ],
+        });
+        session = { ...session, updatedAt: session.updatedAt + 1 };
+        yield* sync.sync;
+        assert.deepEqual(f.resumed, []);
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("offline-run-running"),
+              type: "run.updated",
+              threadId: id,
+              runId: run.id,
+              occurredAt: now,
+              payload: { ...run, status: "running", completedAt: null },
+            },
+            {
+              id: EventId.make("external-thread-still-idle"),
+              type: "provider-thread.updated",
+              threadId: id,
+              occurredAt: now,
+              payload: { ...providerThread, status: "idle" },
+            },
+          ],
+        });
+        missing = missingWorker;
+        session = { ...session, updatedAt: session.updatedAt + 1 };
+        yield* sync.sync;
+        assert.deepEqual(f.resumed, [{ instanceId, nativeId: session.id }]);
+        assert.deepEqual(f.resumedStatuses, ["active"]);
+      }).pipe(Effect.provide(context));
+    }).pipe(Effect.scoped),
 );
 
 it.effect(

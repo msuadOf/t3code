@@ -21,6 +21,8 @@ export interface NativeHistoryItem {
   readonly text: string;
   readonly status: "running" | "completed" | "failed" | "cancelled";
   readonly title?: string;
+  /** Structured tool arguments; text remains the result/output. */
+  readonly input?: Readonly<Record<string, unknown>>;
 }
 
 export interface NativeHistoryTurn {
