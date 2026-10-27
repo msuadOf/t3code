@@ -315,6 +315,7 @@ const make = Effect.gen(function* () {
               previous.archived !== native.archived;
             // Active sessions need live reconciliation. Periodic full refreshes
             // cover providers whose summary timestamps do not change per item.
+            let recoverIdleRun = false;
             if (native.active || changed || scan % 20 === 0) {
               const turns = yield* source.history(native.id);
               yield* externalRuns.reconcileSnapshot({
@@ -334,6 +335,13 @@ const make = Effect.gen(function* () {
                 "nodes",
                 "checkpointScopes",
               ]);
+              recoverIdleRun =
+                instance.driverKind === "opencode" &&
+                !native.active &&
+                existing.runs.some(
+                  (run) =>
+                    run.providerThreadId === target.providerThread.id && run.status === "running",
+                );
               const events = NativeSessionHistory.mapHistory(
                 {
                   driver: instance.driverKind,
@@ -354,7 +362,7 @@ const make = Effect.gen(function* () {
             }
             // Only providers that can attach the existing worker may observe live work.
             if (
-              native.active &&
+              (native.active || recoverIdleRun) &&
               (instance.driverKind === "opencode" || native.canObserveActive === true)
             ) {
               const runtime = yield* manager.open({

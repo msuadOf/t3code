@@ -193,6 +193,7 @@ export const replayServer = (
   transcript: ProviderReplayTranscript,
   options?: {
     readonly external?: boolean;
+    readonly observer?: boolean;
     readonly shared?: boolean;
     readonly onPrompt?: (input: unknown) => void;
     readonly replayGate?: ProviderReplayGate;
@@ -213,8 +214,10 @@ export const replayServer = (
         replayHttpClient(controller, options?.replayGate, options?.onPrompt),
       ),
     );
+    const api = yield* opencode.connect({ baseUrl: BASE_URL, password: "replay" });
     const connection = {
-      ...(yield* opencode.connect({ baseUrl: BASE_URL, password: "replay" })),
+      ...api,
+      ...(options?.observer === true ? { observerEvents: api.events } : {}),
       url: BASE_URL,
       version: transcript.version,
       external: options?.external ?? false,
@@ -242,6 +245,7 @@ const makeReplayAdapter = (
   transcript: ProviderReplayTranscript,
   options?: {
     readonly external?: boolean;
+    readonly observer?: boolean;
     readonly shared?: boolean;
     readonly onPrompt?: (input: unknown) => void;
     readonly replayGate?: ProviderReplayGate;
@@ -286,6 +290,7 @@ export const openCode2ReplayRuntime = (
   entries: ReadonlyArray<ProviderReplayEntry>,
   options?: {
     readonly external?: boolean;
+    readonly observer?: boolean;
     readonly shared?: boolean;
     readonly onExternalTurn?: ProviderAdapter.ProviderAdapterV2OpenSessionInput["onExternalTurn"];
     readonly onPrompt?: (input: unknown) => void;

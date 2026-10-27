@@ -102,6 +102,7 @@ const PiProviderCapabilitiesV2 = {
     // one immutable policy for its whole lifetime.
     supportsRuntimeModeSwitchInSession: false,
     pendingRequestsSurviveRestart: false,
+    runtimeSurvivesHostRestart: false,
   },
   threads: {
     canCreateEmptyThread: true,

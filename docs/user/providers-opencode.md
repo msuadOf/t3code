@@ -50,7 +50,9 @@ and OpenCode version, then refresh status.
 
 CLI work can continue while T3 is disconnected. On reconnect, T3 reads the native
 history, current execution, and pending questions or approvals so work that began
-during the disconnect can reappear without submitting its prompt again.
+during the disconnect can reappear without submitting its prompt again. If T3 Code
+starts observing after a reply has already begun, that reply appears when its
+current text block finishes.
 
 A native background service owns its own credentials. The password field applies
 to an explicit server URL; it does not replace the native service's password.

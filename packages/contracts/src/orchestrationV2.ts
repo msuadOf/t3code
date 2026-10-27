@@ -213,6 +213,10 @@ export const OrchestrationV2SessionCapabilities = Schema.Struct({
   supportsProviderSwitchingViaHandoff: Schema.Boolean,
   supportsRuntimeModeSwitchInSession: Schema.Boolean,
   pendingRequestsSurviveRestart: Schema.Boolean,
+  // The native runtime survives a T3 server process restart, not an OS reboot.
+  runtimeSurvivesHostRestart: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
 });
 export type OrchestrationV2SessionCapabilities = typeof OrchestrationV2SessionCapabilities.Type;
 

@@ -17,7 +17,11 @@ if (
   // Guard sockets before either dispatch path can load outbound-capable modules.
   const { ignoreMacosTypeOfServiceEinval } = await import("./outboundHttp.ts");
   ignoreMacosTypeOfServiceEinval();
-  if (command === "__managed-chatgpt-token") {
+  if (command === "__opencode-observer") {
+    const { runOpenCode2ObserverWorker } =
+      await import("@t3tools/provider-opencode/server/v2/OpenCode2ObserverWorker");
+    await runOpenCode2ObserverWorker();
+  } else if (command === "__managed-chatgpt-token") {
     const { runManagedChatGptTokenCli } = await import("./cli/managedChatGptToken.ts");
     await runManagedChatGptTokenCli(process.argv.slice(3));
   } else if (command === "acp-mcp-bridge" || command === "acp-mcp-call") {

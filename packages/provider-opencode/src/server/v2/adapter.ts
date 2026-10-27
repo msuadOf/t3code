@@ -96,6 +96,7 @@ const OpenCode2ProviderCapabilities = {
     supportsProviderSwitchingViaHandoff: true,
     supportsRuntimeModeSwitchInSession: true,
     pendingRequestsSurviveRestart: false,
+    runtimeSurvivesHostRestart: true,
   },
   threads: {
     canCreateEmptyThread: true,
@@ -743,6 +744,15 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
     const announced = new Map<string, EventOf<"session.created">["data"]>();
     const strays = new Map<string, ThreadState>();
     const busy = new Set<string>();
+    const observedText = new Map<
+      string,
+      Extract<OpenCode2Client.OpenCode2StreamEvent, { type: "t3.observer.text" }>
+    >();
+    const observerKey = (
+      data: { sessionID: string; assistantMessageID: string; ordinal: number },
+      kind: string,
+    ) => JSON.stringify([data.sessionID, data.assistantMessageID, kind, data.ordinal]);
+    const observerReady = yield* Deferred.make<boolean>();
     const pending = new Map<RuntimeRequestId, PendingRequest>();
     const lock = yield* Semaphore.make(1);
     const clearing = new Map<string, Deferred.Deferred<void>>();
@@ -2079,6 +2089,15 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         turn.retry = undefined;
       }
       switch (event.type) {
+        case "t3.observer.text":
+          return yield* emitText(
+            state,
+            turn,
+            event.data,
+            event.data.kind,
+            (current) => (current.startsWith(event.data.text) ? current : event.data.text),
+            false,
+          );
         case "session.text.started":
         case "session.reasoning.started":
         case "session.text.delta":
@@ -2227,7 +2246,11 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       return { delivered, stopped };
     });
 
-    const onWake = Effect.fnUntraced(function* (state: ThreadState, snapshot = false) {
+    const onWake = Effect.fnUntraced(function* (
+      state: ThreadState,
+      snapshot = false,
+      nativeStatus: "inProgress" | "completed" = "inProgress",
+    ) {
       if (
         connection.shared &&
         input.onExternalTurn !== undefined &&
@@ -2250,7 +2273,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           startedAt: prompt.time.created,
           text: prompt.text,
           cwd: state.directory,
-          nativeStatus: "inProgress",
+          nativeStatus,
           ...(snapshot ? { snapshot: true } : {}),
         });
         if (turnInput !== undefined) {
@@ -2356,7 +2379,69 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         ? finishTurn(state, turn.heldEnd)
         : Effect.void;
 
+    let observerReconcile = false;
     const handleEvent = Effect.fnUntraced(function* (event: OpenCode2Client.OpenCode2StreamEvent) {
+      if (event.type === "t3.observer.ready") {
+        if (observerReconcile) {
+          const previousFailure = streamFailure;
+          streamFailure = undefined;
+          yield* reconcile.pipe(
+            Effect.timeout(RECONCILE_TIMEOUT),
+            Effect.onError(() =>
+              Effect.sync(() => {
+                streamFailure = previousFailure;
+              }),
+            ),
+          );
+          observerReconcile = false;
+          const done = reconnected;
+          reconnected = yield* Deferred.make<void>();
+          yield* Deferred.succeed(done, undefined);
+        }
+        yield* Deferred.succeed(observerReady, true);
+        return;
+      }
+      if (event.type === "t3.observer.gap") {
+        for (const [key, block] of observedText)
+          if (block.data.sessionID === event.data.sessionID) observedText.delete(key);
+        yield* Effect.logWarning(
+          "OpenCode observer missed streaming output; waiting for the completed block.",
+          { sessionId: event.data.sessionID },
+        );
+        return;
+      }
+      if (event.type === "t3.observer.text")
+        observedText.set(observerKey(event.data, event.data.kind), event);
+      if (event.type === "session.text.delta" || event.type === "session.reasoning.delta") {
+        const kind = event.type === "session.text.delta" ? "text" : "reasoning";
+        const key = observerKey(event.data, kind);
+        const previous = observedText.get(key);
+        observedText.set(key, {
+          type: "t3.observer.text",
+          data: {
+            sessionID: event.data.sessionID,
+            assistantMessageID: event.data.assistantMessageID,
+            ordinal: event.data.ordinal,
+            kind,
+            text: (previous?.data.text ?? "") + event.data.delta,
+          },
+        });
+      }
+
+      if (event.type === "session.text.ended" || event.type === "session.reasoning.ended") {
+        observedText.delete(
+          observerKey(event.data, event.type === "session.text.ended" ? "text" : "reasoning"),
+        );
+      }
+      if (
+        event.type === "session.execution.started" ||
+        event.type === "session.execution.succeeded" ||
+        event.type === "session.execution.failed" ||
+        event.type === "session.execution.interrupted"
+      ) {
+        for (const [key, block] of observedText)
+          if (block.data.sessionID === event.data.sessionID) observedText.delete(key);
+      }
       const sessionId = sessionOfEvent(event);
       const cleared = sessionId === undefined ? undefined : clearing.get(sessionId);
       if (cleared !== undefined) {
@@ -2650,6 +2735,27 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           }
         }
       }
+      const assistantIds = new Set(
+        recent
+          .filter((message) => message.type === "assistant")
+          .map((message) => String(message.id)),
+      );
+      for (const block of observedText.values()) {
+        if (
+          block.data.sessionID !== sessionId ||
+          !assistantIds.has(block.data.assistantMessageID) ||
+          state.active !== turn
+        )
+          continue;
+        yield* emitText(
+          state,
+          turn,
+          block.data,
+          block.data.kind,
+          (current) => (current.startsWith(block.data.text) ? current : block.data.text),
+          false,
+        );
+      }
       return idle === undefined ? undefined : { outcome: idle.outcome };
     });
 
@@ -2770,7 +2876,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       const scope = yield* Scope.make();
       const { next, stream } = yield* Effect.gen(function* () {
         const next = yield* borrow.pipe(Effect.provideService(Scope.Scope, scope));
-        return { next, stream: yield* next.events };
+        return { next, stream: yield* next.observerEvents ?? next.events };
       }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)));
       const previous = currentScope;
       connection = next;
@@ -2779,6 +2885,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       yield* Scope.close(previous, Exit.void);
       // A restarted server forgot T3's MCP servers; the next turn adds them again.
       for (const state of threads.values()) state.mcp = undefined;
+      if (next.observerEvents !== undefined) {
+        observerReconcile = true;
+        return stream;
+      }
       yield* lock
         .withPermit(
           Effect.gen(function* () {
@@ -2809,6 +2919,8 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         Effect.exit,
         Effect.flatMap(() =>
           Effect.gen(function* () {
+            yield* Deferred.succeed(observerReady, false);
+            observedText.clear();
             streamFailure = "The OpenCode event stream was lost. Reconnecting.";
             yield* Effect.logWarning("Lost the OpenCode event stream; reconnecting.");
             // The last failure is kept for the log: it can carry the server's
@@ -2826,16 +2938,28 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             if (next._tag === "None") {
               return yield* failAll("The OpenCode event stream was lost and could not reconnect.");
             }
-            streamFailure = undefined;
-            const done = reconnected;
-            reconnected = yield* Deferred.make<void>();
-            yield* Deferred.succeed(done, undefined);
+            if (connection.observerEvents === undefined) {
+              streamFailure = undefined;
+              const done = reconnected;
+              reconnected = yield* Deferred.make<void>();
+              yield* Deferred.succeed(done, undefined);
+            }
             return yield* follow(next.value);
           }),
         ),
       );
     // Subscribed before any session or prompt call, so no event of theirs is missed.
-    yield* follow(yield* connection.events).pipe(Effect.forkScoped);
+    yield* follow(yield* connection.observerEvents ?? connection.events).pipe(Effect.forkScoped);
+    if (connection.observerEvents !== undefined) {
+      const ready = yield* Deferred.await(observerReady).pipe(Effect.timeout("10 seconds"));
+      if (!ready)
+        return yield* Effect.fail(
+          new OpenCodeRuntime.OpenCodeRuntimeError({
+            operation: "observer.subscribe",
+            detail: "The OpenCode event observer disconnected.",
+          }),
+        );
+    }
 
     // A server T3 did not start keeps running after T3 stops, so stop the turns
     // it would otherwise finish unseen. A spawned server stops with its owner.
@@ -3256,7 +3380,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       native?: { readonly id: string; readonly startedAt: DateTime.Utc },
     ) {
       const startedAt = native?.startedAt ?? (yield* DateTime.now);
-      const nativeTurnId = native?.id ?? `${state.sessionId}:attempt:${turnInput.attemptId}`;
+      const nativeTurnId =
+        native?.id === turnPromptId(state.sessionId, turnInput.attemptId)
+          ? `${state.sessionId}:attempt:${turnInput.attemptId}`
+          : (native?.id ?? `${state.sessionId}:attempt:${turnInput.attemptId}`);
       const providerTurn: OrchestrationV2ProviderTurn = {
         id: idAllocator.derive.providerTurn({ driver, nativeTurnId }),
         providerThreadId: turnInput.providerThread.id,
@@ -3650,12 +3777,21 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             });
           }
           if (connection.shared && state.active === undefined) {
-            const active = yield* client.session.active();
-            if (sessionId in active) {
-              yield* onWake(state, true);
-              yield* backfill(sessionId, state);
-              yield* reconcile;
-            }
+            yield* lock.withPermit(
+              Effect.gen(function* () {
+                const active = yield* client.session.active();
+                if (
+                  state.active === undefined &&
+                  (sessionId in active || threadInput.providerThread.status === "active")
+                ) {
+                  yield* onWake(state, true, sessionId in active ? "inProgress" : "completed");
+                  if (state.active !== undefined) {
+                    yield* backfill(sessionId, state);
+                    yield* reconcile;
+                  }
+                }
+              }),
+            );
           }
           return state.providerThread;
         },

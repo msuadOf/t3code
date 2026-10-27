@@ -411,6 +411,72 @@ it.effect(
   },
 );
 
+it.effect("reattaches an idle OpenCode session with a previously running T3 run", () =>
+  Effect.gen(function* () {
+    let session = native("finished-while-offline");
+    const f = fixture([
+      provider(opencode, opencodeDriver, {
+        list: Effect.sync(() => [session]),
+        history: () => Effect.succeed(history(session.id, "opencode")),
+      }),
+    ]);
+    const context = yield* Layer.build(f.layer);
+    yield* Effect.gen(function* () {
+      const sync = yield* NativeSessionSync.NativeSessionSync;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const id = ids.derive.threadFromProviderThread({
+        driver: opencodeDriver,
+        providerInstanceId: opencode,
+        nativeThreadId: session.id,
+      });
+      yield* sync.sync;
+      const records = yield* store.getThreadRecords(id, ["runs", "providerThreads"]);
+      const run = records.runs[0]!;
+      const providerThread = records.providerThreads[0]!;
+      const now = yield* DateTime.now;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("offline-run-active"),
+            type: "run.updated",
+            threadId: id,
+            runId: run.id,
+            occurredAt: now,
+            payload: { ...run, status: "waiting", completedAt: null },
+          },
+          {
+            id: EventId.make("offline-thread-active"),
+            type: "provider-thread.updated",
+            threadId: id,
+            occurredAt: now,
+            payload: { ...providerThread, status: "active" },
+          },
+        ],
+      });
+      session = { ...session, updatedAt: session.updatedAt + 1 };
+      yield* sync.sync;
+      assert.deepEqual(f.resumed, []);
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("offline-run-running"),
+            type: "run.updated",
+            threadId: id,
+            runId: run.id,
+            occurredAt: now,
+            payload: { ...run, status: "running", completedAt: null },
+          },
+        ],
+      });
+      session = { ...session, updatedAt: session.updatedAt + 1 };
+      yield* sync.sync;
+      assert.deepEqual(f.resumed, [{ instanceId: opencode, nativeId: session.id }]);
+    }).pipe(Effect.provide(context));
+  }).pipe(Effect.scoped),
+);
+
 it.effect(
   "opens a passive observer for an active Claude foreground session without starting a writer",
   () =>

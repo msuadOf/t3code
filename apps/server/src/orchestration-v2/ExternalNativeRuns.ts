@@ -70,11 +70,16 @@ const make = Effect.gen(function* () {
             thread.providerInstanceId === input.session.instanceId,
         );
         if (providerThread === undefined) return undefined;
-        const providerTurnId = ids.derive.providerTurn({
+        const derivedTurnId = ids.derive.providerTurn({
           driver: input.session.driver,
           nativeTurnId: input.nativeTurnId,
         });
-        const existingTurn = projection.providerTurns.find((turn) => turn.id === providerTurnId);
+        const existingTurn = projection.providerTurns.find(
+          (turn) =>
+            turn.providerThreadId === providerThread.id &&
+            (turn.id === derivedTurnId || turn.nativeTurnRef?.nativeId === input.nativeTurnId),
+        );
+        const providerTurnId = existingTurn?.id ?? derivedTurnId;
         const nativeRunId = RunId.make(
           `run:${input.session.driver}-external:${encodeURIComponent(providerThread.id)}:${encodeURIComponent(input.nativeTurnId)}`,
         );

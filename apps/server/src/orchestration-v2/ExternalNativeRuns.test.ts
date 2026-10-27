@@ -4,6 +4,7 @@ import {
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
+  ProviderTurnId,
   ThreadId,
   ProjectId,
   RunId,
@@ -154,6 +155,33 @@ it.effect.each(["codex", "claudeAgent", "opencode"] as const)(
             },
           }),
         );
+        // A T3-origin prompt has a provider turn ID derived from its attempt,
+        // while its native reference is the prompt ID returned by the service.
+        yield* observed[0]?.onObservationClosed ?? Effect.void;
+        projection = {
+          ...projection,
+          providerTurns: [
+            {
+              id: ProviderTurnId.make("original-t3-turn"),
+              providerThreadId,
+              runAttemptId: first!.attemptId,
+              nativeTurnRef: { driver, nativeId: "cli-turn", strength: "weak" },
+              ordinal: 1,
+              status: "running",
+            } as OrchestrationV2ThreadProjection["providerTurns"][number],
+          ],
+        };
+        const restoredT3Turn = yield* runs.adopt({ ...input, snapshot: true });
+        assert.equal(restoredT3Turn?.runId, first?.runId);
+        assert.equal(restoredT3Turn?.attemptId, first?.attemptId);
+        assert.equal(restoredT3Turn?.providerTurnOrdinal, 1);
+        assert.equal(writes.filter((event) => event.type === "run.created").length, 1);
+        yield* observed[1]?.onObservationClosed ?? Effect.void;
+        observed.pop();
+        projection = { ...projection, providerTurns: [] };
+        // Preserve the original observation for the remaining duplicate checks.
+        yield* runs.adopt(input);
+        observed.pop();
         projection = {
           ...projection,
           runs: projection.runs.map((run) => ({ ...run, status: "completed" })),

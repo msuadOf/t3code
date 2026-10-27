@@ -110,6 +110,7 @@ describe("OpenCode2Server error details", () => {
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
+          httpClient,
           OpenCode2Client.layer.pipe(Layer.provide(httpClient)),
           OpenCodeRuntime.layer.pipe(Layer.provide(OpenCodeServerLedger.layerTest)),
         ).pipe(Layer.provideMerge(NodeServices.layer)),

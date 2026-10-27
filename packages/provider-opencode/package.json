@@ -35,6 +35,10 @@
       "types": "./src/server/v2/OpenCode2Client.ts",
       "import": "./src/server/v2/OpenCode2Client.ts"
     },
+    "./server/v2/OpenCode2ObserverWorker": {
+      "types": "./src/server/v2/OpenCode2ObserverWorker.ts",
+      "import": "./src/server/v2/OpenCode2ObserverWorker.ts"
+    },
     "./server/v2/OpenCode2Server": {
       "types": "./src/server/v2/OpenCode2Server.ts",
       "import": "./src/server/v2/OpenCode2Server.ts"

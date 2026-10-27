@@ -308,6 +308,7 @@ const resumed = (
   entries: ReadonlyArray<ProviderReplayEntry>,
   options?: {
     readonly external?: boolean;
+    readonly observer?: boolean;
     readonly supervised?: boolean;
     readonly replayGate?: ProviderReplayGate;
     readonly attachmentsDir?: string;
@@ -318,7 +319,9 @@ const resumed = (
   Effect.gen(function* () {
     const runtime = yield* openCode2ReplayRuntime(
       withInstructions([
-        ...opening,
+        ...(options?.observer === true
+          ? [opening[0]!, event("t3.observer.ready", {}), ...opening.slice(1)]
+          : opening),
         out("session.get", { sessionID: SESSION }),
         replyData("session.get", sessionInfo()),
         ...noOpenRequests,
@@ -336,6 +339,7 @@ const resumed = (
         ...(options?.fileSystem === undefined ? {} : { fileSystem: options.fileSystem }),
         ...(options?.onPrompt === undefined ? {} : { onPrompt: options.onPrompt }),
         ...(options?.external === undefined ? {} : { external: options.external }),
+        ...(options?.observer === undefined ? {} : { observer: options.observer }),
         ...(options?.replayGate === undefined ? {} : { replayGate: options.replayGate }),
         ...(options?.attachmentsDir === undefined
           ? {}
@@ -517,6 +521,62 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         );
         assert.deepInclude(events.at(-1), { type: "turn.terminal", status: "completed" });
       }).pipe(Effect.scoped, Effect.provide(IdAllocator.layer)),
+  );
+
+  it.effect.each([
+    { outcome: "succeeded", status: "completed" },
+    { outcome: "failed", status: "failed" },
+    { outcome: undefined, status: "interrupted" },
+  ] as const)(
+    "settles an older active run when the native service is now idle: $status",
+    ({ outcome, status }) =>
+      Effect.gen(function* () {
+        const prompt = history.data[0]!;
+        const assistant = history.data[1]!;
+        const idle = { ...history.data[2]!, outcome };
+        const messages = [
+          ...(outcome === undefined ? [] : [idle]),
+          assistant,
+          prompt,
+          ...(outcome === undefined
+            ? [{ ...history.data[2]!, id: "msg_previous_idle", outcome: "succeeded" }]
+            : []),
+        ];
+        const runtime = yield* openCode2ReplayRuntime(
+          [
+            ...opening,
+            out("session.get", { sessionID: SESSION }),
+            replyData("session.get", sessionInfo()),
+            out("session.active"),
+            replyData("session.active", {}),
+            out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+            reply("message.list", { data: messages, cursor: {} }),
+            out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+            reply("message.list", { data: messages, cursor: {} }),
+            out("session.active"),
+            replyData("session.active", {}),
+            out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+            reply("message.list", { data: messages, cursor: {} }),
+            ...noOpenRequests,
+          ],
+          {
+            shared: true,
+            onExternalTurn: () =>
+              Effect.gen(function* () {
+                return turnInput(providerThread(yield* DateTime.now));
+              }),
+          },
+        );
+        yield* runtime.resumeThread({
+          providerThread: { ...providerThread(yield* DateTime.now), status: "active" },
+          threadId,
+        });
+        const events = yield* runtime.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+        assert.deepInclude(events.at(-1), { type: "turn.terminal", status });
+      }).pipe(Effect.scoped),
   );
 
   it.effect("recovers a CLI turn and approval missed by an idle shared client", () =>
@@ -2358,6 +2418,108 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       );
       assert.include(texts, "HELLO WORLD");
       assert.deepInclude(collected.at(-1), { type: "turn.terminal", status: "completed" });
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("applies observer snapshots and cumulative updates without repeating a prefix", () =>
+    Effect.gen(function* () {
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, id: PROMPT_ID, text: "<any>" }),
+        promptAccepted,
+        event("t3.observer.text", {
+          sessionID: SESSION,
+          assistantMessageID: "msg_observed",
+          ordinal: 0,
+          kind: "text",
+          text: "first ",
+        }),
+        event("t3.observer.text", {
+          sessionID: SESSION,
+          assistantMessageID: "msg_observed",
+          ordinal: 0,
+          kind: "text",
+          text: "first second",
+        }),
+        event("t3.observer.text", {
+          sessionID: SESSION,
+          assistantMessageID: "msg_observed",
+          ordinal: 0,
+          kind: "text",
+          text: "first ",
+        }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const events = yield* runtime.events.pipe(
+        Stream.takeUntil((entry) => entry.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(turnInput(thread));
+      const collected = yield* Fiber.join(events);
+      const texts = collected.flatMap((entry) =>
+        entry.type === "turn_item.updated" && entry.turnItem.type === "assistant_message"
+          ? [entry.turnItem.text]
+          : [],
+      );
+      assert.include(texts, "first second");
+      assert.notInclude(texts, "first first second");
+      assert.equal(texts.at(-1), "first second");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("reconciles after the observer reconnect snapshot is fully consumed", () =>
+    Effect.gen(function* () {
+      const resumedEvents = reconnected({ [SESSION]: { type: "running" } }, undefined, {
+        finish: undefined,
+        content: [{ type: "text", text: "" }],
+      });
+      const { runtime, thread } = yield* resumed(
+        [
+          out("session.prompt", { sessionID: SESSION, id: PROMPT_ID, text: "<any>" }),
+          promptAccepted,
+          event("t3.observer.text", {
+            sessionID: SESSION,
+            assistantMessageID: "msg_assistant_gap",
+            ordinal: 0,
+            kind: "text",
+            text: "first ",
+          }),
+          ...resumedEvents.slice(0, 2),
+          event("t3.observer.text", {
+            sessionID: SESSION,
+            assistantMessageID: "msg_assistant_gap",
+            ordinal: 0,
+            kind: "text",
+            text: "first second ",
+          }),
+          event("t3.observer.ready", {}),
+          ...resumedEvents.slice(2),
+          ...openRequests([]),
+          event("t3.observer.text", {
+            sessionID: SESSION,
+            assistantMessageID: "msg_assistant_gap",
+            ordinal: 0,
+            kind: "text",
+            text: "first second third",
+          }),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ],
+        { observer: true },
+      );
+      const events = yield* runtime.events.pipe(
+        Stream.takeUntil((entry) => entry.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(turnInput(thread));
+      const collected = yield* Fiber.join(events);
+      const texts = collected.flatMap((entry) =>
+        entry.type === "turn_item.updated" && entry.turnItem.type === "assistant_message"
+          ? [entry.turnItem.text]
+          : [],
+      );
+      assert.include(texts, "first second ");
+      assert.equal(texts.at(-1), "first second third");
     }).pipe(Effect.scoped),
   );
 

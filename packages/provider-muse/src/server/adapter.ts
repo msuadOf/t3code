@@ -104,6 +104,7 @@ const MuseProviderCapabilitiesV2 = {
     supportsProviderSwitchingViaHandoff: true,
     supportsRuntimeModeSwitchInSession: false,
     pendingRequestsSurviveRestart: false,
+    runtimeSurvivesHostRestart: false,
   },
   threads: {
     canCreateEmptyThread: true,

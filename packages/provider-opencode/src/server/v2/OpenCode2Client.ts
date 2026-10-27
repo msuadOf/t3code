@@ -1,4 +1,5 @@
 import { OpenCode, type OpenCodeClient } from "@opencode/client/effect";
+import type { ObserverEvent } from "./OpenCode2ObserverCache.ts";
 import { OpenCodeEvent } from "@opencode/protocol/groups/event";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -48,7 +49,8 @@ export class OpenCode2SilentStreamError extends Schema.TaggedError<OpenCode2Sile
 export type OpenCode2StreamEvent =
   | OpenCodeEvent
   | OpenCode2UnreadableTerminal
-  | OpenCode2UnreadableStart;
+  | OpenCode2UnreadableStart
+  | ObserverEvent;
 
 /**
  * `events` succeeds once the server accepted the subscription: the stream is
@@ -81,7 +83,26 @@ export class OpenCode2Client extends Context.Service<
  */
 const SILENT_STREAM_TIMEOUT = "45 seconds";
 
-const decodeEvent = Schema.decodeUnknownResult(Schema.fromJsonString(OpenCodeEvent));
+const ObserverEventSchema = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("t3.observer.ready"), data: Schema.Struct({}) }),
+  Schema.Struct({
+    type: Schema.Literal("t3.observer.gap"),
+    data: Schema.Struct({ sessionID: Schema.String }),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("t3.observer.text"),
+    data: Schema.Struct({
+      sessionID: Schema.String,
+      assistantMessageID: Schema.String,
+      ordinal: Schema.Number,
+      kind: Schema.Literals(["text", "reasoning"]),
+      text: Schema.String,
+    }),
+  }),
+]);
+const decodeEvent = Schema.decodeUnknownResult(
+  Schema.fromJsonString(Schema.Union([OpenCodeEvent, ObserverEventSchema])),
+);
 const decodeEnvelope = Schema.decodeUnknownOption(
   Schema.fromJsonString(
     Schema.Struct({
@@ -120,27 +141,31 @@ const undecodable = Effect.fnUntraced(function* (data: string) {
   return Result.failVoid;
 });
 
-const readEvents = HttpClient.get("/api/event", {
-  headers: { accept: "text/event-stream" },
-}).pipe(
-  Effect.flatMap(HttpClientResponse.filterStatusOk),
-  Effect.map((response) =>
-    response.stream.pipe(
-      Stream.timeoutOrElse({
-        duration: SILENT_STREAM_TIMEOUT,
-        orElse: () => Stream.fail(new OpenCode2SilentStreamError()),
-      }),
-      Stream.decodeText,
-      Stream.pipeThroughChannel(Sse.decode()),
-      Stream.filterMapEffect((frame) => {
-        const decoded = decodeEvent(frame.data);
-        return Result.isSuccess(decoded)
-          ? Effect.succeed(Result.succeed<OpenCode2StreamEvent>(decoded.success))
-          : undecodable(frame.data);
-      }),
+const readEvents = (endpoint = "/api/event", authorization?: string) =>
+  HttpClient.get(endpoint, {
+    headers: {
+      accept: "text/event-stream",
+      ...(authorization === undefined ? {} : { authorization }),
+    },
+  }).pipe(
+    Effect.flatMap(HttpClientResponse.filterStatusOk),
+    Effect.map((response) =>
+      response.stream.pipe(
+        Stream.timeoutOrElse({
+          duration: SILENT_STREAM_TIMEOUT,
+          orElse: () => Stream.fail(new OpenCode2SilentStreamError()),
+        }),
+        Stream.decodeText,
+        Stream.pipeThroughChannel(Sse.decode()),
+        Stream.filterMapEffect((frame) => {
+          const decoded = decodeEvent(frame.data);
+          return Result.isSuccess(decoded)
+            ? Effect.succeed(Result.succeed<OpenCode2StreamEvent>(decoded.success))
+            : undecodable(frame.data);
+        }),
+      ),
     ),
-  ),
-);
+  );
 
 /**
  * OpenCode decodes Basic credentials as UTF-8. `HttpClientRequest.basicAuth`
@@ -164,7 +189,7 @@ export const make = Effect.gen(function* () {
         Effect.provideService(HttpClient.HttpClient, authenticated),
         Effect.map((client) => ({
           client,
-          events: readEvents.pipe(
+          events: readEvents().pipe(
             Effect.provideService(
               HttpClient.HttpClient,
               HttpClient.mapRequest(authenticated, HttpClientRequest.prependUrl(baseUrl)),
@@ -177,6 +202,17 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(OpenCode2Client, make);
+
+export const observerEvents = (
+  httpClient: HttpClient.HttpClient,
+  input: { readonly url: string; readonly token: string },
+) =>
+  readEvents("/events", `Bearer ${input.token}`).pipe(
+    Effect.provideService(
+      HttpClient.HttpClient,
+      HttpClient.mapRequest(httpClient, HttpClientRequest.prependUrl(input.url)),
+    ),
+  );
 
 /**
  * The first request carries the caller's input (including `order`); later

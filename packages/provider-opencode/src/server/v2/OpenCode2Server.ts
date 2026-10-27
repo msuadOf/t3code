@@ -15,6 +15,8 @@ import * as HttpClientError from "effect/http/HttpClientError";
 
 import * as OpenCodeRuntime from "../OpenCodeRuntime.ts";
 import * as OpenCode2Client from "./OpenCode2Client.ts";
+import { ensureObserver } from "./OpenCode2Observer.ts";
+import * as HttpClient from "effect/http/HttpClient";
 
 const INFO_TIMEOUT = "5 seconds";
 
@@ -24,6 +26,10 @@ export interface OpenCode2Connection extends OpenCode2Client.OpenCode2Api {
   readonly external: boolean;
   /** Session execution belongs to the native service, never to this T3 client. */
   readonly shared?: boolean;
+  readonly observerEvents?: Effect.Effect<
+    Effect.Success<OpenCode2Client.OpenCode2Api["events"]>,
+    HttpClientError.HttpClientError | OpenCodeRuntime.OpenCodeRuntimeError
+  >;
 }
 
 export class OpenCode2Server extends Context.Service<
@@ -113,8 +119,10 @@ export const make = Effect.fn("OpenCode2Server.make")(function* (input: {
   readonly serverPassword: string;
   readonly directory: string;
   readonly environment: NodeJS.ProcessEnv;
+  readonly observerStateDir?: string;
 }) {
   const opencode = yield* OpenCode2Client.OpenCode2Client;
+  const httpClient = yield* HttpClient.HttpClient;
   const connectTo = Effect.fn("OpenCode2Server.connectTo")(function* (
     url: string,
     password: Redacted.Redacted,
@@ -122,7 +130,35 @@ export const make = Effect.fn("OpenCode2Server.make")(function* (input: {
   ) {
     const api = yield* opencode.connect({ baseUrl: url, password });
     const version = yield* verifyServer(api.client);
-    return { ...api, url, version, external, shared: true } satisfies OpenCode2Connection;
+    const observer =
+      input.observerStateDir === undefined
+        ? undefined
+        : Effect.tryPromise({
+            try: () =>
+              ensureObserver({
+                stateDir: input.observerStateDir!,
+                baseUrl: url,
+                password: Redacted.value(password),
+              }),
+            catch: (cause) =>
+              new OpenCodeRuntime.OpenCodeRuntimeError({
+                operation: "observer.start",
+                detail: "Could not start the OpenCode event observer.",
+                cause,
+              }),
+          });
+    if (observer !== undefined) yield* observer;
+    const observerEvents = observer?.pipe(
+      Effect.flatMap((endpoint) => OpenCode2Client.observerEvents(httpClient, endpoint)),
+    );
+    return {
+      ...api,
+      ...(observerEvents === undefined ? {} : { observerEvents }),
+      url,
+      version,
+      external,
+      shared: true,
+    } satisfies OpenCode2Connection;
   });
   let latest: OpenCode2Connection | undefined;
   const remember = (connection: OpenCode2Connection) =>

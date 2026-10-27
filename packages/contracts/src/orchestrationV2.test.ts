@@ -299,6 +299,7 @@ describe("orchestration V2 contracts", () => {
 
     const decoded = decodeOrchestrationV2ProviderCapabilities(legacyCapabilities);
     expect(decoded.runtimePolicy).toEqual({ enforcement: "client-boundary" });
+    expect(decoded.sessions.runtimeSurvivesHostRestart).toBe(false);
 
     const explicit = decodeOrchestrationV2ProviderCapabilities({
       ...legacyCapabilities,
