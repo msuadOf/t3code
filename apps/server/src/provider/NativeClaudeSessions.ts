@@ -72,6 +72,8 @@ export function nativeClaudeHistory(entries: readonly Entry[]): readonly NativeH
     items: NativeHistoryItem[];
   }> = [];
   const toolItems = new Map<string, { turn: (typeof turns)[number]; index: number }>();
+  const assistantTurns = new Map<string, (typeof turns)[number]>();
+  const promptTurns = new Map<string, (typeof turns)[number]>();
   for (const entry of conversationBranch(entries)) {
     if (!object(entry.message)) continue;
     const message = entry.message;
@@ -81,6 +83,34 @@ export function nativeClaudeHistory(entries: readonly Entry[]): readonly NativeH
         : Array.isArray(message.content)
           ? message.content.filter(object)
           : [];
+    // The native CLI writes cancellation as a user-shaped record tied to an assistant message.
+    const nativeCancel =
+      entry.type === "user" &&
+      (typeof entry.interruptedMessageId === "string" ||
+        (typeof entry.promptId === "string" &&
+          promptTurns.has(entry.promptId) &&
+          entry.promptSource === undefined &&
+          entry.origin === undefined &&
+          content.length === 1 &&
+          content[0]?.type === "text" &&
+          (content[0].text === "[Request interrupted by user]" ||
+            content[0].text === "[Request interrupted by user for tool use]")));
+    if (nativeCancel) {
+      const interrupted =
+        (typeof entry.interruptedMessageId === "string"
+          ? assistantTurns.get(entry.interruptedMessageId)
+          : undefined) ??
+        (typeof entry.promptId === "string" ? promptTurns.get(entry.promptId) : undefined) ??
+        turns.at(-1);
+      if (interrupted) {
+        interrupted.status = "interrupted";
+        interrupted.completedAt = timestamp(entry.timestamp, interrupted.startedAt);
+        interrupted.items = interrupted.items.map((item) =>
+          item.status === "running" ? { ...item, status: "cancelled" } : item,
+        );
+      }
+      continue;
+    }
     const isPrompt = entry.type === "user" && content.some((block) => block.type !== "tool_result");
     if (isPrompt || turns.length === 0)
       turns.push({
@@ -91,6 +121,9 @@ export function nativeClaudeHistory(entries: readonly Entry[]): readonly NativeH
         items: [],
       });
     const turn = turns.at(-1)!;
+    if (isPrompt && typeof entry.promptId === "string") promptTurns.set(entry.promptId, turn);
+    if (entry.type === "assistant" && typeof message.id === "string")
+      assistantTurns.set(message.id, turn);
     for (const [index, block] of content.entries()) {
       const id = `${String(entry.uuid)}:${index}`;
       if (block.type === "tool_result") {

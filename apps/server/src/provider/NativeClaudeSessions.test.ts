@@ -224,3 +224,57 @@ it("follows an assistant leaf flushed before its user and attachment ancestors",
   expect(history[0]?.id).toBe("prompt");
   expect(history[0]?.items.map((item) => item.type)).toEqual(["user", "tool"]);
 });
+
+it("ends the owning turn on a native interruption record without inventing another prompt", () => {
+  const prompt = {
+    type: "user",
+    uuid: "prompt",
+    parentUuid: null,
+    promptId: "native-prompt",
+    message: { content: "run" },
+    timestamp: 10,
+  };
+  const assistant = {
+    type: "assistant",
+    uuid: "assistant",
+    parentUuid: "prompt",
+    message: {
+      id: "native-message",
+      content: [{ type: "tool_use", id: "tool", name: "Bash", input: { command: "pwd" } }],
+      stop_reason: "tool_use",
+    },
+  };
+  const marker = {
+    type: "user",
+    uuid: "cancel",
+    parentUuid: "assistant",
+    interruptedMessageId: "native-message",
+    promptId: "native-prompt",
+    timestamp: 20,
+    message: { content: [{ type: "text", text: "[Request interrupted by user for tool use]" }] },
+  };
+  const history = nativeClaudeHistory([prompt, assistant, marker]);
+  expect(history).toHaveLength(1);
+  expect(history[0]).toMatchObject({ id: "prompt", status: "interrupted", completedAt: 20 });
+  expect(history[0]?.items.at(-1)).toMatchObject({ id: "tool", status: "cancelled" });
+  const nativeEscape = nativeClaudeHistory([
+    prompt,
+    assistant,
+    { ...marker, interruptedMessageId: undefined },
+  ]);
+  expect(nativeEscape).toHaveLength(1);
+  expect(nativeEscape[0]).toMatchObject({ status: "interrupted", completedAt: 20 });
+  const literal = nativeClaudeHistory([
+    prompt,
+    assistant,
+    {
+      ...marker,
+      interruptedMessageId: undefined,
+      promptId: "a-new-human-prompt",
+      promptSource: "typed",
+      origin: { kind: "human" },
+    },
+  ]);
+  expect(literal).toHaveLength(2);
+  expect(literal[1]?.items[0]?.text).toBe("[Request interrupted by user for tool use]");
+});
