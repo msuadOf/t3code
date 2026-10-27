@@ -203,16 +203,20 @@ export class NativeClaudeSessions {
     const live = await this.client.listSessions();
     this.lastInventory = live;
     const activeById = new Map(
-      live.filter((session) => session.sessionId).map((session) => [session.sessionId!, session]),
+      live
+        .filter((session) => session.kind === "background" && session.sessionId)
+        .map((session) => [session.sessionId!, session]),
     );
     const sessions = new Map<string, NativeSession>();
     for (const file of await this.files()) {
+      if (!activeById.has(NodePath.basename(file, ".jsonl"))) continue;
       const { entries, metadata } = await this.transcript(file);
       const first = entries.find(
         (entry) => typeof entry.cwd === "string" && typeof entry.sessionId === "string",
       );
       if (!first || !UUID.test(String(first.sessionId))) continue;
       const id = String(first.sessionId);
+      if (!activeById.has(id)) continue;
       const last = entries.at(-1);
       const renamed = entries.findLast((entry) => typeof entry.customTitle === "string");
       const history = nativeClaudeHistory(entries);

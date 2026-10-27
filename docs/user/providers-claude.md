@@ -11,27 +11,23 @@ Install a current Claude CLI with `agents`, `attach`, and `--bg` on the environm
 macOS or Linux host. Web, desktop, and mobile clients all read the same server-side
 conversation records.
 
-Existing transcripts appear automatically. **Shared session directory** limits
-this to a directory and its descendants; an empty value includes all directories
-in that Claude configuration. Directory filtering does not delete transcripts or
-stop native work.
+T3 discovers background sessions registered in `claude agents --all`, including
+stopped jobs, when their transcript belongs to the selected Claude configuration.
+Ordinary foreground conversations and unregistered historical transcripts are not
+included in the shared-session list. **Shared session directory** limits discovery
+to a directory and its descendants; an empty value includes all directories in
+that Claude configuration. Directory filtering does not stop native work.
 
-Running foreground conversations can be observed in T3 without starting another
-Claude process. Replies and thinking blocks follow the canonical transcript;
-closing the terminal during a turn shows it as interrupted. To also send input
-from T3 while preserving the session UUID, exit the foreground CLI and continue
-that conversation in T3, then use `claude attach <id>` in the CLI. Both clients
-use the same background worker. Alternatively, use `/background` in the terminal
-and select its resulting native session in T3: the CLI may assign that session a
-new UUID. T3 sends text when the worker is idle. Creating a new conversation in
-T3 also creates a native background worker.
+Start a shared conversation with `claude --bg`, then open it with
+`claude attach <id>` in the terminal and select the same session in T3. Creating a
+new conversation in T3 also creates a native background worker. T3 sends text
+when that worker is idle. Both interfaces operate on the same worker, and closing
+T3 leaves native work running.
 
-Opening a historical conversation in T3 continues its original session UUID. T3
-asks the native CLI to claim an inactive conversation with `--bg --resume`, or
-uses native `attach` to wake a stopped background job. Saved sessions keep their
-own model, permission, and environment options. If another CLI process wins the
-claim and Claude creates a copy, T3 stops that copy and reports the conflict
-without sending your message to it. Closing T3 leaves native work running.
+To share an ordinary foreground conversation, use `/background` in the CLI first,
+then select the resulting session in T3. The CLI may assign that background session
+a new UUID. T3 can wake a stopped background job through native `attach`; saved
+sessions retain their own model, permission, and environment options.
 
 The current native daemon integration has these limits:
 

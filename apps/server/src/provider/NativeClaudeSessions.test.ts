@@ -105,7 +105,7 @@ it("keeps a live user turn and an unfinished tool turn running until an end_turn
 });
 
 it.effect(
-  "observes foreground turns without a writer and keeps idle background lifecycle separate from turn status",
+  "discovers only daemon background sessions and preserves history for already observed threads",
   () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -179,13 +179,24 @@ it.effect(
           "\n",
       );
       const foreground = yield* Effect.promise(() => source.list());
-      expect(foreground[0]).toMatchObject({ active: true, canObserveActive: true });
+      expect(foreground).toEqual([]);
       expect((yield* Effect.promise(() => source.history(sessionId))).at(-1)).toMatchObject({
         status: "running",
         completedAt: null,
       });
+      inventory = [
+        {
+          kind: "background",
+          cwd: "/work",
+          startedAt: 1,
+          sessionId,
+          id: "11111111",
+          state: "stopped",
+        },
+      ];
+      expect(yield* Effect.promise(() => source.list())).toHaveLength(1);
       inventory = [];
-      yield* Effect.promise(() => source.list());
+      expect(yield* Effect.promise(() => source.list())).toEqual([]);
       expect((yield* Effect.promise(() => source.history(sessionId))).at(-1)).toMatchObject({
         status: "interrupted",
         completedAt: null,
