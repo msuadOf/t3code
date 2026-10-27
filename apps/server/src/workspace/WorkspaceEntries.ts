@@ -200,11 +200,40 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  // Per-entry filesystem calls share the browse/list span.
+  // Inspect each link before following it: stat/realpath can authenticate to a UNC host on Windows.
   const entryType = Effect.fnUntraced(function* (parent: string, entry: NodeFS.Dirent) {
-    if (!entry.isSymbolicLink()) return entry;
+    const absolutePath = path.join(parent, entry.name);
+    if (!entry.isSymbolicLink()) return { type: entry, realPath: absolutePath };
     return yield* Effect.tryPromise({
-      try: () => NodeFSP.stat(path.join(parent, entry.name)),
+      try: async () => {
+        let current = path.parse(absolutePath).root;
+        const splitSegments = (value: string) => value.split(path.sep === "\\" ? /[\\/]/ : "/");
+        const segments = splitSegments(absolutePath.slice(current.length));
+        let links = 0;
+        while (segments.length > 0) {
+          const segment = segments.shift()!;
+          if (segment === "" || segment === ".") continue;
+          if (segment === "..") {
+            current = path.dirname(current);
+            continue;
+          }
+          const candidate = path.join(current, segment);
+          const type = await NodeFSP.lstat(candidate);
+          if (type.isSymbolicLink()) {
+            if (++links > 40) return null;
+            const target = await NodeFSP.readlink(candidate);
+            if (isNetworkPath(target)) return null;
+            if (path.isAbsolute(target)) current = path.parse(target).root;
+            const relativeTarget = path.isAbsolute(target) ? target.slice(current.length) : target;
+            segments.unshift(...splitSegments(relativeTarget));
+            continue;
+          }
+          current = candidate;
+          if (segments.length === 0) return { type, realPath: current };
+          if (!type.isDirectory()) return null;
+        }
+        return { type: await NodeFSP.lstat(current), realPath: current };
+      },
       catch: () => null,
     }).pipe(Effect.orElseSucceed(() => null));
   });
@@ -245,8 +274,8 @@ export const make = Effect.gen(function* () {
       const entries = yield* Effect.forEach(
         candidates,
         Effect.fnUntraced(function* (entry) {
-          const type = yield* entryType(parentPath, entry);
-          return type?.isDirectory()
+          const target = yield* entryType(parentPath, entry);
+          return target?.type.isDirectory()
             ? [{ name: entry.name, fullPath: path.join(parentPath, entry.name) }]
             : [];
         }),
@@ -355,12 +384,13 @@ export const make = Effect.gen(function* () {
           children,
           Effect.fnUntraced(function* (child) {
             if (child.name === ".git") return [];
-            const type = yield* entryType(directory, child);
-            if (!type || (!type.isDirectory() && !type.isFile())) return [];
+            const resolved = yield* entryType(directory, child);
+            if (!resolved) return [];
+            const { type, realPath: real } = resolved;
+            if (!type.isDirectory() && !type.isFile()) return [];
             if (child.isSymbolicLink()) {
               const allowed = yield* Effect.tryPromise({
                 try: async () => {
-                  const real = await NodeFSP.realpath(path.join(directory, child.name));
                   if (real.split(path.sep).includes(".git")) return false;
                   if (isNetworkPath(real) && !KnownWorkspaces.isWithinRoot(path, real, root))
                     return false;

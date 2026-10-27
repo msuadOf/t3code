@@ -321,6 +321,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         }),
     );
 
+    // quarantine: #19681 requires host support for creating symlinks.
     it.effect.skipIf(!symlinksSupported)(
       "reads accessible file and directory links outside the workspace root",
       () =>

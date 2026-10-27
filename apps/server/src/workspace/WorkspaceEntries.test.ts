@@ -1,4 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFSP from "node:fs/promises";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, afterEach, describe, expect } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -17,7 +19,14 @@ import * as WorkspacePaths from "./WorkspacePaths.ts";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, readdir: vi.fn(actual.readdir) };
+  return {
+    ...actual,
+    readdir: vi.fn(actual.readdir),
+    stat: vi.fn(actual.stat),
+    readlink: vi.fn(actual.readlink),
+    realpath: vi.fn(actual.realpath),
+    lstat: vi.fn(actual.lstat),
+  };
 });
 
 const layerTest = Layer.empty.pipe(
@@ -93,6 +102,44 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
+
+  // quarantine: #19681 requires host support for creating symlinks.
+  it.effect.skipIf(!symlinksSupported)(
+    "never follows network targets while classifying links",
+    () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir();
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* fs.makeDirectory(path.join(cwd, "storage"));
+        yield* fs.symlink("storage", path.join(cwd, "network"));
+        yield* fs.symlink("network", path.join(cwd, "chain"));
+        yield* fs.symlink("network/child", path.join(cwd, "nested"));
+        yield* fs.symlink("storage", path.join(cwd, "safe"));
+        const actual = yield* Effect.promise(() =>
+          vi.importActual<typeof NodeFSP>("node:fs/promises"),
+        );
+        using readlink = vi
+          .spyOn(NodeFSP, "readlink")
+          .mockImplementation(async (target, options) => {
+            if (String(target).endsWith(`${path.sep}network`))
+              return String.raw`\\attacker.test\share`;
+            return actual.readlink(target, options);
+          });
+        using stat = vi.spyOn(NodeFSP, "stat");
+        using realpath = vi.spyOn(NodeFSP, "realpath");
+        using lstat = vi.spyOn(NodeFSP, "lstat");
+        const entries = yield* WorkspaceEntries.WorkspaceEntries;
+        const browse = yield* entries.browse({ partialPath: yield* appendSeparator(cwd) });
+        expect(browse.entries.map((entry) => entry.name)).toEqual(["safe", "storage"]);
+        const listed = yield* entries.list({ cwd, directoryPath: "" });
+        expect(listed.entries.map((entry) => entry.path).toSorted()).toEqual(["safe", "storage"]);
+        expect(stat.mock.calls).toEqual([]);
+        for (const calls of [realpath.mock.calls, lstat.mock.calls, readlink.mock.calls]) {
+          expect(calls.some(([target]) => /^[\\/]{2}/.test(String(target)))).toBe(false);
+        }
+      }),
+  );
 
   describe("list", () => {
     it.effect("lists immediate children including ignored and empty directories", () =>
@@ -240,6 +287,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
       }),
     );
 
+    // quarantine: #19681 requires host support for creating symlinks.
     it.effect.skipIf(!symlinksSupported)("lists accessible directory and file links", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTempDir();
@@ -268,6 +316,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
       }),
     );
 
+    // quarantine: #19681 requires host support for creating symlinks.
     it.effect.skipIf(!symlinksSupported)(
       "omits broken links, git links, and directory cycles",
       () =>
@@ -622,6 +671,7 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
   });
 
   describe("browse", () => {
+    // quarantine: #19681 requires host support for creating symlinks.
     it.effect.skipIf(!symlinksSupported)("offers linked directories when choosing a project", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTempDir();
