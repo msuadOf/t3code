@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import type * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 
 import * as Context from "effect/Context";
@@ -22,11 +23,12 @@ import type {
   ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { isExplicitRelativePath, isWindowsAbsolutePath } from "@t3tools/shared/path";
+import { isExplicitRelativePath, isWindowsAbsolutePath, isNetworkPath } from "@t3tools/shared/path";
 import { normalizeSearchQuery } from "@t3tools/shared/searchRanking";
 
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as KnownWorkspaces from "./KnownWorkspaces.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 import * as WorkspaceSearchIndex from "./WorkspaceSearchIndex.ts";
 
@@ -198,6 +200,15 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  // Per-entry filesystem calls share the browse/list span.
+  const entryType = Effect.fnUntraced(function* (parent: string, entry: NodeFS.Dirent) {
+    if (!entry.isSymbolicLink()) return entry;
+    return yield* Effect.tryPromise({
+      try: () => NodeFSP.stat(path.join(parent, entry.name)),
+      catch: () => null,
+    }).pipe(Effect.orElseSucceed(() => null));
+  });
+
   const browse: WorkspaceEntries["Service"]["browse"] = Effect.fn("WorkspaceEntries.browse")(
     function* (input) {
       const resolvedInputPath = yield* resolveBrowseTarget(input, path);
@@ -226,23 +237,25 @@ export const make = Effect.gen(function* () {
 
       const showHidden = endsWithSeparator || prefix.startsWith(".");
       const lowerPrefix = prefix.toLowerCase();
-      const entries: Array<{ readonly name: string; readonly fullPath: string }> = [];
-      for (const dirent of dirents) {
-        if (
-          dirent.isDirectory() &&
-          dirent.name.toLowerCase().startsWith(lowerPrefix) &&
-          (showHidden || !dirent.name.startsWith("."))
-        ) {
-          entries.push({
-            name: dirent.name,
-            fullPath: path.join(parentPath, dirent.name),
-          });
-        }
-      }
+      const candidates = dirents.filter(
+        (entry) =>
+          entry.name.toLowerCase().startsWith(lowerPrefix) &&
+          (showHidden || !entry.name.startsWith(".")),
+      );
+      const entries = yield* Effect.forEach(
+        candidates,
+        Effect.fnUntraced(function* (entry) {
+          const type = yield* entryType(parentPath, entry);
+          return type?.isDirectory()
+            ? [{ name: entry.name, fullPath: path.join(parentPath, entry.name) }]
+            : [];
+        }),
+        { concurrency: 8 },
+      );
 
       return {
         parentPath,
-        entries: entries.toSorted((left, right) => left.name.localeCompare(right.name)),
+        entries: entries.flat().toSorted((left, right) => left.name.localeCompare(right.name)),
       };
     },
   );
@@ -303,39 +316,74 @@ export const make = Effect.gen(function* () {
                   relativePath: directoryPath,
                 })
                 .pipe(Effect.mapError(toError));
-        const { entries, throughSymlink } = yield* Effect.tryPromise({
+        const { children, directory, root, throughSymlink } = yield* Effect.tryPromise({
           try: async () => {
             const root = await NodeFSP.realpath(normalizedCwd);
             const directory = await NodeFSP.realpath(target.absolutePath);
             const relative = path.relative(root, directory);
             if (
-              relative === ".." ||
-              relative.startsWith(`..${path.sep}`) ||
-              path.isAbsolute(relative) ||
+              (isNetworkPath(directory) && !KnownWorkspaces.isWithinRoot(path, directory, root)) ||
               relative.split(path.sep).includes(".git") ||
               target.relativePath.split("/").includes(".git")
             ) {
-              throw new Error("Directory must be inside the workspace and outside .git.");
+              throw new Error(
+                "Directory must be outside .git and network targets must stay inside the workspace.",
+              );
             }
             const children = await NodeFSP.readdir(directory, { withFileTypes: true });
             return {
-              entries: children.flatMap((child): ProjectEntry[] => {
-                if (child.name === ".git" || (!child.isDirectory() && !child.isFile())) return [];
-                return [
-                  {
-                    path: target.relativePath ? `${target.relativePath}/${child.name}` : child.name,
-                    kind: child.isDirectory() ? "directory" : "file",
-                  },
-                ];
-              }),
+              children,
+              directory,
+              root,
               // Git refuses to classify paths beyond a symbolic link.
               throughSymlink: relative !== target.relativePath.split("/").join(path.sep),
             };
           },
           catch: toError,
         });
-        // Use stdin so large directories cannot exceed the command-line argument limit.
-        // Ignore classification is optional in non-git workspaces or when git is unavailable.
+        let ancestors: Promise<ReadonlyArray<string>> | undefined;
+        const readAncestors = async () => {
+          const paths = [root];
+          let candidate = normalizedCwd;
+          for (const segment of target.relativePath.split("/").filter(Boolean)) {
+            candidate = path.join(candidate, segment);
+            paths.push(await NodeFSP.realpath(candidate));
+          }
+          return paths;
+        };
+        const entries = (yield* Effect.forEach(
+          children,
+          Effect.fnUntraced(function* (child) {
+            if (child.name === ".git") return [];
+            const type = yield* entryType(directory, child);
+            if (!type || (!type.isDirectory() && !type.isFile())) return [];
+            if (child.isSymbolicLink()) {
+              const allowed = yield* Effect.tryPromise({
+                try: async () => {
+                  const real = await NodeFSP.realpath(path.join(directory, child.name));
+                  if (real.split(path.sep).includes(".git")) return false;
+                  if (isNetworkPath(real) && !KnownWorkspaces.isWithinRoot(path, real, root))
+                    return false;
+                  if (!type.isDirectory()) return true;
+                  ancestors ??= readAncestors();
+                  return !(await ancestors).some((ancestor) =>
+                    KnownWorkspaces.isWithinRoot(path, ancestor, real),
+                  );
+                },
+                catch: () => false,
+              }).pipe(Effect.orElseSucceed(() => false));
+              if (!allowed) return [];
+            }
+            return [
+              {
+                path: target.relativePath ? `${target.relativePath}/${child.name}` : child.name,
+                kind: type.isDirectory() ? "directory" : "file",
+              } satisfies ProjectEntry,
+            ];
+          }),
+          { concurrency: 8 },
+        )).flat();
+        // stdin avoids argument limits; ignore classification is optional without git/repositories.
         const checkIgnore = (paths: ReadonlyArray<string>) =>
           vcsProcess
             .run({

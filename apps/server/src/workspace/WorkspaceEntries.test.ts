@@ -6,6 +6,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import { vi } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
@@ -226,28 +227,77 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
       }),
     );
 
-    it.effect(
-      "rejects directory traversal, git internals, and symlinks outside the workspace",
+    it.effect("rejects directory traversal and git internals", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir();
+        const outside = yield* makeTempDir();
+        yield* writeTextFile(cwd, ".git/HEAD");
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        for (const directoryPath of ["../", outside, ".git", "missing"]) {
+          const error = yield* workspaceEntries.list({ cwd, directoryPath }).pipe(Effect.flip);
+          expect(error._tag).toBe("WorkspaceEntriesReadDirectoryError");
+        }
+      }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)("lists accessible directory and file links", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir();
+        const outside = yield* makeTempDir();
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* writeTextFile(outside, "notes.md", "report\n");
+        yield* fs.symlink(outside, path.join(cwd, "external"));
+        yield* fs.symlink(path.join(outside, "notes.md"), path.join(cwd, "report.md"));
+        yield* fs.symlink(path.join(outside, "missing"), path.join(cwd, "broken"));
+        const entries = yield* WorkspaceEntries.WorkspaceEntries;
+        expect((yield* entries.list({ cwd, directoryPath: "" })).entries).toEqual(
+          expect.arrayContaining([
+            { path: "external", kind: "directory" },
+            { path: "report.md", kind: "file" },
+          ]),
+        );
+        expect(
+          (yield* entries.list({ cwd, directoryPath: "" })).entries.some(
+            (entry) => entry.path === "broken",
+          ),
+        ).toBe(false);
+        expect((yield* entries.list({ cwd, directoryPath: "external" })).entries).toEqual([
+          { path: "external/notes.md", kind: "file" },
+        ]);
+      }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "omits broken links, git links, and directory cycles",
       () =>
         Effect.gen(function* () {
           const cwd = yield* makeTempDir();
           const outside = yield* makeTempDir();
-          const fileSystem = yield* FileSystem.FileSystem;
+          const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
-          yield* writeTextFile(cwd, ".git/HEAD");
-          const platform = yield* HostProcess.Platform;
-          if (platform !== "win32") yield* fileSystem.symlink(outside, path.join(cwd, "external"));
-          const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
-          for (const directoryPath of [
-            "../",
-            outside,
-            ".git",
-            "missing",
-            ...(platform !== "win32" ? ["external"] : []),
-          ]) {
-            const error = yield* workspaceEntries.list({ cwd, directoryPath }).pipe(Effect.flip);
-            expect(error._tag).toBe("WorkspaceEntriesReadDirectoryError");
-          }
+          yield* writeTextFile(outside, "a/notes.md");
+          yield* writeTextFile(outside, "b/notes.md");
+          yield* writeTextFile(outside, ".git/HEAD");
+          yield* fs.symlink(path.join(outside, "a"), path.join(cwd, "external"));
+          yield* fs.symlink(".", path.join(cwd, "self"));
+          yield* fs.symlink(path.join(outside, ".git"), path.join(cwd, "metadata"));
+          yield* fs.symlink(path.join(outside, ".git/HEAD"), path.join(cwd, "head-link"));
+          yield* fs.symlink(path.join(outside, "missing"), path.join(cwd, "broken"));
+          yield* fs.symlink("../b", path.join(outside, "a/to-b"));
+          yield* fs.symlink("../a", path.join(outside, "b/to-a"));
+          yield* fs.symlink(".", path.join(outside, "a/self"));
+          yield* fs.symlink("..", path.join(outside, "a/up"));
+          const entries = yield* WorkspaceEntries.WorkspaceEntries;
+          expect((yield* entries.list({ cwd, directoryPath: "" })).entries).toEqual([
+            { path: "external", kind: "directory" },
+          ]);
+          expect((yield* entries.list({ cwd, directoryPath: "external" })).entries).toEqual([
+            { path: "external/notes.md", kind: "file" },
+            { path: "external/to-b", kind: "directory" },
+          ]);
+          const nested = yield* entries.list({ cwd, directoryPath: "external/to-b" });
+          expect(nested.entries).toEqual([{ path: "external/to-b/notes.md", kind: "file" }]);
         }),
     );
 
@@ -572,6 +622,26 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceEntries", (it) => {
   });
 
   describe("browse", () => {
+    it.effect.skipIf(!symlinksSupported)("offers linked directories when choosing a project", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir();
+        const target = yield* makeTempDir();
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* fs.symlink(target, path.join(cwd, "project-link"));
+        yield* fs.symlink(path.join(target, "missing"), path.join(cwd, "broken"));
+        const entries = yield* WorkspaceEntries.WorkspaceEntries;
+        const result = yield* entries.browse({ partialPath: yield* appendSeparator(cwd) });
+        expect(result.entries).toEqual([
+          { name: "project-link", fullPath: path.join(cwd, "project-link") },
+        ]);
+        const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+        expect(yield* workspacePaths.normalizeWorkspaceRoot(result.entries[0]!.fullPath)).toBe(
+          path.join(cwd, "project-link"),
+        );
+      }),
+    );
+
     it.effect("shows dot directories in directory mode and hidden-prefix mode", () =>
       Effect.gen(function* () {
         const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
