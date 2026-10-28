@@ -186,6 +186,29 @@ describe("Claude native shared-session transport", () => {
     );
   });
 
+  it("subscribes to live state without terminal replay and cancels the socket", async () => {
+    let closed: Promise<void> | undefined;
+    await withDaemon(
+      (socket, request) => {
+        expect(request.tail).toBe(0);
+        expect(request.op).toBe("subscribe");
+        closed = new Promise((resolve) => socket.once("close", resolve));
+        socket.write(
+          '{"type":"snapshot","record":{}}\n{"type":"stream","line":"terminal bytes"}\n{"type":"state","patch":{"tempo":"active"}}\n',
+        );
+      },
+      async (client) => {
+        const controller = new AbortController();
+        const reader = client.subscribeState(session, controller.signal);
+        expect((await reader.next()).value?.type).toBe("snapshot");
+        expect((await reader.next()).value).toEqual({ type: "state", patch: { tempo: "active" } });
+        controller.abort();
+        await reader.return(undefined);
+        await closed;
+      },
+    );
+  });
+
   it("preserves PTY bytes coalesced with the attach acknowledgement", async () => {
     await withDaemon(
       (socket) => socket.end('{"ok":true,"op":"attach"}\n\u001b[32mshared terminal'),

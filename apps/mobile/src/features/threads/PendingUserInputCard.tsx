@@ -81,7 +81,9 @@ function QuestionText(props: { readonly markdown: string }) {
 export function PendingUserInputCard(props: PendingUserInputCardProps) {
   const questionCount = props.pendingUserInput.questions.length;
   const canRespond = props.pendingUserInput.responseCapability !== "not_resumable";
-  const isResponding = props.respondingUserInputId === props.pendingUserInput.requestId;
+  const isResponding =
+    props.respondingUserInputId === props.pendingUserInput.requestId ||
+    props.pendingUserInput.awaitingConfirmation === true;
   const responseDisabled = !canRespond || isResponding;
 
   const cardCoverage = props.cardCoverage;
@@ -230,6 +232,14 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
         showsVerticalScrollIndicator
         style={{ flexShrink: 1 }}
       >
+        {props.pendingUserInput.awaitingConfirmation ? (
+          <Text
+            accessibilityRole="text"
+            className="font-sans text-sm leading-5 text-foreground-muted"
+          >
+            Waiting for the provider to confirm your answer.
+          </Text>
+        ) : null}
         {!canRespond ? (
           <Text className="font-sans text-sm leading-5 text-foreground-muted">
             The provider process for this request is no longer available. Interrupt or restart the

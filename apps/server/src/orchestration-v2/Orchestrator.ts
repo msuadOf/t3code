@@ -7663,6 +7663,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Runtime request ${command.requestId} is ${runtimeRequest.status}.`,
         });
       }
+      if (runtimeRequest.submittedAt !== undefined) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "This response is awaiting native provider confirmation.",
+        });
+      }
+      const providerConfirmation =
+        runtimeRequest.responseCapability.type === "live" &&
+        runtimeRequest.responseCapability.confirmation === "provider";
+      if (providerConfirmation && command.answers === undefined && command.decision === undefined)
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "A response is required.",
+        });
       if (runtimeRequest.responseCapability.type === "not_resumable") {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -7696,8 +7712,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const now = yield* DateTime.now;
       const resolvedRequest = {
         ...runtimeRequest,
-        status: "resolved" as const,
-        resolvedAt: now,
+        status: providerConfirmation ? ("pending" as const) : ("resolved" as const),
+        resolvedAt: providerConfirmation ? null : now,
+        ...(providerConfirmation ? { submittedAt: now } : {}),
         ...(command.decision === undefined ? {} : { decision: command.decision }),
         ...(answers === undefined ? {} : { answers }),
       };
@@ -7721,7 +7738,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         occurredAt: now,
         payload: resolvedRequest,
       });
-      if (requestNode !== undefined) {
+      if (!providerConfirmation && requestNode !== undefined) {
         yield* emitEvent({
           type: "node.updated",
           threadId: command.threadId,
@@ -7743,7 +7760,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
 
       const approvalTurnItem = context.item;
-      if (approvalTurnItem !== undefined) {
+      if (!providerConfirmation && approvalTurnItem !== undefined) {
         yield* emitEvent({
           type: "turn-item.updated",
           threadId: command.threadId,

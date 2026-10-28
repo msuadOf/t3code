@@ -765,6 +765,11 @@ export const layer: Layer.Layer<
           return resumed.success;
         }
 
+        // A shared Claude worker owns its context. Failure to attach must not
+        // silently replace the session with a different executor and a summary.
+        if (session.driver === "claudeAgent" && providerThread.nativeThreadRef !== null)
+          return yield* loadFromProvider(Effect.fail(resumed.failure));
+
         yield* Effect.logWarning("Provider resume failed; attempting a fresh native session", {
           driver: session.driver,
           providerThreadId: providerThread.id,
@@ -873,6 +878,17 @@ export const layer: Layer.Layer<
         modelSelectionsEqual(previousSelection, run.modelSelection);
       const sameNativeThread =
         loadedProviderThread.nativeThreadRef?.nativeId === providerThread.nativeThreadRef?.nativeId;
+      const preserveNativeClaudeContext =
+        session.driver === "claudeAgent" &&
+        providerThread.nativeThreadRef !== null &&
+        sameNativeThread;
+      if (preserveNativeClaudeContext) {
+        effectiveHandoffs = effectiveHandoffs.filter(
+          (handoff) =>
+            handoff.transferId != null ||
+            handoff.fromProviderThreadIds.some((id) => id !== providerThread.id),
+        );
+      }
       const threadUsage = loadedProviderThread.contextUsage ?? providerThread.contextUsage;
       const previousUsage = measuredContext
         ? { ...threadUsage, ...measuredContext.usage }
@@ -1047,7 +1063,7 @@ export const layer: Layer.Layer<
         attempts: projection.attempts,
       });
       const restartNote =
-        restartCancelledWork.length === 0
+        preserveNativeClaudeContext || restartCancelledWork.length === 0
           ? ""
           : restartCancelledBackgroundWorkNote(restartCancelledWork);
       const tokenCap = yield* handoffTokenCapConfig.pipe(
@@ -1141,13 +1157,16 @@ export const layer: Layer.Layer<
         ...runningProviderThread,
         contextUsage: handoffUsage,
       };
-      const missedRuns = projection.runs.filter(
-        (source) =>
-          source.ordinal < run.ordinal &&
-          source.providerThreadId === providerThread.id &&
-          (source.status === "failed" || source.status === "interrupted") &&
-          !deliveredAttemptIds.has(source.activeAttemptId),
-      );
+      // Undelivered input stays failed in T3; a new native prompt must not replay it.
+      const missedRuns = preserveNativeClaudeContext
+        ? []
+        : projection.runs.filter(
+            (source) =>
+              source.ordinal < run.ordinal &&
+              source.providerThreadId === providerThread.id &&
+              (source.status === "failed" || source.status === "interrupted") &&
+              !deliveredAttemptIds.has(source.activeAttemptId),
+          );
       const missedRunIds = new Set(missedRuns.map((source) => source.id));
       const missedItems =
         missedRunIds.size === 0

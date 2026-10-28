@@ -14,6 +14,17 @@ import {
   type NativeClaudeSession,
 } from "./NativeClaudeClient.ts";
 
+function nativeSessionTitle(session: NativeClaudeSession | undefined): string | undefined {
+  const name = session?.name?.trim();
+  if (
+    !name ||
+    name.toLowerCase() === session?.id?.toLowerCase() ||
+    name.toLowerCase() === session?.sessionId?.toLowerCase()
+  )
+    return undefined;
+  return name;
+}
+
 type Entry = Record<string, unknown>;
 const object = (value: unknown): value is Entry =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -138,6 +149,7 @@ export function nativeClaudeHistory(entries: readonly Entry[]): readonly NativeH
           const original = target.turn.items[target.index]!;
           target.turn.items[target.index] = {
             ...original,
+            ...(object(entry.toolUseResult) ? { result: entry.toolUseResult } : {}),
             status: block.is_error === true ? "failed" : "completed",
             text:
               typeof block.content === "string"
@@ -277,12 +289,13 @@ export class NativeClaudeSessions {
       const renamed = entries.findLast((entry) => typeof entry.customTitle === "string");
       const history = nativeClaudeHistory(entries);
       const title =
-        typeof renamed?.customTitle === "string"
+        nativeSessionTitle(activeById.get(id)) ??
+        (typeof renamed?.customTitle === "string"
           ? renamed.customTitle
           : (history
               .flatMap((turn) => turn.items)
               .find((item) => item.type === "user")
-              ?.text.slice(0, 140) ?? "Claude session");
+              ?.text.slice(0, 140) ?? "Claude session"));
       const assistant = entries.findLast(
         (entry) => object(entry.message) && typeof entry.message.model === "string",
       );
@@ -322,7 +335,9 @@ export class NativeClaudeSessions {
       sessions.set(id, {
         id,
         cwd: job.cwd,
-        title: job.name ?? (typeof state.intent === "string" ? state.intent : "Claude session"),
+        title:
+          nativeSessionTitle(job) ??
+          (typeof state.intent === "string" ? state.intent : "Claude session"),
         createdAt: timestamp(state.createdAt, job.startedAt),
         updatedAt: timestamp(state.updatedAt, job.startedAt),
         archived: false,

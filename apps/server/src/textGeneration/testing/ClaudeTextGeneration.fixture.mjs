@@ -8,6 +8,14 @@ function fail(message, code) {
   process.exit(code);
 }
 
+if (!argv.includes("--no-session-persistence"))
+  fail("auxiliary work must not write conversation history", 13);
+const sessionIndex = argv.indexOf("--session-id");
+if (
+  sessionIndex === -1 ||
+  !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(argv[sessionIndex + 1])
+)
+  fail("auxiliary work needs an explicit native identity", 14);
 const permissionIndex = argv.indexOf("--permission-mode");
 if (permissionIndex === -1 || argv[permissionIndex + 1] !== "dontAsk") {
   fail("text generation must deny permission prompts", 12);

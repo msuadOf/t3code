@@ -545,6 +545,9 @@ it.effect(
           nativeThreadId: session.id,
         });
         yield* sync.sync;
+        session = { ...session, title: "Native automatic title" };
+        yield* sync.sync;
+        assert.equal((yield* store.getThread(id)).title, "Native automatic title");
         const localArchive = DateTime.makeUnsafe(42000);
         const initial = yield* store.getThread(id);
         yield* sink.write({
@@ -566,7 +569,7 @@ it.effect(
         // Rename without changing the summary timestamp to exercise source title identity.
         session = { ...session, title: "Renamed in native CLI" };
         yield* sync.sync;
-        assert.equal((yield* store.getThread(id)).title, "Renamed in native CLI");
+        assert.equal((yield* store.getThread(id)).title, "My custom title");
         assert.deepEqual((yield* store.getThread(id)).archivedAt, localArchive);
         session = { ...session, archived: true };
         yield* sync.sync;
@@ -609,12 +612,12 @@ it.effect(
         assert.isNull((yield* store.getThread(id)).archivedAt);
         session = { ...session, title: "Next native rename" };
         yield* sync.sync;
-        assert.equal((yield* store.getThread(id)).title, "Next native rename");
+        assert.equal((yield* store.getThread(id)).title, "My newer title");
         assert.isNull((yield* store.getThread(id)).archivedAt);
         session = { ...session, model: "claude-sonnet-native" };
         yield* sync.sync;
         assert.equal((yield* store.getThread(id)).modelSelection.model, "claude-sonnet-native");
-        assert.equal((yield* store.getThread(id)).title, "Next native rename");
+        assert.equal((yield* store.getThread(id)).title, "My newer title");
         assert.isNull((yield* store.getThread(id)).archivedAt);
         session = { ...session, model: "claude-opus-native" };
         yield* sync.sync;
@@ -637,6 +640,21 @@ it.effect(
         yield* sync.sync;
         assert.equal((yield* store.getThread(id)).title, "Keep legacy metadata");
         assert.isNull((yield* store.getThread(id)).archivedAt);
+        const { historyOrigin: _origin, ...createdInT3 } = yield* store.getThread(id);
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("metadata-t3-native-title"),
+              type: "thread.metadata-updated",
+              threadId: id,
+              occurredAt: localArchive,
+              payload: { ...createdInT3, title: session.title },
+            },
+          ],
+        });
+        session = { ...session, title: "Native title for T3 session" };
+        yield* sync.sync;
+        assert.equal((yield* store.getThread(id)).title, "Native title for T3 session");
       }).pipe(Effect.provide(context));
     }).pipe(Effect.scoped),
 );

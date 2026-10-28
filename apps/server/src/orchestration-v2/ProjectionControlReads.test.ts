@@ -1,3 +1,5 @@
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as EventSink from "./EventSink.ts";
 import { assert, it } from "@effect/vitest";
 import {
   EventId,
@@ -343,9 +345,12 @@ it.effect.each(storageCases)(
         assert.deepEqual(calls, ["interrupt", "Use the smaller fix.", "reply", "interrupt"]);
       }).pipe(
         Effect.provide(
-          Layer.merge(ProviderTurnControlService.layer, RuntimeRequestService.layer).pipe(
-            Layer.provide(layerSessions),
-          ),
+          Layer.merge(
+            ProviderTurnControlService.layer,
+            RuntimeRequestService.layer.pipe(
+              Layer.provide(Layer.merge(IdAllocator.layer, Layer.mock(EventSink.EventSinkV2)({}))),
+            ),
+          ).pipe(Layer.provide(layerSessions)),
         ),
       );
     }).pipe(Effect.provide(Layer.merge(storeLayer, SqlitePersistence.layerMemory))),

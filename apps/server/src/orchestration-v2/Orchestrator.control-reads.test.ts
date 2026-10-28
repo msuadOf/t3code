@@ -202,7 +202,7 @@ it.effect(
           lastError: null,
         },
       });
-      for (const mode of ["live", "message"] as const) {
+      for (const mode of ["live", "message", "confirmed"] as const) {
         const requestId = RuntimeRequestId.make(`request:${mode}`);
         yield* projections.apply({
           id: EventId.make(`request:${mode}`),
@@ -217,8 +217,12 @@ it.effect(
             kind: "user_input",
             status: "pending",
             responseCapability:
-              mode === "live"
-                ? { type: "live", providerSessionId: sessionId }
+              mode !== "message"
+                ? {
+                    type: "live",
+                    providerSessionId: sessionId,
+                    ...(mode === "confirmed" ? { confirmation: "provider" as const } : {}),
+                  }
                 : { type: "message" },
             createdAt: now,
             resolvedAt: null,
@@ -305,7 +309,7 @@ it.effect(
           }
         }
         yield* orchestrator.dispatch(
-          mode === "live"
+          mode !== "message"
             ? {
                 type: "runtime-request.respond",
                 commandId: CommandId.make(`respond:${mode}`),
@@ -320,6 +324,32 @@ it.effect(
                 requestId,
               },
         );
+        if (mode === "confirmed") {
+          const submitted = yield* projections.getRuntimeResponseContext(threadId, requestId);
+          assert.equal(submitted.request?.status, "pending");
+          assert.isNotNull(submitted.request?.submittedAt);
+          assert.isNull(submitted.request?.resolvedAt);
+          assert.deepEqual(submitted.request?.answers, normalizedAnswers);
+          assert.equal(submitted.node?.status, "waiting");
+          assert.equal(submitted.item?.status, "waiting");
+          assert.lengthOf(yield* outbox.listByCommandId(CommandId.make(`respond:${mode}`)), 1);
+          const duplicateId = CommandId.make("confirmed-response-duplicate");
+          assert.isTrue(
+            Result.isFailure(
+              yield* orchestrator
+                .dispatch({
+                  type: "runtime-request.respond",
+                  commandId: duplicateId,
+                  threadId,
+                  requestId,
+                  answers,
+                })
+                .pipe(Effect.result),
+            ),
+          );
+          assert.deepEqual(yield* outbox.listByCommandId(duplicateId), []);
+          continue;
+        }
         assert.equal(
           (yield* projections.getRuntimeRequest(threadId, requestId))?.status,
           "resolved",

@@ -416,6 +416,13 @@ export interface ProviderAdapterV2ExternalTurnInput {
 }
 
 export interface ProviderAdapterV2OpenSessionInput {
+  /** Recover persisted native request identity and submission state before offering input again. */
+  readonly findNativeRuntimeRequest?: (input: {
+    readonly threadId: ThreadId;
+    readonly nativeTurnId: string;
+    readonly nativeRequestId: string;
+  }) => Effect.Effect<OrchestrationV2RuntimeRequest | undefined, ProviderAdapterProtocolError>;
+
   /** Native worker state, separate from semantic output or actionable approvals. */
   readonly onNativeTurnProgress?: (input: {
     readonly threadId: ThreadId;

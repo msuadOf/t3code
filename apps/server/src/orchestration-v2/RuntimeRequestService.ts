@@ -1,10 +1,14 @@
 import {
+  type OrchestrationV2DomainEvent,
   ProviderApprovalDecision,
   ProviderSessionId,
   ProviderUserInputAnswers,
   RuntimeRequestId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as EventSink from "./EventSink.ts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -66,12 +70,74 @@ export class RuntimeRequestServiceV2 extends Context.Service<
 export const layer: Layer.Layer<
   RuntimeRequestServiceV2,
   never,
-  ProjectionStore.ProjectionStoreV2 | ProviderSessionManager.ProviderSessionManagerV2
+  | ProjectionStore.ProjectionStoreV2
+  | ProviderSessionManager.ProviderSessionManagerV2
+  | EventSink.EventSinkV2
+  | IdAllocator.IdAllocatorV2
 > = Layer.effect(
   RuntimeRequestServiceV2,
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const ids = yield* IdAllocator.IdAllocatorV2;
+    const cancelUnconfirmed = Effect.fn("RuntimeRequestService.cancelUnconfirmed")(function* (
+      input: Parameters<RuntimeRequestServiceV2Shape["respond"]>[0],
+    ) {
+      const request = yield* projections.getRuntimeRequest(input.threadId, input.requestId);
+      if (
+        !request ||
+        request.status !== "pending" ||
+        request.submittedAt === undefined ||
+        request.responseCapability.type !== "live" ||
+        request.responseCapability.confirmation !== "provider"
+      )
+        return;
+      const context = yield* projections.getRuntimeResponseContext(input.threadId, input.requestId);
+      const now = yield* DateTime.now;
+      const events: OrchestrationV2DomainEvent[] = [
+        {
+          id: yield* ids.allocate.event({ threadId: input.threadId }),
+          type: "runtime-request.updated",
+          threadId: input.threadId,
+          nodeId: request.nodeId,
+          occurredAt: now,
+          payload: {
+            ...request,
+            status: "cancelled",
+            resolvedAt: now,
+            responseCapability: {
+              type: "not_resumable",
+              reason:
+                "Response delivery was not confirmed. Check the original CLI before answering again.",
+            },
+          },
+        },
+      ];
+      if (context.node)
+        events.push({
+          id: yield* ids.allocate.event({ threadId: input.threadId }),
+          type: "node.updated",
+          threadId: input.threadId,
+          nodeId: context.node.id,
+          occurredAt: now,
+          payload: { ...context.node, status: "cancelled", completedAt: now },
+        });
+      if (context.item)
+        events.push({
+          id: yield* ids.allocate.event({ threadId: input.threadId }),
+          type: "turn-item.updated",
+          threadId: input.threadId,
+          occurredAt: now,
+          payload: { ...context.item, status: "cancelled", completedAt: now, updatedAt: now },
+        });
+      yield* sink.writeIfRuntimeRequestSubmitted({
+        threadId: input.threadId,
+        requestId: input.requestId,
+        submittedAt: request.submittedAt,
+        events,
+      });
+    });
 
     return RuntimeRequestServiceV2.of({
       respond: Effect.fn("RuntimeRequestService.respond")(
@@ -85,9 +151,17 @@ export const layer: Layer.Layer<
               requestId: input.requestId,
             });
           }
-          // Dispatch validates the request while it is pending, then persists the
-          // resolved projection before this effect is executed.
-          if (request.status !== "resolved") {
+          // Most providers resolve on dispatch; opt-in providers confirm the
+          // persisted submission asynchronously from their native result.
+          const awaitsProvider =
+            request.responseCapability.type === "live" &&
+            request.responseCapability.confirmation === "provider" &&
+            request.status === "pending" &&
+            request.submittedAt !== undefined;
+          const needsConfirmation =
+            request.responseCapability.type === "live" &&
+            request.responseCapability.confirmation === "provider";
+          if (needsConfirmation ? !awaitsProvider : request.status !== "resolved") {
             return yield* new RuntimeRequestResponseExecutionError({
               reason: "request-not-ready",
               threadId: input.threadId,
@@ -123,6 +197,7 @@ export const layer: Layer.Layer<
         },
         (effect, input) =>
           effect.pipe(
+            Effect.tapError(() => cancelUnconfirmed(input)),
             Effect.mapError((cause) =>
               isRuntimeRequestResponseExecutionError(cause)
                 ? cause

@@ -60,6 +60,7 @@ export interface ThreadUserInputQuestion extends Omit<
 }
 
 export interface ThreadPendingUserInput {
+  readonly awaitingConfirmation?: boolean;
   readonly requestId: RuntimeRequestId;
   readonly createdAt: string;
   readonly questions: ReadonlyArray<ThreadUserInputQuestion>;
@@ -116,6 +117,7 @@ export function derivePendingThreadRequests(
           multiSelect: question.multiSelect ?? false,
         })),
         responseCapability,
+        ...(request.submittedAt === undefined ? {} : { awaitingConfirmation: true }),
         dismissible: item.responseMode === "message" || responseCapability === "message",
         ...(item.responseMode === "message" || responseCapability === "message"
           ? { responseMode: "message" as const }

@@ -228,3 +228,23 @@ it("restores old text answers without mutating history or replacing unchanged ro
   expect(project(answered)).toBe(result);
   expect(project({ ...answered, visibleTurnItems: [...rows] })[0]).toBe(result[0]);
 });
+
+it("keeps a submitted native question pending until the provider confirms it", () => {
+  const pending = {
+    ...projection,
+    runtimeRequests: projection.runtimeRequests.map((request) => ({
+      ...request,
+      submittedAt: v2Now,
+    })),
+  };
+  expect(derivePendingThreadRequests(pending).userInputs[0]?.awaitingConfirmation).toBe(true);
+  expect(
+    derivePendingThreadRequests({
+      ...pending,
+      runtimeRequests: pending.runtimeRequests.map((request) => ({
+        ...request,
+        status: "resolved" as const,
+      })),
+    }).userInputs,
+  ).toEqual([]);
+});

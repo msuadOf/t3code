@@ -23,6 +23,7 @@ export interface NativeHistoryItem {
   readonly title?: string;
   /** Structured tool arguments; text remains the result/output. */
   readonly input?: Readonly<Record<string, unknown>>;
+  readonly result?: Readonly<Record<string, unknown>>;
 }
 
 export interface NativeHistoryTurn {

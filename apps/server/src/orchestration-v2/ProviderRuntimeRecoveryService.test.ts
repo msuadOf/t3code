@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import { assert, it, vi } from "@effect/vitest";
 import {
   MessageId,
@@ -1402,7 +1403,28 @@ it.effect.each([
         },
       ],
       runs: [{ status: "running", origin }],
-      runtimeRequests: [],
+      runtimeRequests: [
+        {
+          id: "native-unsubmitted",
+          status: "pending",
+          responseCapability: {
+            type: "live",
+            providerSessionId: "shared-session",
+            confirmation: "provider",
+          },
+        },
+        {
+          id: "native-submitted",
+          status: "pending",
+          submittedAt: DateTime.makeUnsafe(10000),
+          answers: { choice: "yes" },
+          responseCapability: {
+            type: "live",
+            providerSessionId: "shared-session",
+            confirmation: "provider",
+          },
+        },
+      ],
       nodes: [],
     } as unknown as OrchestrationV2ThreadProjection;
     const signalled: Array<ReadonlyArray<string>> = [];

@@ -1,3 +1,4 @@
+import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import { assert, describe, it, vi } from "@effect/vitest";
 import {
   CommandId,
@@ -14,6 +15,7 @@ import * as Option from "effect/Option";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
@@ -40,6 +42,7 @@ const adapter = {
 
 function makeHarness(
   options: {
+    readonly nativeClaude?: boolean;
     readonly generateTitle?: TextGeneration.TextGeneration["Service"]["generateThreadTitle"];
   } = {},
 ) {
@@ -85,6 +88,14 @@ function makeHarness(
     Layer.provide(
       Layer.mergeAll(
         layerThreadManagement,
+        Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
+          getInstance: () =>
+            Effect.succeed(
+              options.nativeClaude
+                ? ({ driverKind: "claudeAgent" } as ProviderInstance)
+                : undefined,
+            ),
+        }),
         layerProjectedProjects,
         Layer.mock(TextGeneration.TextGeneration)({ generateThreadTitle }),
         layerServerSettings,
@@ -307,3 +318,35 @@ describe("ThreadTitleRegenerationService", () => {
     }),
   );
 });
+
+it.effect(
+  "leaves automatic Claude titles to the native worker but keeps explicit generation available",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeHarness({ nativeClaude: true });
+      yield* Effect.gen(function* () {
+        const threads = yield* ThreadManagement.ThreadManagementService;
+        const titles = yield* ThreadTitleRegeneration.ThreadTitleRegenerationService;
+        const threadId = yield* createThread({
+          command: "native-title-create",
+          thread: "native-title-thread",
+        });
+        yield* dispatchUserMessage({
+          command: "native-title-message",
+          threadId,
+          text: "Native task",
+        });
+        const requestId = yield* armRegeneration({ command: "native-title-initial", threadId });
+        yield* titles.execute({
+          threadId,
+          requestId,
+          kind: { type: "initial", messageId: MessageId.make("native-title-message:message") },
+        });
+        assert.equal(harness.generateThreadTitle.mock.calls.length, 0);
+        assert.equal((yield* threads.getThreadProjection(threadId)).thread.title, "Seed title");
+        const explicit = yield* armRegeneration({ command: "native-title-explicit", threadId });
+        yield* titles.execute({ threadId, requestId: explicit, kind: { type: "regenerate" } });
+        assert.equal(harness.generateThreadTitle.mock.calls.length, 1);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+);

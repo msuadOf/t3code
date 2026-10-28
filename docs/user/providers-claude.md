@@ -42,8 +42,23 @@ The current native daemon integration has these limits:
 
 - Replies, tool output, and thinking blocks appear after Claude persists them.
   Live reasoning token streaming is unavailable.
-- Answer questions and permission prompts in `claude attach`. T3 does not install
-  hooks or change the native worker's settings to forward these requests.
+- T3 can display and answer a native `AskUserQuestion` containing one single-select
+  or free-text question. It waits for Claude’s actual tool result before marking
+  the answer complete; submission alone is not confirmation. Multi-question and
+  multi-select prompts, and command/file permission approvals, still require
+  `claude attach`. T3 does not install hooks to forward these requests. The native
+  reply API cannot atomically target a question, so avoid answering simultaneously
+  from T3 and the CLI. The recorded native answer wins if another client answered.
+- Native daemon state notifications refresh progress promptly, with polling as a
+  reconnect fallback. These notifications are separate from body/thinking token
+  streams; terminal output is not parsed into chat messages.
+- Claude supplies automatic conversation titles. Explicit title regeneration remains
+  available; T3 auxiliary model tasks use separate, explicitly identified sessions
+  without saving them to Claude’s history. Old auxiliary history without trustworthy
+  ownership records is not guessed or removed.
+- Continuing the same native conversation does not inject failed T3 inputs or
+  restart summaries into the next prompt. A failed native resume reports failure
+  instead of silently creating a replacement conversation.
 - T3 can interrupt an observed running background turn through the native terminal.
   It checks the current turn and worker before sending Ctrl+C. The native terminal
   protocol cannot atomically target a turn, so avoid racing an interrupt with a new

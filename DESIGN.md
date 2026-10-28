@@ -61,3 +61,7 @@ native `/bg` handoff instruction instead of starting a second writer.
 - Keep native provider capability limits visible and honest.
 - Do not add animation, alternate controls or a second stream for this behavior.
 - Do not describe a completed-history import as live output.
+
+Provider-confirmed native questions remain pending after submission. Web and mobile
+disable repeat submission and show a waiting state until the provider supplies an
+actual result. Transport acknowledgement alone never means the question was answered.

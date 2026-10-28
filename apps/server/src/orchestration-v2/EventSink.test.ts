@@ -1,6 +1,8 @@
 import { assert, it } from "@effect/vitest";
 import {
   EventId,
+  RuntimeRequestId,
+  ProviderSessionId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
@@ -280,3 +282,91 @@ it.layer(layer)("event sink native history guard", (it) => {
       }),
   );
 });
+
+it.effect("does not let late response delivery failure overwrite native confirmation", () =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const sql = yield* SqlClient.SqlClient;
+    const at = DateTime.makeUnsafe(10000);
+    const threadId = ThreadId.make("confirmation-thread");
+    const requestId = RuntimeRequestId.make("confirmation-request");
+    const request = {
+      id: requestId,
+      nodeId: NodeId.make("confirmation-node"),
+      providerTurnId: null,
+      nativeRequestRef: null,
+      kind: "user_input" as const,
+      status: "pending" as const,
+      responseCapability: {
+        type: "live" as const,
+        providerSessionId: ProviderSessionId.make("confirmation-session"),
+        confirmation: "provider" as const,
+      },
+      createdAt: at,
+      resolvedAt: null,
+      submittedAt: at,
+      answers: { choice: "yes" },
+    };
+    const event = {
+      id: EventId.make("confirmation-pending"),
+      type: "runtime-request.updated" as const,
+      threadId,
+      occurredAt: at,
+      payload: request,
+    };
+    yield* sink.write({ events: [event] });
+    const cancellation = {
+      ...event,
+      id: EventId.make("confirmation-cancel"),
+      payload: { ...request, status: "cancelled" as const },
+    };
+    assert.isFalse(
+      (yield* sink.writeIfRuntimeRequestSubmitted({
+        threadId,
+        requestId,
+        submittedAt: DateTime.makeUnsafe(9999),
+        events: [cancellation],
+      })).committed,
+    );
+    yield* sink.write({
+      events: [
+        {
+          ...event,
+          id: EventId.make("confirmation-resolved"),
+          payload: { ...request, status: "resolved", resolvedAt: at },
+        },
+      ],
+    });
+    assert.isFalse(
+      (yield* sink.writeIfRuntimeRequestSubmitted({
+        threadId,
+        requestId,
+        submittedAt: at,
+        events: [cancellation],
+      })).committed,
+    );
+    assert.equal(
+      (yield* sql<{
+        status: string;
+      }>`SELECT status FROM orchestration_v2_projection_runtime_requests WHERE runtime_request_id = ${requestId}`)[0]
+        ?.status,
+      "resolved",
+    );
+    yield* sink.write({ events: [{ ...event, id: EventId.make("confirmation-new-pending") }] });
+    assert.isTrue(
+      (yield* sink.writeIfRuntimeRequestSubmitted({
+        threadId,
+        requestId,
+        submittedAt: at,
+        events: [cancellation],
+      })).committed,
+    );
+    assert.equal(
+      (yield* sql<{
+        status: string;
+      }>`SELECT status FROM orchestration_v2_projection_runtime_requests WHERE runtime_request_id = ${requestId}`)[0]
+        ?.status,
+      "cancelled",
+    );
+  }).pipe(Effect.provide(layer)),
+);

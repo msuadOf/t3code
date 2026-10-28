@@ -48,7 +48,10 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
       cwd={cwd}
       threadRef={threadRef}
       disabled={disabled}
-      isResponding={respondingRequestIds.includes(activePrompt.requestId)}
+      isResponding={
+        respondingRequestIds.includes(activePrompt.requestId) ||
+        activePrompt.awaitingConfirmation === true
+      }
       answers={answers}
       questionIndex={questionIndex}
       onToggleOption={onToggleOption}
@@ -240,6 +243,11 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
               threadRef={threadRef}
               className="text-foreground/85"
             />
+            {prompt.awaitingConfirmation ? (
+              <p role="status" className="mt-1 text-secondary-label text-xs">
+                Waiting for the provider to confirm your answer.
+              </p>
+            ) : null}
             {activeQuestion.multiSelect ? (
               <p className="mt-1 text-secondary-label text-xs">Select one or more options.</p>
             ) : null}

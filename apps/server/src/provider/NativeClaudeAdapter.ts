@@ -7,6 +7,9 @@ import {
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2TurnItem,
   type OrchestrationV2ConversationMessage,
+  type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2ExecutionNode,
+  type ProviderUserInputAnswers,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -19,6 +22,14 @@ import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import * as Cause from "effect/Cause";
 import * as Semaphore from "effect/Semaphore";
+import * as Clock from "effect/Clock";
+import * as Scope from "effect/Scope";
+import * as Schema from "effect/Schema";
+import {
+  nativeClaudeQuestion,
+  nativeClaudeQuestionAnswer,
+  nativeClaudeQuestionResult,
+} from "./NativeClaudeQuestions.ts";
 import {
   NativeClaudeClient,
   NativeClaudeError,
@@ -26,6 +37,8 @@ import {
   type NativeClaudeSession,
 } from "./NativeClaudeClient.ts";
 import { NativeClaudeSessions } from "./NativeClaudeSessions.ts";
+
+const encodeQuestionInput = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 /** A reply ACK has no native turn ID. Correlate only a new, matching user message. */
 export const nativeClaudeMatchesPendingTurn = (
@@ -92,7 +105,7 @@ export const nativeClaudeCapabilities = {
     emitsPlanUpdated: false,
     emitsTodoList: false,
     emitsProposedPlan: false,
-    supportsStructuredQuestions: false,
+    supportsStructuredQuestions: true,
   },
   subagents: {
     ...ClaudeProviderCapabilitiesV2.subagents,
@@ -154,6 +167,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
     getCapabilities: () => Effect.succeed(capabilities),
     planSelectionTransition: () => Effect.succeed({ type: "restart_session" as const }),
     openSession: Effect.fn("NativeClaudeAdapter.openSession")(function* (input) {
+      const sessionScope = yield* Scope.Scope;
       const now = yield* DateTime.now;
       const providerSession: OrchestrationV2ProviderSession = {
         id: input.providerSessionId,
@@ -194,6 +208,19 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
           baseline?: ReadonlySet<string>;
         }
       >();
+      const questions = new Map<
+        string,
+        {
+          nativeSessionId: string;
+          nativeTurnId: string;
+          nativeToolId: string;
+          inputSignature: string;
+          answering: boolean;
+          request: OrchestrationV2RuntimeRequest;
+          node: OrchestrationV2ExecutionNode;
+          item: Extract<OrchestrationV2TurnItem, { type: "user_input_request" }>;
+        }
+      >();
       const eventSignatures = new Map<string, string>();
       const progressStates = new Map<string, "running" | "waiting">();
       const emit = (event: ProviderAdapter.ProviderAdapterV2Event) => {
@@ -219,6 +246,75 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         }
         return Queue.offer(events, event).pipe(Effect.asVoid);
       };
+      const settleQuestion = Effect.fn("NativeClaudeAdapter.settleQuestion")(function* (
+        key: string,
+        status: "resolved" | "cancelled",
+        uncertain = false,
+        actualAnswers?: ProviderUserInputAnswers,
+      ) {
+        const entry = questions.get(key);
+        if (!entry) return;
+        if (entry.request.status === "resolved") {
+          questions.delete(key);
+          return;
+        }
+        if (entry.request.status === status) return;
+        const at = yield* DateTime.now;
+        const { answers: _submittedAnswer, ...withoutAnswer } = entry.request;
+        entry.request = {
+          ...(status === "resolved" ? withoutAnswer : entry.request),
+          ...(actualAnswers === undefined ? {} : { answers: actualAnswers }),
+          status,
+          resolvedAt: at,
+          ...(uncertain
+            ? {
+                responseCapability: {
+                  type: "not_resumable" as const,
+                  reason:
+                    "Answer delivery was not confirmed. Check the native Claude terminal before continuing.",
+                },
+              }
+            : {}),
+        };
+        yield* emit({
+          type: "runtime_request.updated",
+          driver,
+          threadId: entry.item.threadId,
+          runtimeRequest: entry.request,
+        });
+        yield* emit({
+          type: "node.updated",
+          driver,
+          node: {
+            ...entry.node,
+            status: status === "resolved" ? "completed" : "cancelled",
+            completedAt: at,
+          },
+        });
+        yield* emit({
+          type: "turn_item.updated",
+          driver,
+          turnItem: {
+            ...entry.item,
+            ...(status === "resolved" && actualAnswers !== undefined
+              ? {
+                  questionAnswer: {
+                    requestId: entry.request.id,
+                    answers: actualAnswers,
+                    attachmentsByQuestionId: {},
+                    questionTextById: Object.fromEntries(
+                      entry.item.questions.map((question) => [question.id, question.question]),
+                    ),
+                  },
+                }
+              : {}),
+            status: status === "resolved" ? "completed" : "cancelled",
+            completedAt: at,
+            updatedAt: at,
+          },
+        });
+        if (!uncertain) questions.delete(key);
+      });
       const nativeId = (thread: OrchestrationV2ProviderThread) =>
         thread.nativeThreadRef?.nativeId ?? "";
       const jobFor = (thread: OrchestrationV2ProviderThread) =>
@@ -233,11 +329,78 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
           return job;
         });
       const observation = yield* Semaphore.make(1);
+      const watchers = new Map<
+        string,
+        { readonly generation: string; readonly controller: AbortController }
+      >();
+      const reconnects = new Map<string, { readonly attempts: number; readonly after: number }>();
+      const watch = Effect.fn("NativeClaudeAdapter.watchProgress")(function* (
+        job: NativeClaudeSession,
+      ): Effect.fn.Return<void, never, never> {
+        if (job.kind !== "background" || !job.sessionId || !job.id) return;
+        const id = job.sessionId;
+        const generation = `${job.id}:${job.pid ?? ""}:${job.startedAt}`;
+        const previous = watchers.get(id);
+        if (previous?.generation === generation) return;
+        previous?.controller.abort();
+        const retry = reconnects.get(id);
+        if (!previous && retry && retry.after > (yield* Clock.currentTimeMillis)) return;
+        const controller = new AbortController();
+        watchers.set(id, { generation, controller });
+        yield* Effect.gen(function* () {
+          yield* Effect.addFinalizer(() => Effect.sync(() => controller.abort()));
+          let signature = "";
+          yield* Stream.fromAsyncIterable(
+            client.subscribeState(job, controller.signal),
+            (cause) => cause,
+          ).pipe(
+            Stream.runForEach((frame) => {
+              // A snapshot is the subscription baseline; replayed snapshots must not spin hydrate.
+              if (frame.type === "snapshot") return Effect.void;
+              const next = JSON.stringify(frame);
+              if (next === signature) return Effect.void;
+              signature = next;
+              return hydrate();
+            }),
+            Effect.catch(() => Effect.void),
+          );
+        }).pipe(
+          Effect.scoped,
+          Effect.ensuring(
+            Effect.gen(function* () {
+              if (watchers.get(id)?.controller !== controller) return;
+              watchers.delete(id);
+              const attempts = Math.min((reconnects.get(id)?.attempts ?? 0) + 1, 5);
+              reconnects.set(id, {
+                attempts,
+                after:
+                  (yield* Clock.currentTimeMillis) + Math.min(30000, 1000 * 2 ** (attempts - 1)),
+              });
+            }),
+          ),
+          Effect.forkIn(sessionScope),
+        );
+      });
       const hydrate = Effect.fn("NativeClaudeAdapter.observe")(function* () {
         const inventory = yield* attempt(() => client.listSessions());
+        for (const [id, watcher] of watchers) {
+          if (
+            !threads.has(id) ||
+            !inventory.some((job) => job.sessionId === id && job.kind === "background")
+          )
+            watcher.controller.abort();
+        }
         for (const [id, thread] of threads) {
+          const job = inventory.find((job) => job.sessionId === id);
+          if (job) yield* watch(job);
+          let historyAvailable = true;
           const history = yield* attempt(() => source.history(id, inventory)).pipe(
-            Effect.orElseSucceed(() => []),
+            Effect.catch(() =>
+              Effect.sync(() => {
+                historyAvailable = false;
+                return [];
+              }),
+            ),
           );
           const pending = active.get(id);
           const terminalJob = inventory.find((session) => session.sessionId === id);
@@ -348,12 +511,161 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
               startedAt,
               completedAt,
             };
-            yield* emit({
-              type: "provider_turn.updated",
-              driver,
-              threadId: owner.threadId,
-              providerTurn,
-            });
+            if (!finished) {
+              yield* emit({
+                type: "provider_turn.updated",
+                driver,
+                threadId: owner.threadId,
+                providerTurn,
+              });
+            }
+            const pendingQuestions = turn.items.filter(
+              (item) =>
+                item.type === "tool" &&
+                item.title === "AskUserQuestion" &&
+                item.status === "running",
+            );
+            // Restore the original request before terminal projection can cancel it.
+            for (const item of turn.items) {
+              if (item.type !== "tool" || item.title !== "AskUserQuestion") continue;
+              const key = `${id}:${turn.id}:${item.id}`;
+              let entry = questions.get(key);
+              const question = nativeClaudeQuestion(item.input);
+              if (!entry && question) {
+                const restored = yield* (
+                  input.findNativeRuntimeRequest?.({
+                    threadId: owner.threadId,
+                    nativeTurnId: turn.id,
+                    nativeRequestId: item.id,
+                  }) ?? Effect.succeed(undefined)
+                );
+                if (restored?.status === "resolved") continue;
+                const canPublish =
+                  !finished &&
+                  item.status === "running" &&
+                  job?.status === "waiting" &&
+                  pendingQuestions.length === 1;
+                if (restored || canPublish) {
+                  const at = yield* DateTime.now;
+                  const requestId =
+                    restored?.id ??
+                    (yield* allocator.allocate
+                      .runtimeRequest({ driver, providerTurnId, nativeRequestId: item.id })
+                      .pipe(Effect.mapError(error)));
+                  const nodeId = restored?.nodeId ?? allocator.derive.approvalNode({ requestId });
+                  const blocked =
+                    restored !== undefined &&
+                    (restored.submittedAt !== undefined ||
+                      restored.status !== "pending" ||
+                      restored.responseCapability.type === "not_resumable");
+                  const responseCapability: OrchestrationV2RuntimeRequest["responseCapability"] =
+                    blocked
+                      ? restored!.responseCapability
+                      : {
+                          type: "live",
+                          providerSessionId: input.providerSessionId,
+                          confirmation: "provider",
+                        };
+                  const request: OrchestrationV2RuntimeRequest = restored
+                    ? { ...restored, responseCapability }
+                    : {
+                        id: requestId,
+                        nodeId,
+                        providerTurnId,
+                        nativeRequestRef: { driver, nativeId: item.id, strength: "strong" },
+                        kind: "user_input",
+                        status: "pending",
+                        responseCapability,
+                        createdAt: at,
+                        resolvedAt: null,
+                      };
+                  const status =
+                    request.status === "pending"
+                      ? ("waiting" as const)
+                      : request.status === "resolved"
+                        ? ("completed" as const)
+                        : ("cancelled" as const);
+                  const node: OrchestrationV2ExecutionNode = {
+                    id: nodeId,
+                    threadId: owner.threadId,
+                    runId: owner.runId,
+                    parentNodeId: owner.rootNodeId,
+                    rootNodeId: owner.rootNodeId,
+                    kind: "user_input_request",
+                    status,
+                    countsForRun: false,
+                    providerThreadId: thread.id,
+                    providerTurnId,
+                    nativeItemRef: { driver, nativeId: item.id, strength: "strong" },
+                    runtimeRequestId: requestId,
+                    checkpointScopeId: null,
+                    startedAt: request.createdAt,
+                    completedAt: request.resolvedAt,
+                  };
+                  const questionItem: Extract<
+                    OrchestrationV2TurnItem,
+                    { type: "user_input_request" }
+                  > = {
+                    id: allocator.derive.approvalTurnItem({ requestId }),
+                    threadId: owner.threadId,
+                    runId: owner.runId,
+                    nodeId,
+                    providerThreadId: thread.id,
+                    providerTurnId,
+                    nativeItemRef: { driver, nativeId: item.id, strength: "strong" },
+                    parentItemId: null,
+                    ordinal: itemOrdinal(turn.id, `question:${item.id}`),
+                    status,
+                    title: "User input",
+                    startedAt: request.createdAt,
+                    completedAt: request.resolvedAt,
+                    updatedAt: at,
+                    type: "user_input_request",
+                    requestId,
+                    questions: [question],
+                  };
+                  entry = {
+                    nativeSessionId: id,
+                    nativeTurnId: turn.id,
+                    nativeToolId: item.id,
+                    inputSignature: encodeQuestionInput(item.input),
+                    answering: blocked,
+                    request,
+                    node,
+                    item: questionItem,
+                  };
+                  questions.set(key, entry);
+                  yield* emit({ type: "node.updated", driver, node });
+                  yield* emit({
+                    type: "runtime_request.updated",
+                    driver,
+                    threadId: owner.threadId,
+                    runtimeRequest: request,
+                  });
+                  yield* emit({ type: "turn_item.updated", driver, turnItem: questionItem });
+                }
+              }
+              if (!entry) continue;
+              if (item.status !== "running" || finished) {
+                yield* settleQuestion(
+                  key,
+                  item.status === "completed" && item.text.length > 0 ? "resolved" : "cancelled",
+                  false,
+                  nativeClaudeQuestionResult(entry.item.questions[0]!, item.result),
+                );
+              } else if (pendingQuestions.length !== 1) {
+                entry.answering = true;
+                yield* settleQuestion(key, "cancelled", true);
+              }
+            }
+            if (finished) {
+              yield* emit({
+                type: "provider_turn.updated",
+                driver,
+                threadId: owner.threadId,
+                providerTurn,
+              });
+            }
             let ordinal = 0;
             for (const item of turn.items) {
               if (item.type === "user") continue;
@@ -449,6 +761,22 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
               );
               active.delete(id);
             }
+          }
+          for (const [key, entry] of questions) {
+            if (entry.nativeSessionId !== id || !historyAvailable) continue;
+            const current = history.at(-1);
+            const tool = current?.items.find((item) => item.id === entry.nativeToolId);
+            if (
+              current?.id !== entry.nativeTurnId ||
+              !tool ||
+              nativeClaudeObservedTurnIsTerminal(current, terminalJob)
+            )
+              yield* settleQuestion(
+                key,
+                tool?.status === "completed" && tool.text.length > 0 ? "resolved" : "cancelled",
+                false,
+                nativeClaudeQuestionResult(entry.item.questions[0]!, tool?.result),
+              );
           }
         }
       }, observation.withPermit);
@@ -586,17 +914,67 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
           ownership.interrupted = true;
           yield* hydrate();
         }),
-        respondToRuntimeRequest: () =>
-          unsupported(
-            "Claude's native daemon has no structured approval channel; no approval was sent. Answer in claude attach.",
-          ),
+        respondToRuntimeRequest: Effect.fn("NativeClaudeAdapter.answerQuestion")(
+          function* (response) {
+            const entry = [...questions.values()].find(
+              (entry) => entry.request.id === response.requestId,
+            );
+            if (!entry || entry.answering || response.decision !== undefined)
+              return yield* unsupported(
+                "No answerable native Claude question; no approval was sent.",
+              );
+            const answer = nativeClaudeQuestionAnswer(entry.item.questions[0]!, response.answers);
+            if (answer === undefined)
+              return yield* unsupported(
+                "Claude requires one nonempty answer without command prefixes or control characters.",
+              );
+            entry.answering = true;
+            entry.request = {
+              ...entry.request,
+              ...(response.answers === undefined ? {} : { answers: response.answers }),
+            };
+            const key = `${entry.nativeSessionId}:${entry.nativeTurnId}:${entry.nativeToolId}`;
+            yield* Effect.gen(function* () {
+              const inventory = yield* attempt(() => client.listSessions());
+              const job = inventory.find((job) => job.sessionId === entry.nativeSessionId);
+              const history = yield* attempt(() =>
+                source.history(entry.nativeSessionId, inventory),
+              );
+              const turn = history.at(-1);
+              const tool = turn?.items.find((item) => item.id === entry.nativeToolId);
+              if (
+                !job ||
+                job.kind !== "background" ||
+                job.status !== "waiting" ||
+                turn?.id !== entry.nativeTurnId ||
+                tool?.status !== "running" ||
+                turn.items.filter(
+                  (item) =>
+                    item.type === "tool" &&
+                    item.title === "AskUserQuestion" &&
+                    item.status === "running",
+                ).length !== 1 ||
+                encodeQuestionInput(tool.input) !== entry.inputSignature
+              )
+                return yield* unsupported(
+                  "The native Claude question changed or was answered in the CLI; no answer was sent.",
+                );
+              // The native protocol cannot atomically address a request. Only a matching
+              // persisted tool result confirms delivery; never resolve on the routing ACK.
+              yield* attempt(() => client.reply(job, answer));
+              yield* hydrate();
+            }).pipe(Effect.tapError(() => settleQuestion(key, "cancelled", true)));
+          },
+        ),
         readThreadSnapshot: ({ providerThread }) =>
           attempt(() => source.history(nativeId(providerThread))).pipe(
             Effect.map((history) => ({
               providerThread,
               providerTurns: [],
               messages: [],
-              runtimeRequests: [],
+              runtimeRequests: [...questions.values()]
+                .filter((entry) => entry.item.providerThreadId === providerThread.id)
+                .map((entry) => entry.request),
               providerPayload: { nativeHistory: history },
             })),
           ),

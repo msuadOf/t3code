@@ -263,6 +263,8 @@ function makeLocalCommandHarness(input: {
   readonly worktreesDir?: string;
   readonly fileSystem?: FileSystem.FileSystem;
   readonly previousNativeSession?: boolean;
+  readonly nativeClaude?: boolean;
+  readonly undeliveredPreviousTurn?: boolean;
   readonly previousMessages?: ReadonlyArray<string>;
   readonly logoutFailure?: string;
   readonly openFailure?: unknown;
@@ -312,7 +314,7 @@ function makeLocalCommandHarness(input: {
   };
   const providerThread: OrchestrationV2ThreadProjection["providerThreads"][number] = {
     id: providerThreadId,
-    driver: ProviderDriverKind.make("codex"),
+    driver: ProviderDriverKind.make(input.nativeClaude ? "claudeAgent" : "codex"),
     providerInstanceId: newInstanceId,
     providerSessionId,
     appThreadId: threadId,
@@ -512,6 +514,7 @@ function makeLocalCommandHarness(input: {
       ],
     };
   }
+  if (input.undeliveredPreviousTurn) projection = { ...projection, providerTurns: [] };
   let providerBusy =
     input.previousTurn?.runStatus === "failed" &&
     input.previousTurn.turnStatus === "running" &&
@@ -559,6 +562,7 @@ function makeLocalCommandHarness(input: {
       ),
     ),
   );
+  const fallbackEnsureThread = vi.fn(() => Effect.succeed(providerThread));
   const resumeFallbackSession = {
     driver: providerThread.driver,
     resumeThread: () =>
@@ -569,7 +573,7 @@ function makeLocalCommandHarness(input: {
           cause: "native thread is gone",
         }),
       ),
-    ensureThread: () => Effect.succeed(providerThread),
+    ensureThread: fallbackEnsureThread,
   };
   const open = vi.fn(() =>
     input.interruptOpen === true
@@ -661,7 +665,10 @@ function makeLocalCommandHarness(input: {
               projection = ProjectionStore.applyToProjection(projection, event);
             }
           }
-          return { committed, storedEvents: [] };
+          return {
+            committed,
+            storedEvents: [],
+          };
         }),
   );
   const resolveRuntimePolicy = vi.fn(
@@ -744,6 +751,7 @@ function makeLocalCommandHarness(input: {
     ),
   );
   return {
+    fallbackEnsureThread,
     getThreadRecords,
     getTurnStartContext,
     setProjection: (next: OrchestrationV2ThreadProjection) => {
@@ -1243,3 +1251,39 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
       }),
   );
 }
+
+effectIt.effect(
+  "keeps the native Claude session when resume fails instead of replacing its identity",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        nativeClaude: true,
+        previousTurn: { runStatus: "failed", turnStatus: "completed" },
+        historyReadFailureAfterFallback: new Error("must not read replacement history"),
+      });
+      yield* harness.start;
+      expect(harness.fallbackEnsureThread).not.toHaveBeenCalled();
+      expect(harness.events.some((event) => event.type === "context-transfer.created")).toBe(false);
+      expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+    }),
+);
+
+effectIt.effect(
+  "does not read and inject undelivered failed input into the same native Claude conversation",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeLocalCommandHarness({
+        text: "Only this new request",
+        nativeClaude: true,
+        undeliveredPreviousTurn: true,
+        previousTurn: { runStatus: "failed", turnStatus: "completed" },
+      });
+      // This fixture deliberately fails getTurnStartHistory: retry context construction
+      // would fail the new run before it could be handed to the native executor.
+      yield* harness.start;
+      expect(harness.startRootRun).toHaveBeenCalledOnce();
+      expect(harness.projection().runs.at(-1)?.status).toBe("running");
+      expect(harness.events.some((event) => event.type === "context-handoff.updated")).toBe(false);
+    }),
+);

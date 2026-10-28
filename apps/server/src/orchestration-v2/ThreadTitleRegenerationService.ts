@@ -13,6 +13,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import type { OrchestratorV2Error } from "./Orchestrator.ts";
@@ -45,6 +46,7 @@ const make = Effect.gen(function* () {
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const projects = yield* ProjectStore.ProjectStoreV2;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const providers = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
   const textGeneration = yield* TextGeneration.TextGeneration;
 
   const complete = (input: {
@@ -77,6 +79,12 @@ const make = Effect.gen(function* () {
       );
       if (projection.thread.titleRegeneration?.requestId !== input.requestId) {
         return { type: "stale" as const };
+      }
+
+      if (input.kind.type === "initial") {
+        const instance = yield* providers.getInstance(projection.thread.modelSelection.instanceId);
+        // Native Claude workers name their own conversations after execution begins.
+        if (instance?.driverKind === "claudeAgent") return { type: "complete" as const };
       }
 
       const project = yield* projects.get(projection.thread.projectId);

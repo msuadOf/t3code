@@ -170,6 +170,23 @@ it.effect(
       });
       yield* Effect.promise(() => source.history(sessionId));
       expect(reads).toBe(1);
+      expect(sessions[0]?.title).toBe("hello");
+      const background = inventory[0]!;
+      inventory = [{ ...background, name: "Native generated title" }];
+      expect((yield* Effect.promise(() => source.list()))[0]?.title).toBe("Native generated title");
+      inventory = [{ ...background, name: "Renamed in Claude" }];
+      expect((yield* Effect.promise(() => source.list()))[0]?.title).toBe("Renamed in Claude");
+      inventory = [{ ...background, name: background.id! }];
+      expect((yield* Effect.promise(() => source.list()))[0]?.title).toBe("hello");
+      inventory = [{ ...background, name: sessionId }];
+      expect((yield* Effect.promise(() => source.list()))[0]?.title).toBe("hello");
+      yield* fs.writeFileString(
+        path.join(directory, `${sessionId}.jsonl`),
+        (yield* fs.readFileString(path.join(directory, `${sessionId}.jsonl`))) +
+          JSON.stringify({ type: "custom-title", customTitle: "Saved custom title" }) +
+          "\n",
+      );
+      expect((yield* Effect.promise(() => source.list()))[0]?.title).toBe("Saved custom title");
       inventory = [{ kind: "interactive", cwd: "/work", startedAt: 1, sessionId, pid: 42 }];
       const file = path.join(directory, `${sessionId}.jsonl`);
       yield* fs.writeFileString(

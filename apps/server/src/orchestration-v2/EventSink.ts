@@ -96,6 +96,18 @@ export interface EventSinkV2Shape {
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
+  readonly writeIfRuntimeRequestSubmitted: (input: {
+    readonly threadId: ThreadId;
+    readonly requestId: RuntimeRequestId;
+    readonly submittedAt: DateTime.Utc;
+    readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+  }) => Effect.Effect<
+    {
+      readonly committed: boolean;
+      readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
+    },
+    EventSinkV2Error
+  >;
   readonly writeIfRunCurrent: (input: {
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
@@ -583,6 +595,34 @@ const layerBase: Layer.Layer<
       return committed;
     });
 
+    const writeIfRuntimeRequestSubmittedEffect = Effect.fn(
+      "EventSink.writeIfRuntimeRequestSubmitted",
+    )(function* (input: Parameters<EventSinkV2Shape["writeIfRuntimeRequestSubmitted"]>[0]) {
+      return yield* commitThenPublish(
+        Effect.gen(function* () {
+          const rows = yield* sql<{
+            readonly status: string;
+            readonly submitted: string | null;
+          }>`SELECT status, json_extract(payload_json, '$.submittedAt') AS submitted FROM orchestration_v2_projection_runtime_requests WHERE runtime_request_id = ${input.requestId} AND thread_id = ${input.threadId} LIMIT 1`;
+          if (
+            rows[0]?.status !== "pending" ||
+            rows[0].submitted !== DateTime.formatIso(input.submittedAt)
+          )
+            return {
+              committed: false as const,
+              storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
+            };
+          const normalized = yield* normalizeEvents(input.events);
+          const storedEvents = yield* eventStore.append({ events: normalized });
+          const outcomes = yield* applyStoredEvents(storedEvents);
+          return { committed: true as const, storedEvents, outcomes };
+        }),
+        (result) =>
+          result.committed
+            ? publishStoredEvents(result.storedEvents, result.outcomes)
+            : Effect.void,
+      );
+    });
     const writeIfRunCurrentEffect = Effect.fn("orchestrationV2.EventSink.writeIfRunCurrent")(
       function* (input: Parameters<EventSinkV2Shape["writeIfRunCurrent"]>[0]) {
         yield* Effect.annotateCurrentSpan({
@@ -1010,6 +1050,12 @@ const layerBase: Layer.Layer<
                 ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
                 cause,
               }),
+          ),
+        ),
+      writeIfRuntimeRequestSubmitted: (input) =>
+        writeIfRuntimeRequestSubmittedEffect(input).pipe(
+          Effect.mapError(
+            (cause) => new EventSinkWriteError({ eventCount: input.events.length, cause }),
           ),
         ),
       writeIfRunCurrent: (input) =>

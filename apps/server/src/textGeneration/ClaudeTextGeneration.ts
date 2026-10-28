@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off -- assign an explicit native identity to each non-persistent auxiliary CLI process.
+import * as NodeCrypto from "node:crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -198,11 +200,20 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
                 ),
               )
           : cwd;
+      const nativeSessionId = yield* Effect.sync(() => NodeCrypto.randomUUID());
+      yield* Effect.annotateCurrentSpan({
+        "t3.session.owner": "auxiliary",
+        "t3.session.purpose": operation,
+        "claude.session.id": nativeSessionId,
+      });
       const managedMcpConfig = yield* hasClaudeManagedMcpConfig();
       const spawnCommand = yield* resolveSpawnCommand(
         claudeSettings.binaryPath || "claude",
         [
           "-p",
+          "--no-session-persistence",
+          "--session-id",
+          nativeSessionId,
           "--output-format",
           "json",
           "--json-schema",

@@ -2518,71 +2518,187 @@ it.effect("ProviderSessionManagerV2 releases sessions when provider event stream
   }),
 );
 
-it.effect("ProviderSessionManagerV2 marks pending runtime requests non-live on release", () =>
-  Effect.gen(function* () {
-    const state = yield* Ref.make(emptyState);
-    const effect = Effect.gen(function* () {
-      const eventSink = yield* EventSink.EventSinkV2;
-      const idAllocator = yield* IdAllocator.IdAllocatorV2;
-      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
-      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
-      const now = yield* DateTime.now;
-      const projectId = yield* idAllocator.allocate.project({
-        fixtureName: "provider-session-manager-request-expire",
-      });
-      const threadId = yield* idAllocator.allocate.thread({
-        fixtureName: "provider-session-manager-request-expire",
-        projectId,
-      });
-      const providerSessionId = yield* idAllocator.allocate.providerSession({
-        providerInstanceId: modelSelection.instanceId,
-        threadId,
-      });
-      const providerThread = makeProviderThread({
-        idAllocator,
-        threadId,
-        providerSessionId,
-        now,
+it.effect.each([
+  {
+    reason: "server_shutdown",
+    submitted: false,
+    surviving: true,
+    confirmation: true,
+    preserve: true,
+  },
+  {
+    reason: "server_shutdown",
+    submitted: true,
+    surviving: true,
+    confirmation: true,
+    preserve: true,
+  },
+  {
+    reason: "runtime_error",
+    submitted: false,
+    surviving: true,
+    confirmation: true,
+    preserve: true,
+  },
+  {
+    reason: "server_shutdown",
+    submitted: false,
+    surviving: false,
+    confirmation: true,
+    preserve: false,
+  },
+  {
+    reason: "server_shutdown",
+    submitted: false,
+    surviving: true,
+    confirmation: false,
+    preserve: false,
+  },
+  {
+    reason: "manual_shutdown",
+    submitted: false,
+    surviving: true,
+    confirmation: true,
+    preserve: false,
+  },
+  {
+    reason: "runtime_error",
+    submitted: false,
+    surviving: false,
+    confirmation: false,
+    preserve: false,
+  },
+] as const)(
+  "native question observer release preserves only surviving confirmations: %j",
+  (scenario) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const projectId = yield* idAllocator.allocate.project({
+          fixtureName: "provider-session-manager-request-expire",
+        });
+        const threadId = yield* idAllocator.allocate.thread({
+          fixtureName: "provider-session-manager-request-expire",
+          projectId,
+        });
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          now,
+        });
+
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const pendingRequest = yield* makePendingRuntimeRequestEvents({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          providerThread,
+          now,
+        });
+        yield* eventSink.write({
+          events: pendingRequest.events.map((event) =>
+            event.type === "runtime-request.updated"
+              ? {
+                  ...event,
+                  payload: {
+                    ...event.payload,
+                    ...(scenario.submitted ? { submittedAt: now, answers: { choice: "yes" } } : {}),
+                    responseCapability: {
+                      type: "live",
+                      providerSessionId,
+                      ...(scenario.confirmation ? { confirmation: "provider" as const } : {}),
+                    },
+                  },
+                }
+              : event,
+          ),
+        });
+        yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* manager.release({
+          providerSessionId,
+          reason: scenario.reason,
+          detail: "process exited",
+        });
+
+        const projection = yield* projectionStore.getThreadProjection(threadId);
+        const request = projection.runtimeRequests.at(-1);
+        const requestNode = projection.nodes.find((node) => node.id === request?.nodeId);
+        const requestTurnItem = projection.turnItems.find(
+          (item) => item.type === "approval_request" && item.requestId === request?.id,
+        );
+
+        assert.equal(
+          request?.status,
+          scenario.preserve
+            ? "pending"
+            : scenario.reason === "runtime_error"
+              ? "expired"
+              : "cancelled",
+        );
+        assert.equal(
+          request?.responseCapability.type,
+          scenario.preserve ? "live" : "not_resumable",
+        );
+        assert.equal(
+          requestNode?.status,
+          scenario.preserve
+            ? "waiting"
+            : scenario.reason === "runtime_error"
+              ? "failed"
+              : "cancelled",
+        );
+        assert.equal(
+          requestTurnItem?.status,
+          scenario.preserve
+            ? "waiting"
+            : scenario.reason === "runtime_error"
+              ? "failed"
+              : "cancelled",
+        );
+        if (scenario.preserve) {
+          assert.equal(request?.submittedAt !== undefined, scenario.submitted);
+          if (scenario.submitted) assert.deepEqual(request?.answers, { choice: "yes" });
+          yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+          assert.deepEqual(
+            (yield* projectionStore.getThreadProjection(threadId)).runtimeRequests.at(-1),
+            request,
+          );
+        }
       });
 
-      yield* eventSink.write({
-        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
-      });
-      const pendingRequest = yield* makePendingRuntimeRequestEvents({
-        idAllocator,
-        threadId,
-        providerSessionId,
-        providerThread,
-        now,
-      });
-      yield* eventSink.write({ events: pendingRequest.events });
-      yield* manager.open({
-        threadId,
-        providerSessionId,
-        modelSelection,
-        runtimePolicy,
-      });
-      yield* manager.release({
-        providerSessionId,
-        reason: "runtime_error",
-        detail: "process exited",
-      });
-
-      const projection = yield* projectionStore.getThreadProjection(threadId);
-      const request = projection.runtimeRequests.at(-1);
-      const requestNode = projection.nodes.find((node) => node.id === request?.nodeId);
-      const requestTurnItem = projection.turnItems.find(
-        (item) => item.type === "approval_request" && item.requestId === request?.id,
+      yield* effect.pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 1000,
+            capabilities: {
+              ...CodexCapabilities,
+              sessions: {
+                ...CodexCapabilities.sessions,
+                runtimeSurvivesHostRestart: scenario.surviving,
+              },
+            },
+          }),
+        ),
       );
-
-      assert.equal(request?.status, "expired");
-      assert.equal(request?.responseCapability.type, "not_resumable");
-      assert.equal(requestNode?.status, "failed");
-      assert.equal(requestTurnItem?.status, "failed");
-    });
-
-    yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));
-  }),
+    }),
 );
 it.effect("ProviderSessionManagerV2 retries release records that failed to persist", () =>
   Effect.gen(function* () {
@@ -3520,6 +3636,9 @@ it.effect("native progress preserves root metadata and rejects foreign or termin
     let progress:
       | NonNullable<ProviderAdapter.ProviderAdapterV2OpenSessionInput["onNativeTurnProgress"]>
       | undefined;
+    let findRequest:
+      | NonNullable<ProviderAdapter.ProviderAdapterV2OpenSessionInput["findNativeRuntimeRequest"]>
+      | undefined;
     const effect = Effect.gen(function* () {
       const sink = yield* EventSink.EventSinkV2;
       const ids = yield* IdAllocator.IdAllocatorV2;
@@ -3628,6 +3747,92 @@ it.effect("native progress preserves root metadata and rejects foreign or termin
         modelSelection,
         runtimePolicy,
       });
+      assert.isDefined(findRequest);
+      if (!findRequest) return;
+      const driver = CODEX_DRIVER;
+      const providerTurnId = ids.derive.providerTurn({
+        driver,
+        nativeTurnId: "persisted-native-turn",
+      });
+      const requestId = yield* ids.allocate.runtimeRequest({
+        driver,
+        providerTurnId,
+        nativeRequestId: "persisted-tool",
+      });
+      const persisted = {
+        id: requestId,
+        nodeId: rootNodeId,
+        providerTurnId,
+        nativeRequestRef: { driver, nativeId: "persisted-tool", strength: "strong" as const },
+        kind: "user_input" as const,
+        status: "pending" as const,
+        responseCapability: {
+          type: "live" as const,
+          providerSessionId: sessionId,
+          confirmation: "provider" as const,
+        },
+        createdAt: now,
+        resolvedAt: null,
+        submittedAt: now,
+        answers: { choice: "yes" },
+      };
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "provider-turn.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: providerTurnId,
+              providerThreadId: providerThread.id,
+              nodeId: rootNodeId,
+              runAttemptId: attemptId,
+              ordinal: 1,
+              nativeTurnRef: { driver, nativeId: "persisted-native-turn", strength: "strong" },
+              status: "running",
+              startedAt: now,
+              completedAt: null,
+            },
+          },
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "runtime-request.updated",
+            threadId,
+            occurredAt: now,
+            payload: persisted,
+          },
+        ],
+      });
+      const lookup = {
+        threadId,
+        nativeTurnId: "persisted-native-turn",
+        nativeRequestId: "persisted-tool",
+      };
+      assert.deepEqual(yield* findRequest(lookup), persisted);
+      assert.isUndefined(yield* findRequest({ ...lookup, nativeTurnId: "different-turn" }));
+      assert.isUndefined(yield* findRequest({ ...lookup, nativeRequestId: "different-tool" }));
+      assert.equal(
+        (yield* findRequest({ ...lookup, threadId: otherThreadId }).pipe(Effect.flip))._tag,
+        "ProviderAdapterProtocolError",
+      );
+      const uncertain = {
+        ...persisted,
+        status: "cancelled" as const,
+        responseCapability: { type: "not_resumable" as const, reason: "Delivery unknown" },
+      };
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "runtime-request.updated",
+            threadId,
+            occurredAt: now,
+            payload: uncertain,
+          },
+        ],
+      });
+      assert.deepEqual(yield* findRequest(lookup), uncertain);
       assert.isDefined(progress);
       if (!progress) return;
       const input = {
@@ -3678,6 +3883,7 @@ it.effect("native progress preserves root metadata and rejects foreign or termin
           beforeOpen: (input) =>
             Effect.sync(() => {
               progress = input.onNativeTurnProgress;
+              findRequest = input.findNativeRuntimeRequest;
             }),
         }),
       ),

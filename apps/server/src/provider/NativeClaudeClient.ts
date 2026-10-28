@@ -270,6 +270,21 @@ export class NativeClaudeClient {
     );
   }
 
+  /** State-only observation never replays terminal output or acquires terminal ownership. */
+  async *subscribeState(
+    session: NativeClaudeSession,
+    signal?: AbortSignal,
+  ): AsyncGenerator<JsonObject> {
+    for await (const frame of this.frames(
+      { op: "subscribe", short: requireNativeClaudeBackgroundId(session), tail: 0 },
+      false,
+      signal,
+    )) {
+      if (frame.type === "snapshot" || frame.type === "state" || frame.type === "settled")
+        yield frame;
+    }
+  }
+
   /** Returns the actual shared PTY. Its bytes include ANSI and input is terminal input. */
   async attach(
     session: NativeClaudeSession,

@@ -657,6 +657,14 @@ export const layerWithOptions = (
               request.status === "pending" &&
               request.responseCapability.type === "live" &&
               request.responseCapability.providerSessionId === providerSessionId &&
+              // Releasing an observer does not invalidate a question owned by a
+              // surviving native worker. Its persisted submission state must survive too.
+              !(
+                input.reason !== "manual_shutdown" &&
+                input.entry.runtime.providerSession.capabilities.sessions
+                  .runtimeSurvivesHostRestart &&
+                request.responseCapability.confirmation === "provider"
+              ) &&
               DateTime.isLessThanOrEqualTo(request.createdAt, input.releasedAt),
           );
 
@@ -2194,6 +2202,66 @@ export const layerWithOptions = (
                 | undefined;
               const runtime = yield* adapter
                 .openSession({
+                  findNativeRuntimeRequest: Effect.fn(
+                    "ProviderSessionManager.findNativeRuntimeRequest",
+                  )(
+                    function* (request) {
+                      const entry = (yield* Ref.get(sessions)).get(key);
+                      if (
+                        !entry ||
+                        entry.runtime !== nativeProgressRuntime ||
+                        !entry.attachedThreadIds.has(request.threadId)
+                      )
+                        return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                          driver: adapter.driver,
+                          detail: "Native request lookup is not attached to this runtime.",
+                        });
+                      const records = yield* projectionStore.getThreadRecords(request.threadId, [
+                        "runtimeRequests",
+                        "providerTurns",
+                        "providerThreads",
+                      ]);
+                      const turns = new Set(
+                        records.providerTurns
+                          .filter((turn) => {
+                            const thread = records.providerThreads.find(
+                              (thread) => thread.id === turn.providerThreadId,
+                            );
+                            return (
+                              turn.nativeTurnRef?.nativeId === request.nativeTurnId &&
+                              turn.nativeTurnRef.driver === entry.runtime.driver &&
+                              thread?.providerSessionId === entry.runtime.providerSessionId &&
+                              thread.driver === entry.runtime.driver &&
+                              thread.providerInstanceId === entry.runtime.instanceId
+                            );
+                          })
+                          .map((turn) => turn.id),
+                      );
+                      if (
+                        (yield* Ref.get(sessions)).get(key) !== entry ||
+                        !entry.attachedThreadIds.has(request.threadId)
+                      )
+                        return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                          driver: adapter.driver,
+                          detail: "Native request runtime changed during lookup.",
+                        });
+                      return records.runtimeRequests.findLast(
+                        (candidate) =>
+                          candidate.providerTurnId !== null &&
+                          turns.has(candidate.providerTurnId) &&
+                          candidate.nativeRequestRef?.nativeId === request.nativeRequestId &&
+                          candidate.nativeRequestRef.driver === entry.runtime.driver,
+                      );
+                    },
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderAdapter.ProviderAdapterProtocolError({
+                          driver: adapter.driver,
+                          detail: "Could not verify persisted native request ownership.",
+                          cause,
+                        }),
+                    ),
+                  ),
                   onNativeTurnProgress: Effect.fn("ProviderSessionManager.nativeTurnProgress")(
                     function* (progress) {
                       const entry = (yield* Ref.get(sessions)).get(key);

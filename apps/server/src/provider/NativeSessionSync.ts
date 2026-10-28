@@ -275,9 +275,16 @@ const make = Effect.gen(function* () {
             // A first observation establishes the source baseline. Only later
             // native changes replace metadata; unchanged source values must not
             // overwrite a title or archive action made in T3.
-            if (imported) {
+            if (
+              imported ||
+              (instance.driverKind === "claudeAgent" &&
+                target.appThread.historyOrigin !== "v1_import")
+            ) {
               const titleChanged =
-                previousMetadata !== undefined && previousMetadata.title !== native.title;
+                previousMetadata !== undefined &&
+                previousMetadata.title !== native.title &&
+                (instance.driverKind !== "claudeAgent" ||
+                  target.appThread.title === previousMetadata.title);
               const archiveChanged =
                 previousMetadata !== undefined && previousMetadata.archived !== native.archived;
               // Claude's existing worker owns model selection. Its persisted replies
