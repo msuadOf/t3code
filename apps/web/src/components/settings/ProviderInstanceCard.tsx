@@ -58,6 +58,7 @@ import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
+import { ClaudeSessionSharingSection } from "./ClaudeSessionSharingSection";
 import { AcpSessionManagementSection } from "./AcpSessionManagementSection";
 import {
   getProviderVersionAdvisoryPresentation,
@@ -1220,6 +1221,13 @@ export function ProviderInstanceCard({
           onChange={updateGenericEnvironment}
         />
       </SettingsSection>
+      {environmentId !== undefined && liveProvider?.driver === "claudeAgent" ? (
+        <ClaudeSessionSharingSection
+          key={`${environmentId}:${instanceId}`}
+          environmentId={environmentId}
+          instanceId={instanceId}
+        />
+      ) : null}
       {environmentId !== undefined && liveProvider?.driver === "acpRegistry" ? (
         <AcpSessionManagementSection
           environmentId={environmentId}

@@ -160,6 +160,7 @@ it.effect(
       }
       const source = new NativeClaudeSessions(root, new Client());
       const sessions = yield* Effect.promise(() => source.list());
+      expect(sessions[0]).toMatchObject({ sharingState: "shared" });
       expect(sessions).toHaveLength(1);
       expect(sessions[0]?.active).toBe(false);
       const history = yield* Effect.promise(() => source.history(sessionId));
@@ -184,6 +185,7 @@ it.effect(
           }) +
           "\n",
       );
+      expect((yield* Effect.promise(() => source.available()))[0]?.sharingState).toBe("foreground");
       const foreground = yield* Effect.promise(() => source.list());
       expect(foreground).toEqual([]);
       expect((yield* Effect.promise(() => source.history(sessionId))).at(-1)).toMatchObject({
@@ -202,6 +204,10 @@ it.effect(
       ];
       expect(yield* Effect.promise(() => source.list())).toHaveLength(1);
       inventory = [];
+      expect((yield* Effect.promise(() => source.available()))[0]).toMatchObject({
+        id: sessionId,
+        sharingState: "history",
+      });
       expect(yield* Effect.promise(() => source.list())).toEqual([]);
       expect((yield* Effect.promise(() => source.history(sessionId))).at(-1)).toMatchObject({
         status: "interrupted",
@@ -284,3 +290,41 @@ it("ends the owning turn on a native interruption record without inventing anoth
   expect(literal).toHaveLength(2);
   expect(literal[1]?.items[0]?.text).toBe("[Request interrupted by user for tool use]");
 });
+
+it.effect("discovers a lazy background handoff only with a matching local job record", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped();
+    const id = "12345678-2222-4333-8444-555555555555";
+    class Client extends NativeClaudeClient {
+      override async listSessions(): Promise<readonly NativeClaudeSession[]> {
+        return [
+          {
+            kind: "background",
+            id: "12345678",
+            sessionId: id,
+            cwd: "/work",
+            startedAt: 1,
+            status: "idle",
+          },
+        ];
+      }
+    }
+    const source = new NativeClaudeSessions(root, new Client());
+    expect(yield* Effect.promise(() => source.available())).toEqual([]);
+    const job = path.join(root, "jobs", "12345678");
+    yield* fs.makeDirectory(job, { recursive: true });
+    const state = { sessionId: id, daemonShort: "12345678", cwd: "/wrong" };
+    yield* fs.writeFileString(path.join(job, "state.json"), JSON.stringify(state));
+    expect(yield* Effect.promise(() => source.list())).toEqual([]);
+    yield* fs.writeFileString(
+      path.join(job, "state.json"),
+      JSON.stringify({ ...state, cwd: "/work", intent: "Handed off" }),
+    );
+    expect(yield* Effect.promise(() => source.list())).toMatchObject([
+      { id, sharingState: "shared", cwd: "/work", active: false, historyAvailable: false },
+    ]);
+    expect(yield* Effect.promise(() => source.history(id))).toEqual([]);
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);

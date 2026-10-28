@@ -420,6 +420,17 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         ),
       orchestrationAdapter,
       nativeSessions: {
+        sharing: {
+          list: Effect.tryPromise({
+            try: () => nativeClaudeSessions.available(),
+            catch: nativeSessionError,
+          }),
+          open: (sessionId) =>
+            Effect.tryPromise({
+              try: () => nativeClaudeSessions.open(sessionId),
+              catch: nativeSessionError,
+            }),
+        },
         list: Effect.tryPromise({
           try: () => nativeClaudeSessions.list(),
           catch: nativeSessionError,

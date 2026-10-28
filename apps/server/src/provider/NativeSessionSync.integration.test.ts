@@ -106,6 +106,7 @@ const fixture = (instances: ReadonlyArray<ProviderInstance>) => {
     }),
     Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
       listInstances: Effect.succeed(instances),
+      getInstance: (id) => Effect.succeed(instances.find((instance) => instance.instanceId === id)),
     }),
     Layer.mock(ProjectService.ProjectService)({
       getById: (id) =>
@@ -637,5 +638,116 @@ it.effect(
         assert.equal((yield* store.getThread(id)).title, "Keep legacy metadata");
         assert.isNull((yield* store.getThread(id)).archivedAt);
       }).pipe(Effect.provide(context));
+    }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "lists history within the configured root and paginates without importing or starting work",
+  () =>
+    Effect.gen(function* () {
+      const candidates = Array.from({ length: 35 }, (_, index) => ({
+        ...native(`saved-${index}`),
+        updatedAt: index,
+        sharingState: "history" as const,
+      }));
+      const context = fixture([
+        provider(claude, claudeDriver, {
+          list: Effect.succeed([]),
+          history: () => Effect.succeed([]),
+          sharing: {
+            list: Effect.succeed([
+              ...candidates,
+              { ...native("outside", "/other"), sharingState: "history" },
+            ]),
+            open: () => Effect.die("Browsing must not start a worker"),
+          },
+        }),
+      ]);
+      yield* Effect.gen(function* () {
+        const sync = yield* NativeSessionSync.NativeSessionSync;
+        const first = yield* sync.list({ instanceId: claude });
+        assert.lengthOf(first.sessions, 30);
+        assert.equal(first.nextOffset, 30);
+        assert.equal(first.sessions[0]?.sessionId, "saved-34");
+        const next = yield* sync.list({ instanceId: claude, offset: 30 });
+        assert.lengthOf(next.sessions, 5);
+        assert.isNull(next.nextOffset);
+        assert.lengthOf((yield* sync.list({ instanceId: claude, query: "saved-34" })).sessions, 1);
+        assert.lengthOf((yield* sync.list({ instanceId: claude, query: "outside" })).sessions, 0);
+        assert.lengthOf(context.bootstrapped, 0);
+        assert.lengthOf(context.opened, 0);
+      }).pipe(Effect.provide(context.layer));
+    }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "opens history with the same native identity and rejects foreground, out-of-root and changed identities",
+  () =>
+    Effect.gen(function* () {
+      const history = { ...native("saved"), sharingState: "history" as const };
+      const foreground = { ...native("foreground"), sharingState: "foreground" as const };
+      const outside = { ...native("outside", "/other"), sharingState: "history" as const };
+      let shared: NativeSession[] = [];
+      const requests: string[] = [];
+      const context = fixture([
+        provider(claude, claudeDriver, {
+          list: Effect.sync(() => shared),
+          history: () => Effect.succeed([]),
+          sharing: {
+            list: Effect.succeed([
+              history,
+              foreground,
+              outside,
+              { ...native("wrong"), sharingState: "history" },
+            ]),
+            open: (id) =>
+              Effect.sync(() => {
+                requests.push(id);
+                const session = native(id === "wrong" ? "copy" : id);
+                shared = [session];
+                return session;
+              }),
+          },
+        }),
+      ]);
+      yield* Effect.gen(function* () {
+        const sync = yield* NativeSessionSync.NativeSessionSync;
+        assert.equal(
+          (yield* sync.open({ instanceId: claude, sessionId: "foreground" }).pipe(Effect.flip))
+            .reason,
+          "foreground",
+        );
+        assert.equal(
+          (yield* sync.open({ instanceId: claude, sessionId: "outside" }).pipe(Effect.flip)).reason,
+          "outside-root",
+        );
+        assert.lengthOf(requests, 0);
+        const first = yield* sync.open({ instanceId: claude, sessionId: "saved" });
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const thread = yield* store.getThread(first.threadId);
+        const at = DateTime.makeUnsafe(30000);
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("archive-shared-history"),
+              type: "thread.archived",
+              threadId: thread.id,
+              occurredAt: at,
+              payload: { ...thread, archivedAt: at, updatedAt: at },
+            },
+          ],
+        });
+        const again = yield* sync.open({ instanceId: claude, sessionId: "saved" });
+        assert.equal(first.threadId, again.threadId);
+        assert.isNull((yield* store.getThread(first.threadId)).archivedAt);
+        const records = yield* store.getThreadProviderContext(first.threadId, claude);
+        assert.equal(records.providerThreads[0]?.nativeThreadRef?.nativeId, "saved");
+        assert.equal(
+          (yield* sync.open({ instanceId: claude, sessionId: "wrong" }).pipe(Effect.flip)).reason,
+          "open-failed",
+        );
+        assert.equal((yield* store.getShellSnapshot()).threads.length, 1);
+      }).pipe(Effect.provide(context.layer));
     }).pipe(Effect.scoped),
 );

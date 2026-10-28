@@ -1239,6 +1239,19 @@ export function createServerEnvironmentAtoms<R, E>(
           `${environmentId}:${input.instanceId}:${input.elicitationId}`,
       },
     }),
+    listNativeSessions: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:native-sessions:list",
+      tag: WS_METHODS.nativeSessionsList,
+    }),
+    openNativeSession: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:native-sessions:open",
+      tag: WS_METHODS.nativeSessionsOpen,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.instanceId}:${input.sessionId}`,
+      },
+    }),
     listAcpRegistrySessions: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:acp-registry:list-sessions",
       tag: WS_METHODS.serverListAcpRegistrySessions,

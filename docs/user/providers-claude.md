@@ -14,7 +14,16 @@ conversation records.
 T3 discovers background sessions registered in `claude agents --all`, including
 stopped jobs, when their transcript belongs to the selected Claude configuration.
 Ordinary foreground conversations and unregistered historical transcripts are not
-included in the shared-session list. **Shared session directory** limits discovery
+automatically added to the thread list. In the environment’s Claude provider settings,
+use **Browse sessions** to search saved conversations by title, directory or session ID.
+Choose **Continue as shared session** to restore inactive history through Claude’s
+native background mode and open it in T3. A conversation still open in a foreground
+terminal must first be moved with `/bg` in that terminal; refresh the list afterward.
+Opening an already shared session reuses its existing worker. A newly backgrounded
+conversation may not save its transcript until the next reply; T3 shows it as shared
+and brings in its history when Claude saves it. If Claude cannot claim
+the original history and creates a copy, T3 stops that copy without sending a prompt
+and reports the failure. **Shared session directory** limits discovery
 to a directory and its descendants; an empty value includes all directories in
 that Claude configuration. Directory filtering does not stop native work.
 

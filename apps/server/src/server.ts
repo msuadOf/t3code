@@ -617,7 +617,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
       yield* (yield* NativeSessionSync.NativeSessionSync).start;
     }),
   ).pipe(
-    Layer.provide(NativeSessionSync.layer),
+    Layer.provideMerge(NativeSessionSync.layer),
     Layer.provide(RuntimeLayer.layerEventSink),
     Layer.provide(ProjectionStoreV2.layer),
     Layer.provide(IdAllocator.layer),

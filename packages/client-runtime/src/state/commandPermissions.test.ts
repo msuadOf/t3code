@@ -24,6 +24,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import { Atom, AtomRegistry, AsyncResult } from "effect/reactivity";
 import { EnvironmentRegistry } from "../connection/registry.ts";
+import { clientRpcRequiredScopes } from "@t3tools/contracts";
 import { createCommandPermissions } from "./commandPermissions.ts";
 import { createEnvironmentRpcCommand } from "./runtime.ts";
 
@@ -346,3 +347,12 @@ it.effect("rejects protected unary and streamed RPCs outside a guarded command",
     expect(writes).toBe(0);
   }),
 );
+
+it("requires read access to browse native history and operate access to start shared work", () => {
+  expect(clientRpcRequiredScopes(WS_METHODS.nativeSessionsList, {})).toEqual([
+    AuthOrchestrationReadScope,
+  ]);
+  expect(clientRpcRequiredScopes(WS_METHODS.nativeSessionsOpen, {})).toEqual([
+    AuthOrchestrationOperateScope,
+  ]);
+});

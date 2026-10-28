@@ -25,6 +25,7 @@ import { useRemoteConnections } from "../../state/use-remote-environment-registr
 import { ConnectionEnvironmentRow } from "../connection/ConnectionEnvironmentRow";
 import { EnvironmentRoutesSection } from "./EnvironmentRoutesSection";
 import { OutdatedServerUpdateSection } from "./OutdatedServerUpdateSection";
+import { ClaudeSessionSharing } from "./components/ClaudeSessionSharing";
 import { NativeSharedSessionSettings } from "./components/NativeSharedSessionSettings";
 import { SettingsActionRow } from "./components/SettingsActionRow";
 import { SettingsScreen } from "./components/SettingsScreen";
@@ -373,6 +374,13 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
                             environmentId={environmentId}
                             provider={provider}
                             disabled={busy}
+                          />
+                        ) : null}
+                        {provider.driver === "claudeAgent" ? (
+                          <ClaudeSessionSharing
+                            key={`${environmentId}:${provider.instanceId}`}
+                            environmentId={environmentId}
+                            instanceId={provider.instanceId}
                           />
                         ) : null}
                         {canUpdateEnvironmentProvider(provider) ? (

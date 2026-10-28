@@ -33,8 +33,17 @@ export interface NativeHistoryTurn {
   readonly items: ReadonlyArray<NativeHistoryItem>;
 }
 
-/** Observation must never resume a second writer or mutate the native session. */
+/** List/history are read-only; sharing.open is the explicit native ownership transition. */
+export interface NativeSessionCandidate extends NativeSession {
+  readonly historyAvailable?: boolean;
+  readonly sharingState: "history" | "foreground" | "shared";
+}
+
 export interface NativeSessionSource {
+  readonly sharing?: {
+    readonly list: Effect.Effect<ReadonlyArray<NativeSessionCandidate>, ProviderDriverError>;
+    readonly open: (sessionId: string) => Effect.Effect<NativeSession, ProviderDriverError>;
+  };
   readonly list: Effect.Effect<ReadonlyArray<NativeSession>, ProviderDriverError>;
   readonly history: (
     sessionId: string,

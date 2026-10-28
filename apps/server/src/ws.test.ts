@@ -290,7 +290,10 @@ it.live.each(["thread", "shell"] as const)(
 );
 
 // Build the production RPC layer; unrelated capabilities fail if this test calls them.
+import * as NativeSessionSync from "./provider/NativeSessionSync.ts";
+
 const layerUnusedConfigRpcServices = Layer.mergeAll(
+  Layer.mock(NativeSessionSync.NativeSessionSync)({}),
   Layer.mock(ServerSecretStore.ServerSecretStore)({}),
   Layer.mock(WorkspacePaths.WorkspacePaths)({}),
   Layer.mock(TraceDiagnostics.TraceDiagnostics)({}),

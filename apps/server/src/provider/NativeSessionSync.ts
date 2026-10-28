@@ -1,4 +1,9 @@
 import {
+  NativeSessionSharingError,
+  type NativeSessionSharingListInput,
+  type NativeSessionSharingListResult,
+  type NativeSessionSharingOpenInput,
+  type NativeSessionSharingOpenResult,
   type ProviderDriverKind,
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
@@ -21,6 +26,8 @@ import * as Path from "effect/Path";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
+import * as Schema from "effect/Schema";
 import * as ExternalNativeRuns from "../orchestration-v2/ExternalNativeRuns.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -36,9 +43,17 @@ export class NativeSessionSync extends Context.Service<
   NativeSessionSync,
   {
     readonly sync: Effect.Effect<void>;
+    readonly list: (
+      input: NativeSessionSharingListInput,
+    ) => Effect.Effect<NativeSessionSharingListResult, NativeSessionSharingError>;
+    readonly open: (
+      input: NativeSessionSharingOpenInput,
+    ) => Effect.Effect<NativeSessionSharingOpenResult, NativeSessionSharingError>;
     readonly start: Effect.Effect<void, never, Scope.Scope>;
   }
 >()("t3/provider/NativeSessionSync") {}
+
+const isSharingError = Schema.is(NativeSessionSharingError);
 
 const make = Effect.gen(function* () {
   const registry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
@@ -54,6 +69,7 @@ const make = Effect.gen(function* () {
   const revisions = new Map<string, Pick<NativeSession, "updatedAt" | "title" | "archived">>();
   const sourceMetadata = new Map<string, Pick<NativeSession, "title" | "archived">>();
   let scan = 0;
+  const mutation = yield* Semaphore.make(1);
   const ensureThread = Effect.fn("NativeSessionSync.ensureThread")(function* (
     native: NativeSession,
     driver: ProviderDriverKind,
@@ -437,9 +453,117 @@ const make = Effect.gen(function* () {
     }
   });
   const safeSync = sync.pipe(
+    mutation.withPermits(1),
     Effect.catch(() => Effect.logWarning("Native session synchronization unavailable")),
   );
+  const sharingSource = Effect.fn("NativeSessionSync.sharingSource")(function* (
+    instanceId: ProviderInstanceId,
+  ) {
+    const instance = yield* registry.getInstance(instanceId);
+    const source = instance?.nativeSessions?.sharing;
+    if (!instance?.enabled || !source)
+      return yield* new NativeSessionSharingError({ reason: "unavailable" });
+    const settings = yield* settingsService.getSettings;
+    const raw = settings.providerInstances[instanceId]?.config;
+    const root =
+      raw &&
+      typeof raw === "object" &&
+      "sharedSessionRoot" in raw &&
+      typeof raw.sharedSessionRoot === "string"
+        ? expandHomePath(raw.sharedSessionRoot.trim(), home)
+        : undefined;
+    return { instance, source, root };
+  });
+  const list = Effect.fn("NativeSessionSync.list")(
+    function* (input: NativeSessionSharingListInput) {
+      const { source, root } = yield* sharingSource(input.instanceId);
+      const candidates = yield* source.list;
+      const query = input.query?.trim().toLocaleLowerCase() ?? "";
+      const filtered = candidates
+        .filter(
+          (session) =>
+            isWithinSharedRoot(path, session.cwd, root) &&
+            (!query ||
+              `${session.title} ${session.cwd} ${session.id}`.toLocaleLowerCase().includes(query)),
+        )
+        .sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
+      const offset = input.offset ?? 0;
+      return {
+        sessions: filtered.slice(offset, offset + 30).map((session) => ({
+          sessionId: session.id,
+          title: session.title,
+          cwd: session.cwd,
+          updatedAt: session.updatedAt,
+          historyAvailable: session.historyAvailable !== false,
+          state: session.sharingState,
+        })),
+        nextOffset: offset + 30 < filtered.length ? offset + 30 : null,
+      };
+    },
+    Effect.mapError((cause) =>
+      isSharingError(cause) ? cause : new NativeSessionSharingError({ reason: "list-failed" }),
+    ),
+  );
+  const open = Effect.fn("NativeSessionSync.open")(
+    function* (input: NativeSessionSharingOpenInput) {
+      return yield* Effect.gen(function* () {
+        const { instance, source, root } = yield* sharingSource(input.instanceId);
+        const candidate = (yield* source.list).find((session) => session.id === input.sessionId);
+        if (!candidate) return yield* new NativeSessionSharingError({ reason: "unavailable" });
+        if (!isWithinSharedRoot(path, candidate.cwd, root))
+          return yield* new NativeSessionSharingError({ reason: "outside-root" });
+        if (candidate.sharingState === "foreground")
+          return yield* new NativeSessionSharingError({ reason: "foreground" });
+        const shared = yield* source.open(input.sessionId);
+        if (shared.id !== input.sessionId || !isWithinSharedRoot(path, shared.cwd, root))
+          return yield* new NativeSessionSharingError({ reason: "open-failed" });
+        const owners = new Map<string, ThreadId>();
+        const shell = yield* store.getShellSnapshot();
+        for (const thread of [...shell.threads, ...shell.archivedThreads]) {
+          const context = yield* store.getThreadProviderContext(thread.id, instance.instanceId);
+          for (const pt of context.providerThreads)
+            if (
+              pt.providerInstanceId === instance.instanceId &&
+              pt.driver === instance.driverKind &&
+              pt.nativeThreadRef?.nativeId
+            )
+              owners.set(pt.nativeThreadRef.nativeId, thread.id);
+        }
+        const target = yield* ensureThread(
+          shared,
+          instance.driverKind,
+          instance.instanceId,
+          owners,
+          false,
+        );
+        if (!target || target.appThread.deletedAt !== null)
+          return yield* new NativeSessionSharingError({ reason: "open-failed" });
+        if (target.appThread.archivedAt !== null) {
+          const now = yield* DateTime.now;
+          yield* sink.write({
+            events: [
+              {
+                id: yield* ids.allocate.event({ threadId: target.appThread.id }),
+                type: "thread.unarchived",
+                threadId: target.appThread.id,
+                providerInstanceId: instance.instanceId,
+                occurredAt: now,
+                payload: { ...target.appThread, archivedAt: null, updatedAt: now },
+              },
+            ],
+          });
+        }
+        return { threadId: target.appThread.id };
+      }).pipe(mutation.withPermits(1));
+    },
+    Effect.tap(() => safeSync),
+    Effect.mapError((cause) =>
+      isSharingError(cause) ? cause : new NativeSessionSharingError({ reason: "open-failed" }),
+    ),
+  );
   return NativeSessionSync.of({
+    list,
+    open,
     sync: safeSync,
     start: safeSync.pipe(Effect.repeat(Schedule.spaced("3 seconds")), forkParked, Effect.asVoid),
   });

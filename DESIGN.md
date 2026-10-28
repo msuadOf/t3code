@@ -50,6 +50,11 @@ default is **Show text as it arrives**, for both replies and thinking supplied b
 the provider. Finished-paragraph and full-turn display remain explicit choices.
 All surfaces describe the live choice with the same label and meaning.
 
+Claude history discovery lives in each environment’s provider settings, using the
+existing web settings controls and native action rows. Search is explicit, results
+are paginated, and conversion is an explicit action. Foreground sessions show the
+native `/bg` handoff instruction instead of starting a second writer.
+
 ## Do's and Don'ts
 
 - Use the existing settings and conversation components.

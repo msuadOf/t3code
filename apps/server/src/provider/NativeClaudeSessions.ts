@@ -6,8 +6,13 @@ import type {
   NativeHistoryItem,
   NativeHistoryTurn,
   NativeSession,
+  NativeSessionCandidate,
 } from "@t3tools/provider-core/server/nativeSessions";
-import { NativeClaudeClient, type NativeClaudeSession } from "./NativeClaudeClient.ts";
+import {
+  NativeClaudeClient,
+  NativeClaudeError,
+  type NativeClaudeSession,
+} from "./NativeClaudeClient.ts";
 
 type Entry = Record<string, unknown>;
 const object = (value: unknown): value is Entry =>
@@ -202,6 +207,9 @@ export class NativeClaudeSessions {
       entries: decodeNativeClaudeTranscript(await NodeFSP.readFile(file, "utf8")),
       metadata,
     };
+    // Browsing ordinary history must not retain every transcript in the daemon.
+    if (this.cache.size >= 32 && !this.cache.has(file))
+      this.cache.delete(this.cache.keys().next().value!);
     this.cache.set(file, parsed);
     return parsed;
   }
@@ -232,6 +240,20 @@ export class NativeClaudeSessions {
   }
 
   async list(): Promise<readonly NativeSession[]> {
+    return (await this.available(true)).filter((session) => session.sharingState === "shared");
+  }
+
+  async open(sessionId: string): Promise<NativeSession> {
+    const session = (await this.available()).find((session) => session.id === sessionId);
+    if (!session)
+      throw new NativeClaudeError("ENOSESSION", "Claude history is no longer available.");
+    await this.client.startBackground({ sessionId, cwd: session.cwd, resume: true });
+    const shared = (await this.list()).find((session) => session.id === sessionId);
+    if (!shared) throw new NativeClaudeError("ENOJOB", "Claude did not expose the shared session.");
+    return shared;
+  }
+
+  async available(onlyShared = false): Promise<readonly NativeSessionCandidate[]> {
     // CLI inventory failure must be surfaced: otherwise a live writer could appear safely idle.
     const live = await this.client.listSessions();
     this.lastInventory = live;
@@ -240,16 +262,17 @@ export class NativeClaudeSessions {
         .filter((session) => session.kind === "background" && session.sessionId)
         .map((session) => [session.sessionId!, session]),
     );
-    const sessions = new Map<string, NativeSession>();
+    const sessions = new Map<string, NativeSessionCandidate>();
     for (const file of await this.files()) {
-      if (!activeById.has(NodePath.basename(file, ".jsonl"))) continue;
+      const fileId = NodePath.basename(file, ".jsonl");
+      if (onlyShared && !activeById.has(fileId)) continue;
       const { entries, metadata } = await this.transcript(file);
       const first = entries.find(
         (entry) => typeof entry.cwd === "string" && typeof entry.sessionId === "string",
       );
       if (!first || !UUID.test(String(first.sessionId))) continue;
       const id = String(first.sessionId);
-      if (!activeById.has(id)) continue;
+      if (id !== fileId) continue;
       const last = entries.at(-1);
       const renamed = entries.findLast((entry) => typeof entry.customTitle === "string");
       const history = nativeClaudeHistory(entries);
@@ -275,6 +298,14 @@ export class NativeClaudeSessions {
         createdAt: timestamp(first.timestamp, metadata.birthtimeMs),
         updatedAt: timestamp(last?.timestamp, metadata.mtimeMs),
         archived: false,
+        historyAvailable: true,
+        sharingState: live.some(
+          (session) => session.sessionId === id && session.kind === "interactive",
+        )
+          ? "foreground"
+          : activeById.has(id)
+            ? "shared"
+            : "history",
         canObserveActive: activeById.has(id),
         active: (() => {
           const live = activeById.get(id);
@@ -282,9 +313,48 @@ export class NativeClaudeSessions {
         })(),
       });
     }
-    // The daemon inventory is host-wide, not proven account-scoped. Only expose
-    // sessions whose transcript exists under this provider's configuration directory.
+    // A freshly backgrounded foreground conversation may not flush its new
+    // transcript until its next prompt. Its local job record proves config ownership.
+    for (const [id, job] of activeById) {
+      if (sessions.has(id) || !UUID.test(id) || !job.id || !/^[a-f0-9]{8}$/.test(job.id)) continue;
+      const state = await this.localJob(job);
+      if (!state) continue;
+      sessions.set(id, {
+        id,
+        cwd: job.cwd,
+        title: job.name ?? (typeof state.intent === "string" ? state.intent : "Claude session"),
+        createdAt: timestamp(state.createdAt, job.startedAt),
+        updatedAt: timestamp(state.updatedAt, job.startedAt),
+        archived: false,
+        active: job.status === "busy" || job.status === "waiting",
+        canObserveActive: true,
+        historyAvailable: false,
+        sharingState: "shared",
+      });
+    }
     return [...sessions.values()];
+  }
+
+  private async localJob(job: NativeClaudeSession): Promise<Entry | undefined> {
+    if (!job.id || !/^[a-f0-9]{8}$/.test(job.id)) return undefined;
+    let state: unknown;
+    try {
+      state = JSON.parse(
+        await NodeFSP.readFile(
+          NodePath.join(this.configDirectory, "jobs", job.id, "state.json"),
+          "utf8",
+        ),
+      );
+    } catch (error) {
+      if (object(error) && error.code === "ENOENT") return undefined;
+      throw error;
+    }
+    return object(state) &&
+      state.sessionId === job.sessionId &&
+      state.daemonShort === job.id &&
+      state.cwd === job.cwd
+      ? state
+      : undefined;
   }
 
   async history(
@@ -310,6 +380,10 @@ export class NativeClaudeSessions {
         return turn;
       });
     }
+    const job = (inventory ?? this.lastInventory ?? (await this.client.listSessions())).find(
+      (session) => session.kind === "background" && session.sessionId === sessionId,
+    );
+    if (job && (await this.localJob(job))) return [];
     throw new Error("Claude session transcript was not found.");
   }
 }

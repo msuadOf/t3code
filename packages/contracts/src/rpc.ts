@@ -84,6 +84,13 @@ import {
   FilesystemBrowseError,
 } from "./filesystem.ts";
 import {
+  NativeSessionSharingListInput,
+  NativeSessionSharingListResult,
+  NativeSessionSharingOpenInput,
+  NativeSessionSharingOpenResult,
+  NativeSessionSharingError,
+} from "./nativeSessionSharing.ts";
+import {
   AgentSessionImportInput,
   AgentSessionImportProjectChangedError,
   AgentSessionImportProjectNotFoundError,
@@ -395,6 +402,8 @@ export const WS_METHODS = {
 
   filesystemBrowse: "filesystem.browse",
   filesystemGetMetadata: "filesystem.getMetadata",
+  nativeSessionsList: "nativeSessions.list",
+  nativeSessionsOpen: "nativeSessions.open",
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
   assetsCreateUrl: "assets.createUrl",
@@ -1275,6 +1284,17 @@ const WsFilesystemBrowseRpc = Rpc.make(WS_METHODS.filesystemBrowse, {
   error: Schema.Union([FilesystemBrowseError, EnvironmentAuthorizationError]),
 });
 
+const WsNativeSessionsListRpc = Rpc.make(WS_METHODS.nativeSessionsList, {
+  payload: NativeSessionSharingListInput,
+  success: NativeSessionSharingListResult,
+  error: Schema.Union([NativeSessionSharingError, EnvironmentAuthorizationError]),
+});
+const WsNativeSessionsOpenRpc = Rpc.make(WS_METHODS.nativeSessionsOpen, {
+  payload: NativeSessionSharingOpenInput,
+  success: NativeSessionSharingOpenResult,
+  error: Schema.Union([NativeSessionSharingError, EnvironmentAuthorizationError]),
+});
+
 const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   payload: AgentSessionScanInput,
   success: AgentSessionScanResult,
@@ -1998,6 +2018,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
   WsFilesystemGetMetadataRpc,
+  WsNativeSessionsListRpc,
+  WsNativeSessionsOpenRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,
