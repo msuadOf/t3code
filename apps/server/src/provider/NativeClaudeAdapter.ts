@@ -35,6 +35,7 @@ import {
   NativeClaudeError,
   requireNativeClaudeBackgroundId,
   type NativeClaudeSession,
+  type NativeClaudeModelActivity,
 } from "./NativeClaudeClient.ts";
 import { NativeClaudeSessions } from "./NativeClaudeSessions.ts";
 
@@ -136,6 +137,8 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
   readonly binaryPath: string;
   readonly environment: NodeJS.ProcessEnv;
   readonly client?: NativeClaudeClient;
+  readonly modelActivity?: NativeClaudeModelActivity;
+  readonly observeNewSessions?: boolean;
 }) {
   const allocator = yield* IdAllocator.IdAllocatorV2;
   const platform = yield* HostProcess.Platform;
@@ -146,6 +149,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
       configDirectory: options.configDirectory,
       binaryPath: options.binaryPath || "claude",
       environment: options.environment,
+      ...(options.modelActivity ? { modelActivity: options.modelActivity } : {}),
     });
   const source = new NativeClaudeSessions(options.configDirectory, client);
   const capabilities = nativeClaudeCapabilities;
@@ -826,6 +830,9 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
               cwd: request.runtimePolicy.cwd ?? process.cwd(),
               model: request.modelSelection.model,
               resume: existing !== undefined,
+              ...(existing === undefined && options.observeNewSessions
+                ? { observeModelActivity: true }
+                : {}),
             }),
           );
           const id = job.sessionId;

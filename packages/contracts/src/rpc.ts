@@ -1,4 +1,9 @@
 import {
+  ModelActivitySubscribeInput,
+  ModelActivityFrame,
+  ModelActivityError,
+} from "./modelActivity.ts";
+import {
   OrchestrationV2SearchThreadError,
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -402,6 +407,7 @@ export const WS_METHODS = {
 
   filesystemBrowse: "filesystem.browse",
   filesystemGetMetadata: "filesystem.getMetadata",
+  modelActivitySubscribe: "modelActivity.subscribe",
   nativeSessionsList: "nativeSessions.list",
   nativeSessionsOpen: "nativeSessions.open",
   agentSessionsScan: "agentSessions.scan",
@@ -1284,6 +1290,13 @@ const WsFilesystemBrowseRpc = Rpc.make(WS_METHODS.filesystemBrowse, {
   error: Schema.Union([FilesystemBrowseError, EnvironmentAuthorizationError]),
 });
 
+const WsModelActivitySubscribeRpc = Rpc.make(WS_METHODS.modelActivitySubscribe, {
+  payload: ModelActivitySubscribeInput,
+  success: ModelActivityFrame,
+  error: Schema.Union([ModelActivityError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
 const WsNativeSessionsListRpc = Rpc.make(WS_METHODS.nativeSessionsList, {
   payload: NativeSessionSharingListInput,
   success: NativeSessionSharingListResult,
@@ -2018,6 +2031,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
   WsFilesystemGetMetadataRpc,
+  WsModelActivitySubscribeRpc,
   WsNativeSessionsListRpc,
   WsNativeSessionsOpenRpc,
   WsAgentSessionsScanRpc,

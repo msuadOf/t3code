@@ -3187,7 +3187,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   };
           return {
             ...thread,
-            ...(command.title === undefined ? {} : { title: command.title }),
+            ...(command.title === undefined
+              ? {}
+              : { title: command.title, titleSource: "user" as const }),
             ...(command.limitRecovery === undefined ? {} : { limitRecovery }),
             ...(command.limitRecovery !== undefined &&
             limitRecovery?.snooze === true &&
@@ -3460,6 +3462,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ? {
                 ...thread,
                 ...(command.title === undefined ? {} : { title: command.title }),
+                ...(command.titleSource === undefined ? {} : { titleSource: command.titleSource }),
                 titleRegeneration: null,
                 updatedAt: now,
               }

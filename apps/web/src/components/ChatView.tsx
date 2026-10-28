@@ -1,3 +1,4 @@
+import { ModelActivityPanel } from "./chat/ModelActivityPanel";
 import { ScrollToEndButton, WorkspaceFileDropOverlay } from "./chat/TimelineOverlays";
 import { usePasteToFocusComposer } from "./chat/usePasteToFocusComposer";
 import {
@@ -3211,6 +3212,13 @@ export default function ChatView(props: ChatViewProps) {
               : {})}
           />
         </header>
+        {isServerThread && !paintOnlyDisplayedTimeline ? (
+          <ModelActivityPanel
+            key={`${environmentId}:${activeThread.id}`}
+            environmentId={environmentId}
+            threadId={activeThread.id}
+          />
+        ) : null}
 
         <div className="relative flex min-h-0 min-w-0 flex-1">
           <ThreadFindCanvas

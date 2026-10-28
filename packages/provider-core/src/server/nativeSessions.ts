@@ -37,13 +37,23 @@ export interface NativeHistoryTurn {
 /** List/history are read-only; sharing.open is the explicit native ownership transition. */
 export interface NativeSessionCandidate extends NativeSession {
   readonly historyAvailable?: boolean;
+  readonly modelActivityAvailable?: boolean;
   readonly sharingState: "history" | "foreground" | "shared";
 }
 
 export interface NativeSessionSource {
+  readonly identityDirectory?: string;
+  /** Native model IDs confirmed by persisted history, independent of native entry UUIDs. */
+  readonly confirmedModelMessageIds?: (
+    sessionId: string,
+  ) => Effect.Effect<ReadonlyArray<string>, ProviderDriverError>;
+
   readonly sharing?: {
     readonly list: Effect.Effect<ReadonlyArray<NativeSessionCandidate>, ProviderDriverError>;
-    readonly open: (sessionId: string) => Effect.Effect<NativeSession, ProviderDriverError>;
+    readonly open: (
+      sessionId: string,
+      options?: { readonly observeModelActivity?: boolean },
+    ) => Effect.Effect<NativeSession, ProviderDriverError>;
   };
   readonly list: Effect.Effect<ReadonlyArray<NativeSession>, ProviderDriverError>;
   readonly history: (

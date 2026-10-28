@@ -222,6 +222,7 @@ describe("ThreadTitleRegenerationService", () => {
         });
         const renamed = yield* threads.getThreadProjection(threadId);
         assert.equal(renamed.thread.title, "Manual title");
+        assert.equal(renamed.thread.titleSource, "user");
         assert.isNotOk(renamed.thread.titleRegeneration);
       }).pipe(Effect.provide(harness.layer));
     }),

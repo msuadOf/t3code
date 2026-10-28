@@ -40,8 +40,9 @@ sessions retain their own model, permission, and environment options.
 
 The current native daemon integration has these limits:
 
-- Replies, tool output, and thinking blocks appear after Claude persists them.
-  Live reasoning token streaming is unavailable.
+- Saved replies, tool output, and thinking blocks appear after Claude persists them.
+  Opt-in local model activity can show provisional text and thinking earlier;
+  see [Local model activity](#local-model-activity).
 - T3 can display and answer a native `AskUserQuestion` containing one single-select
   or free-text question. It waits for Claude’s actual tool result before marking
   the answer complete; submission alone is not confirmation. Multi-question and
@@ -74,6 +75,36 @@ The current native daemon integration has these limits:
   endpoints in that configuration directory's `settings.json` under `env`.
 - Local Windows native-daemon hosting has not been implemented. Clients on Windows
   can connect to a supported remote host.
+
+## Local model activity
+
+For an API-key connection to the Anthropic Messages API or a compatible gateway,
+set **Local model activity upstream** to the base URL in Claude provider settings.
+Enable **Observe model activity in new sessions** to route newly created workers
+through the local observer, or choose **Continue with model activity** for inactive
+history. This is experimental and off by default. OAuth subscription connections,
+Bedrock and Vertex are not supported by this observer.
+
+Web, desktop and mobile show the same **Model activity** panel. It receives real
+response increments, including available text, thinking and partial tool input.
+These responses can include auxiliary model requests and are marked **Not yet saved
+by Claude**. Only a matching message saved by Claude changes the status to **Saved
+in conversation** and collapses that response; provisional activity does not become
+conversation history or future context. Missing or trimmed activity is indicated.
+
+The observer runs on the environment's machine and forwards model traffic to the
+upstream you configured. It does not use Anthropic Remote Control. It keeps a
+bounded response buffer in memory and does not save model request bodies or headers.
+Closing a client or restarting T3 leaves its native worker and observer running.
+A stopped observer can be restored when T3 reopens the bound worker; an interrupted
+model request is not replayed automatically.
+
+A running worker cannot be upgraded in place. Stop it through Claude before
+explicitly reopening its inactive history with observation. Changing the upstream
+or disabling the new-session switch affects future launches; previously observed
+workers retain their original route. To stop observing one, stop its worker and
+reopen it normally through Claude without the observer settings. Global Claude
+settings are not changed.
 
 ## Separate accounts or configurations
 

@@ -1,3 +1,4 @@
+import { ModelActivityPanel } from "./ModelActivityPanel";
 import { useSidebarWorkspaceTabs } from "../workspace/useSystemWorkspaceTabBar";
 import {
   isAtomCommandInterrupted,
@@ -1342,6 +1343,11 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                 ? "absolute inset-0 bg-thread-canvas"
                 : "absolute inset-0 bg-screen"
             }
+          />
+          <ModelActivityPanel
+            key={selectedThreadKey}
+            environmentId={props.environmentId}
+            threadId={props.selectedThread.id}
           />
           <RenderErrorBoundary
             key={selectedThreadKey}

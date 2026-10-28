@@ -127,6 +127,7 @@ const make = Effect.gen(function* () {
       id: threadId,
       projectId: project.id,
       title: native.title.trim() || `${driver} session`,
+      titleSource: "native",
       providerInstanceId: instanceId,
       modelSelection: {
         instanceId,
@@ -281,10 +282,10 @@ const make = Effect.gen(function* () {
                 target.appThread.historyOrigin !== "v1_import")
             ) {
               const titleChanged =
-                previousMetadata !== undefined &&
-                previousMetadata.title !== native.title &&
-                (instance.driverKind !== "claudeAgent" ||
-                  target.appThread.title === previousMetadata.title);
+                instance.driverKind === "claudeAgent"
+                  ? target.appThread.titleSource === "native" &&
+                    target.appThread.title !== native.title
+                  : previousMetadata !== undefined && previousMetadata.title !== native.title;
               const archiveChanged =
                 previousMetadata !== undefined && previousMetadata.archived !== native.archived;
               // Claude's existing worker owns model selection. Its persisted replies
@@ -306,6 +307,9 @@ const make = Effect.gen(function* () {
                 target.appThread = {
                   ...target.appThread,
                   title,
+                  ...(titleChanged && instance.driverKind === "claudeAgent"
+                    ? { titleSource: "native" as const }
+                    : {}),
                   modelSelection: modelChanged
                     ? { ...target.appThread.modelSelection, model }
                     : target.appThread.modelSelection,
@@ -502,6 +506,9 @@ const make = Effect.gen(function* () {
           cwd: session.cwd,
           updatedAt: session.updatedAt,
           historyAvailable: session.historyAvailable !== false,
+          ...(session.modelActivityAvailable === undefined
+            ? {}
+            : { modelActivityAvailable: session.modelActivityAvailable }),
           state: session.sharingState,
         })),
         nextOffset: offset + 30 < filtered.length ? offset + 30 : null,
@@ -521,7 +528,12 @@ const make = Effect.gen(function* () {
           return yield* new NativeSessionSharingError({ reason: "outside-root" });
         if (candidate.sharingState === "foreground")
           return yield* new NativeSessionSharingError({ reason: "foreground" });
-        const shared = yield* source.open(input.sessionId);
+        const shared = yield* source.open(
+          input.sessionId,
+          input.observeModelActivity === undefined
+            ? undefined
+            : { observeModelActivity: input.observeModelActivity },
+        );
         if (shared.id !== input.sessionId || !isWithinSharedRoot(path, shared.cwd, root))
           return yield* new NativeSessionSharingError({ reason: "open-failed" });
         const owners = new Map<string, ThreadId>();

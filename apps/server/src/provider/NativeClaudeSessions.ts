@@ -255,11 +255,14 @@ export class NativeClaudeSessions {
     return (await this.available(true)).filter((session) => session.sharingState === "shared");
   }
 
-  async open(sessionId: string): Promise<NativeSession> {
+  async open(
+    sessionId: string,
+    options?: { readonly observeModelActivity?: boolean },
+  ): Promise<NativeSession> {
     const session = (await this.available()).find((session) => session.id === sessionId);
     if (!session)
       throw new NativeClaudeError("ENOSESSION", "Claude history is no longer available.");
-    await this.client.startBackground({ sessionId, cwd: session.cwd, resume: true });
+    await this.client.startBackground({ sessionId, cwd: session.cwd, resume: true, ...options });
     const shared = (await this.list()).find((session) => session.id === sessionId);
     if (!shared) throw new NativeClaudeError("ENOJOB", "Claude did not expose the shared session.");
     return shared;
@@ -370,6 +373,29 @@ export class NativeClaudeSessions {
       state.cwd === job.cwd
       ? state
       : undefined;
+  }
+
+  async confirmedModelMessageIds(sessionId: string): Promise<readonly string[]> {
+    if (!UUID.test(sessionId)) throw new Error("Invalid Claude session ID.");
+    for (const file of await this.files()) {
+      if (NodePath.basename(file, ".jsonl").toLowerCase() !== sessionId.toLowerCase()) continue;
+      const entries = (await this.transcript(file)).entries;
+      const ids = new Set<string>();
+      // Only persisted model IDs establish provenance; transcript entry UUIDs do not.
+      for (let index = entries.length - 1; index >= 0 && ids.size < 256; index--) {
+        const entry = entries[index]!;
+        if (entry.type !== "assistant" || entry.sessionId !== sessionId || !object(entry.message))
+          continue;
+        if (typeof entry.message.id === "string" && entry.message.id.length > 0)
+          ids.add(entry.message.id);
+      }
+      return [...ids];
+    }
+    const job = (this.lastInventory ?? (await this.client.listSessions())).find(
+      (session) => session.kind === "background" && session.sessionId === sessionId,
+    );
+    if (job && (await this.localJob(job))) return [];
+    throw new Error("Claude session transcript was not found.");
   }
 
   async history(

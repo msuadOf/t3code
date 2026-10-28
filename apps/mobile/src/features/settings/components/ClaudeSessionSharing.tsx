@@ -62,12 +62,19 @@ export function ClaudeSessionSharing({
       );
     }
   }
-  async function openSession(sessionId: string) {
+  async function openSession(sessionId: string, observeModelActivity = false) {
     if (gate.current || !canOpen) return;
     gate.current = true;
     setBusy(true);
     setError(null);
-    const result = await open({ environmentId, input: { instanceId, sessionId } });
+    const result = await open({
+      environmentId,
+      input: {
+        instanceId,
+        sessionId,
+        ...(observeModelActivity ? { observeModelActivity: true } : {}),
+      },
+    });
     gate.current = false;
     setBusy(false);
     if (result._tag === "Success") {
@@ -157,6 +164,14 @@ export function ClaudeSessionSharing({
               onPress={() => void openSession(session.sessionId)}
             />
           )}
+          {session.state === "history" && session.modelActivityAvailable === true ? (
+            <SettingsActionRow
+              label="Continue with model activity"
+              description="Off by default. Shows temporary model responses until Claude saves them. Available for inactive history only."
+              disabled={busy || !canOpen || query !== loadedQuery}
+              onPress={() => void openSession(session.sessionId, true)}
+            />
+          ) : null}
         </View>
       ))}
       {nextOffset !== null ? (

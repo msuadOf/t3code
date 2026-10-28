@@ -1,7 +1,14 @@
 import { makeClaudeScopedLimitNames } from "../claudeUsageLimits.ts";
 import { makeNativeClaudeAdapter } from "../NativeClaudeAdapter.ts";
-import { NativeClaudeClient } from "../NativeClaudeClient.ts";
+import { NativeClaudeClient, type NativeClaudeModelActivity } from "../NativeClaudeClient.ts";
 import { NativeClaudeSessions } from "../NativeClaudeSessions.ts";
+import { ensureClaudeModelObserver } from "../ClaudeModelObserver.ts";
+import {
+  isClaudeModelObserverBindingCurrent,
+  prepareClaudeModelObserverSettings,
+  readClaudeModelObserverBinding,
+  writeClaudeModelObserverBinding,
+} from "../ClaudeModelObserverBindings.ts";
 import { ClaudeSettings, ProviderDriverKind } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Duration from "effect/Duration";
@@ -169,10 +176,59 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       continuationGroupKey,
     });
 
+    const modelActivity: NativeClaudeModelActivity = {
+      recoverBound: async (nativeSessionId) => {
+        const binding = await readClaudeModelObserverBinding({
+          stateDir,
+          instanceId,
+          nativeSessionId,
+        });
+        if (
+          binding &&
+          (await isClaudeModelObserverBindingCurrent({
+            stateDir,
+            instanceId,
+            nativeSessionId,
+            configDirectory: configDir,
+          }))
+        ) {
+          await ensureClaudeModelObserver({
+            stateDir: binding.observerStateDir,
+            upstreamUrl: binding.upstreamUrl,
+          });
+        }
+      },
+      prepare: async () => {
+        const upstreamUrl = effectiveConfig.modelActivityUpstreamUrl?.trim();
+        if (!upstreamUrl)
+          throw new Error("Configure a Messages upstream before enabling model activity.");
+        return prepareClaudeModelObserverSettings({ stateDir, instanceId, upstreamUrl });
+      },
+      bind: (nativeSessionId, prepared) =>
+        writeClaudeModelObserverBinding({
+          stateDir,
+          instanceId,
+          nativeSessionId,
+          configDirectory: configDir,
+          observerStateDir: prepared.observerStateDir,
+          upstreamUrl: prepared.upstreamUrl,
+        }),
+      isBound: async (nativeSessionId) => {
+        return isClaudeModelObserverBindingCurrent({
+          stateDir,
+          instanceId,
+          nativeSessionId,
+          configDirectory: configDir,
+        });
+      },
+    };
+
     const scopedLimitNames = yield* makeClaudeScopedLimitNames;
     const orchestrationAdapter = yield* makeNativeClaudeAdapter({
       instanceId,
       configDirectory: configDir,
+      modelActivity,
+      observeNewSessions: effectiveConfig.modelActivityForNewSessions === true,
       binaryPath: effectiveConfig.binaryPath,
       environment: { ...processEnv, CLAUDE_CONFIG_DIR: configDir },
     }).pipe(
@@ -383,6 +439,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       configDir,
       new NativeClaudeClient({
         configDirectory: configDir,
+        modelActivity,
         platform: yield* HostProcess.Platform,
         binaryPath: effectiveConfig.binaryPath || "claude",
         environment: { ...processEnv, CLAUDE_CONFIG_DIR: configDir },
@@ -420,14 +477,26 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         ),
       orchestrationAdapter,
       nativeSessions: {
-        sharing: {
-          list: Effect.tryPromise({
-            try: () => nativeClaudeSessions.available(),
+        identityDirectory: configDir,
+        confirmedModelMessageIds: (sessionId) =>
+          Effect.tryPromise({
+            try: () => nativeClaudeSessions.confirmedModelMessageIds(sessionId),
             catch: nativeSessionError,
           }),
-          open: (sessionId) =>
+        sharing: {
+          list: Effect.tryPromise({
+            try: async () =>
+              (await nativeClaudeSessions.available()).map((session) => ({
+                ...session,
+                modelActivityAvailable:
+                  session.sharingState === "history" &&
+                  Boolean(effectiveConfig.modelActivityUpstreamUrl?.trim()),
+              })),
+            catch: nativeSessionError,
+          }),
+          open: (sessionId, options) =>
             Effect.tryPromise({
-              try: () => nativeClaudeSessions.open(sessionId),
+              try: () => nativeClaudeSessions.open(sessionId, options),
               catch: nativeSessionError,
             }),
         },

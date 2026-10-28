@@ -17,7 +17,11 @@ if (
   // Guard sockets before either dispatch path can load outbound-capable modules.
   const { ignoreMacosTypeOfServiceEinval } = await import("./outboundHttp.ts");
   ignoreMacosTypeOfServiceEinval();
-  if (command === "__opencode-observer") {
+  if (command === "__claude-model-observer") {
+    const { runClaudeModelObserverWorker } =
+      await import("./provider/ClaudeModelObserverWorker.ts");
+    await runClaudeModelObserverWorker();
+  } else if (command === "__opencode-observer") {
     const { runOpenCode2ObserverWorker } =
       await import("@t3tools/provider-opencode/server/v2/OpenCode2ObserverWorker");
     await runOpenCode2ObserverWorker();

@@ -89,7 +89,22 @@ export function requireNativeClaudeBackgroundId(session: NativeClaudeSession): s
   return session.id;
 }
 
+export interface NativeClaudeModelActivity {
+  readonly prepare: () => Promise<{
+    readonly settingsPath: string;
+    readonly observerStateDir: string;
+    readonly upstreamUrl: string;
+  }>;
+  readonly bind: (
+    sessionId: string,
+    prepared: Awaited<ReturnType<NativeClaudeModelActivity["prepare"]>>,
+  ) => Promise<void>;
+  readonly isBound: (sessionId: string) => Promise<boolean>;
+  readonly recoverBound?: (sessionId: string) => Promise<void>;
+}
+
 export interface NativeClaudeClientOptions {
+  readonly modelActivity?: NativeClaudeModelActivity;
   readonly configDirectory?: string;
   readonly platform?: NodeJS.Platform;
   readonly binaryPath?: string;
@@ -453,6 +468,7 @@ export class NativeClaudeClient {
     readonly model?: string;
     readonly permissionMode?: string;
     readonly resume?: boolean;
+    readonly observeModelActivity?: boolean;
   }): Promise<NativeClaudeSession> {
     if (this.options.platform === "win32")
       throw new NativeClaudeError(
@@ -465,11 +481,34 @@ export class NativeClaudeClient {
     );
     if (foreground) requireNativeClaudeBackgroundId(foreground);
     const existing = inventory.find((value) => value.sessionId === input.sessionId);
+    const activity = this.options.modelActivity;
+    if (input.observeModelActivity && !activity)
+      throw new NativeClaudeError(
+        "EOBSERVERUNAVAILABLE",
+        "Model activity observation is not configured for this Claude provider.",
+      );
+    const bound =
+      input.observeModelActivity && existing?.sessionId
+        ? await activity!.isBound(existing.sessionId)
+        : false;
     if (existing) {
       requireNativeClaudeBackgroundId(existing);
-      if (existing.state === "failed" || existing.state === "stopped")
-        return this.wakeBackground(existing, input.cwd);
-      return this.readyBackground(existing);
+      const stopped = existing.state === "failed" || existing.state === "stopped";
+      if (input.observeModelActivity && !bound && !stopped)
+        throw new NativeClaudeError(
+          "EOBSERVERUPGRADE",
+          "This Claude worker is already running without model activity observation. Stop it in Claude before explicitly reopening it with observation.",
+        );
+      if (!input.observeModelActivity || bound) {
+        if (
+          activity?.recoverBound &&
+          existing.sessionId &&
+          (bound || (await activity.isBound(existing.sessionId)))
+        )
+          await activity.recoverBound(existing.sessionId);
+        if (stopped) return this.wakeBackground(existing, input.cwd);
+        return this.readyBackground(existing);
+      }
     }
     if (
       input.resume &&
@@ -479,8 +518,10 @@ export class NativeClaudeClient {
         "ESESSION",
         "A canonical full Claude session UUID is required to resume its history.",
       );
+    const prepared = input.observeModelActivity ? await activity!.prepare() : undefined;
     const args = [
       "--bg",
+      ...(prepared ? ["--settings", prepared.settingsPath] : []),
       // Saved sessions retain their own options; overrides make the CLI fork a copy.
       ...(input.resume && input.sessionId
         ? ["--resume", input.sessionId]
@@ -513,7 +554,9 @@ export class NativeClaudeClient {
         "Claude could not claim the original session and created a separate copy. That copy was stopped; no message was sent. Reopen the original session after its CLI ownership changes.",
       );
     }
-    return this.readyBackground(created);
+    const ready = await this.readyBackground(created);
+    if (prepared && ready.sessionId) await activity!.bind(ready.sessionId, prepared);
+    return ready;
   }
 
   async interrupt(session: NativeClaudeSession): Promise<void> {

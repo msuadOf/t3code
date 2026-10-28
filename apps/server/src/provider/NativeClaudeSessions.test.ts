@@ -345,3 +345,45 @@ it.effect("discovers a lazy background handoff only with a matching local job re
     expect(yield* Effect.promise(() => source.history(id))).toEqual([]);
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
+
+it.effect("confirms only persisted native model message IDs with a bounded recent set", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped();
+    const sessionId = "11111111-1111-4111-8111-111111111111";
+    const project = path.join(root, "projects", "test");
+    yield* fs.makeDirectory(project, { recursive: true });
+    const file = path.join(project, `${sessionId}.jsonl`);
+    const entries = Array.from({ length: 260 }, (_, index) => ({
+      type: "assistant",
+      sessionId,
+      uuid: `entry-${index}`,
+      message: { id: `model-${index}` },
+    }));
+    entries.push({ type: "assistant", sessionId, uuid: "duplicate", message: { id: "model-259" } });
+    entries.push({ type: "user", sessionId, uuid: "not-model", message: { id: "user-id" } });
+    entries.push({
+      type: "assistant",
+      sessionId: "other-session",
+      uuid: "wrong-session",
+      message: { id: "wrong-model" },
+    });
+    yield* fs.writeFileString(
+      file,
+      entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+    );
+    const source = new NativeClaudeSessions(root, new NativeClaudeClient());
+    const ids = yield* Effect.promise(() => source.confirmedModelMessageIds(sessionId));
+    expect(ids).toHaveLength(256);
+    expect(ids[0]).toBe("model-259");
+    expect(ids.at(-1)).toBe("model-4");
+    yield* fs.writeFileString(
+      file,
+      JSON.stringify({ type: "assistant", sessionId, message: { id: "saved-later" } }) + "\n",
+    );
+    expect(yield* Effect.promise(() => source.confirmedModelMessageIds(sessionId))).toEqual([
+      "saved-later",
+    ]);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);

@@ -14,6 +14,7 @@ import { appAtomRegistry } from "../../../state/atom-registry";
 import { serverEnvironment } from "../../../state/server";
 import { readEnvironmentScope, useEnvironmentScope } from "../../../state/session";
 import { useAtomCommand } from "../../../state/use-atom-command";
+import { SettingsSwitchRow } from "./SettingsSwitchRow";
 import { SettingsActionRow } from "./SettingsActionRow";
 
 function configRecord(config: unknown): Record<string, unknown> {
@@ -41,19 +42,35 @@ export function NativeSharedSessionSettings({
   const endpoint = typeof savedEndpoint === "string" ? savedEndpoint : "";
   const name = provider.displayName ?? (isCodex ? "Codex" : isClaude ? "Claude" : "OpenCode");
   const root = typeof saved.sharedSessionRoot === "string" ? saved.sharedSessionRoot : "";
-  const [draft, setDraft] = useState<{ endpoint: string; root: string } | null>(null);
+  const upstream =
+    typeof saved.modelActivityUpstreamUrl === "string" ? saved.modelActivityUpstreamUrl : "";
+  const observeNew = saved.modelActivityForNewSessions === true;
+  const [draft, setDraft] = useState<{
+    endpoint: string;
+    root: string;
+    upstream: string;
+    observeNew: boolean;
+  } | null>(null);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const canManage = useEnvironmentScope(environmentId, AuthProvidersManageScope);
   const updateSettings = useAtomCommand(serverEnvironment.mutateProviderInstance);
-  const value = draft ?? { endpoint, root };
+  const value = draft ?? { endpoint, root, upstream, observeNew };
   const needsCliLogin = isCodex && saved.setupMode === "managed";
-  const dirty = needsCliLogin || value.endpoint.trim() !== endpoint || value.root.trim() !== root;
+  const dirty =
+    needsCliLogin ||
+    value.endpoint.trim() !== endpoint ||
+    value.root.trim() !== root ||
+    (isClaude && (value.upstream.trim() !== upstream || value.observeNew !== observeNew));
   const unavailable = disabled || !canManage || saving;
 
   async function save() {
     if (unavailable || savingRef.current || !dirty) return;
+    if (isClaude && value.observeNew && !value.upstream.trim()) {
+      setError("Enter the model activity upstream URL before enabling observation.");
+      return;
+    }
     if (!readEnvironmentScope(environmentId, AuthProvidersManageScope)) return;
     const latest = appAtomRegistry.get(serverEnvironment.configValueAtom(environmentId));
     const current = latest?.settings.providerInstances[provider.instanceId];
@@ -78,6 +95,12 @@ export function NativeSharedSessionSettings({
               ...(isCodex ? { setupMode: "existing", shadowHomePath: "", launchArgs: "" } : {}),
               ...(!isClaude ? { [endpointKey]: value.endpoint.trim() } : {}),
               sharedSessionRoot: value.root.trim(),
+              ...(isClaude
+                ? {
+                    modelActivityUpstreamUrl: value.upstream.trim(),
+                    modelActivityForNewSessions: value.observeNew,
+                  }
+                : {}),
             },
           },
         },
@@ -132,12 +155,48 @@ export function NativeSharedSessionSettings({
         <Text className="text-sm text-foreground-muted">
           Includes subdirectories on the environment’s machine. Leave empty to share all sessions.
         </Text>
+        {isClaude ? (
+          <>
+            <Text className="text-sm text-foreground">Model activity upstream URL</Text>
+            <TextInput
+              accessibilityLabel="Model activity upstream URL"
+              className="rounded-lg border border-border-subtle px-3 py-2 text-base text-foreground"
+              placeholderTextColorClassName="accent-foreground-muted"
+              placeholder="Your API gateway URL"
+              value={value.upstream}
+              editable={!unavailable}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              onChangeText={(upstream) => setDraft({ ...value, upstream })}
+            />
+            <Text className="text-sm text-foreground-muted">
+              Optional local observation of model responses. API key or API gateway configurations
+              only; not Claude subscription / OAuth login. Use the same upstream your CLI already
+              uses. Do not put API keys in the URL.
+            </Text>
+            <Text className="text-sm text-foreground-muted">
+              Off by default. Enabling this applies to new Claude sessions and routes their model
+              requests through this environment’s local observer. Observed responses are not the
+              saved conversation.
+            </Text>
+          </>
+        ) : null}
         {error ? (
           <Text accessibilityRole="alert" className="text-sm text-danger-foreground">
             {error}
           </Text>
         ) : null}
       </View>
+      {isClaude ? (
+        <SettingsSwitchRow
+          label="Observe model activity for new sessions"
+          subtitle="API key / gateway only. Existing sessions are unchanged."
+          value={value.observeNew}
+          disabled={unavailable}
+          onValueChange={(observeNew) => setDraft({ ...value, observeNew })}
+        />
+      ) : null}
       <SettingsActionRow
         icon="checkmark"
         label={needsCliLogin ? "Use CLI login" : `Save ${name} sharing settings`}

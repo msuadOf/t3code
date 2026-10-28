@@ -53,6 +53,7 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly requestId: CommandId;
     readonly title?: string;
+    readonly titleSource?: "native" | "user" | "automatic";
   }) =>
     threads
       .dispatch({
@@ -61,6 +62,7 @@ const make = Effect.gen(function* () {
         threadId: input.threadId,
         requestId: input.requestId,
         ...(input.title === undefined ? {} : { title: input.title }),
+        ...(input.titleSource === undefined ? {} : { titleSource: input.titleSource }),
       })
       .pipe(Effect.asVoid);
 
@@ -69,7 +71,11 @@ const make = Effect.gen(function* () {
   )(function* (input) {
     const outcome:
       | { readonly type: "stale" }
-      | { readonly type: "complete"; readonly title?: string } = yield* Effect.gen(function* () {
+      | {
+          readonly type: "complete";
+          readonly title?: string;
+          readonly titleSource?: "native" | "user" | "automatic";
+        } = yield* Effect.gen(function* () {
       const projection = yield* threads.getThreadRecords(
         input.threadId,
         ["messages"],
@@ -84,7 +90,8 @@ const make = Effect.gen(function* () {
       if (input.kind.type === "initial") {
         const instance = yield* providers.getInstance(projection.thread.modelSelection.instanceId);
         // Native Claude workers name their own conversations after execution begins.
-        if (instance?.driverKind === "claudeAgent") return { type: "complete" as const };
+        if (instance?.driverKind === "claudeAgent")
+          return { type: "complete" as const, titleSource: "native" as const };
       }
 
       const project = yield* projects.get(projection.thread.projectId);
@@ -153,6 +160,14 @@ const make = Effect.gen(function* () {
     yield* complete({
       ...input,
       ...(outcome.title === undefined ? {} : { title: outcome.title }),
+      ...(outcome.titleSource === undefined
+        ? outcome.title === undefined
+          ? {}
+          : {
+              titleSource:
+                input.kind.type === "initial" ? ("automatic" as const) : ("user" as const),
+            }
+        : { titleSource: outcome.titleSource }),
     });
   });
 

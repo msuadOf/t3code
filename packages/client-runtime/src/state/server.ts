@@ -1,3 +1,9 @@
+import { emptyModelActivityState, reduceModelActivity } from "./modelActivity.ts";
+export type {
+  ModelActivityState,
+  ModelActivityRequest,
+  ModelActivityBlock,
+} from "./modelActivity.ts";
 import {
   type EnvironmentId,
   type ServerConfig,
@@ -1138,6 +1144,14 @@ export function createServerEnvironmentAtoms<R, E>(
               : Effect.succeed(summary),
           ),
         ),
+    }),
+    modelActivity: createEnvironmentSubscriptionAtomFamily(runtime, {
+      label: "environment-data:thread:model-activity",
+      subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.modelActivitySubscribe>) =>
+        subscribe(WS_METHODS.modelActivitySubscribe, input).pipe(
+          Stream.scan(() => emptyModelActivityState, reduceModelActivity),
+        ),
+      idleTtlMs: 0,
     }),
     resourceTelemetry: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:resource-telemetry",

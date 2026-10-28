@@ -148,6 +148,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.shellOpenInEditor]: "workspace",
   [WS_METHODS.filesystemBrowse]: "workspace",
   [WS_METHODS.filesystemGetMetadata]: "workspace",
+  [WS_METHODS.modelActivitySubscribe]: "workspace",
   [WS_METHODS.nativeSessionsList]: "workspace",
   [WS_METHODS.nativeSessionsOpen]: "workspace",
   [WS_METHODS.agentSessionsScan]: "workspace",

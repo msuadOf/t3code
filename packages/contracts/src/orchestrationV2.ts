@@ -379,6 +379,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
+  titleSource: Schema.optional(Schema.Literals(["native", "user", "automatic"])),
   providerInstanceId: ProviderInstanceId,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -2775,6 +2776,7 @@ export const OrchestrationV2Command = Schema.Union([
     threadId: ThreadId,
     requestId: CommandId,
     title: Schema.optional(TrimmedNonEmptyString),
+    titleSource: OrchestrationV2AppThread.fields.titleSource,
   }),
   Schema.Struct({
     type: Schema.Literal("thread.runtime-mode.set"),

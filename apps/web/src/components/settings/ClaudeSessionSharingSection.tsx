@@ -62,12 +62,19 @@ export function ClaudeSessionSharingSection({
       );
     }
   }
-  async function openSession(sessionId: string) {
+  async function openSession(sessionId: string, observeModelActivity = false) {
     if (gate.current || !canOpen) return;
     gate.current = true;
     setBusy(true);
     setError(null);
-    const result = await open({ environmentId, input: { instanceId, sessionId } });
+    const result = await open({
+      environmentId,
+      input: {
+        instanceId,
+        sessionId,
+        ...(observeModelActivity ? { observeModelActivity: true } : {}),
+      },
+    });
     gate.current = false;
     setBusy(false);
     if (result._tag === "Success") {
@@ -154,16 +161,36 @@ export function ClaudeSessionSharingSection({
                   Run <code>/bg</code> in the original terminal, then refresh to open it here.
                 </p>
               ) : (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={busy || !canOpen || query !== loadedQuery}
-                  onClick={() => void openSession(session.sessionId)}
-                >
-                  {session.state === "shared"
-                    ? "Open shared session"
-                    : "Continue as shared session"}
-                </Button>
+                <div className="space-y-2">
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={busy || !canOpen || query !== loadedQuery}
+                      onClick={() => void openSession(session.sessionId)}
+                    >
+                      {session.state === "shared"
+                        ? "Open shared session"
+                        : "Continue as shared session"}
+                    </Button>
+                    {session.state === "history" && session.modelActivityAvailable === true ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={busy || !canOpen || query !== loadedQuery}
+                        onClick={() => void openSession(session.sessionId, true)}
+                      >
+                        Continue with model activity
+                      </Button>
+                    ) : null}
+                  </div>
+                  {session.state === "history" && session.modelActivityAvailable === true ? (
+                    <p className="text-xs text-muted-foreground">
+                      Model activity is off by default. Enable it for this inactive session to see
+                      temporary responses before Claude saves them to the conversation.
+                    </p>
+                  ) : null}
+                </div>
               )}
             </div>
           ))}

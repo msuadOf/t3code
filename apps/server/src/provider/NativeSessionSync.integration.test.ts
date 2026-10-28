@@ -557,7 +557,12 @@ it.effect(
               type: "thread.archived",
               threadId: id,
               occurredAt: localArchive,
-              payload: { ...initial, title: "My custom title", archivedAt: localArchive },
+              payload: {
+                ...initial,
+                title: "My custom title",
+                titleSource: "user",
+                archivedAt: localArchive,
+              },
             },
           ],
         });
@@ -585,7 +590,7 @@ it.effect(
               type: "thread.metadata-updated",
               threadId: id,
               occurredAt: localArchive,
-              payload: { ...renamed, title: "My newer title" },
+              payload: { ...renamed, title: "My newer title", titleSource: "user" },
             },
           ],
         });
@@ -648,13 +653,37 @@ it.effect(
               type: "thread.metadata-updated",
               threadId: id,
               occurredAt: localArchive,
-              payload: { ...createdInT3, title: session.title },
+              payload: { ...createdInT3, title: session.title, titleSource: "native" },
             },
           ],
         });
         session = { ...session, title: "Native title for T3 session" };
         yield* sync.sync;
         assert.equal((yield* store.getThread(id)).title, "Native title for T3 session");
+        session = { ...session, title: "Native rename while T3 offline" };
+        const restarted = yield* NativeSessionSync.NativeSessionSync.pipe(
+          Effect.provide(Layer.fresh(NativeSessionSync.layer)),
+        );
+        yield* restarted.sync;
+        assert.equal((yield* store.getThread(id)).title, "Native rename while T3 offline");
+        const followed = yield* store.getThread(id);
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("manual-title-durable"),
+              type: "thread.metadata-updated",
+              threadId: id,
+              occurredAt: localArchive,
+              payload: { ...followed, title: "Durable user title", titleSource: "user" },
+            },
+          ],
+        });
+        session = { ...session, title: "Another offline native rename" };
+        const restartedAgain = yield* NativeSessionSync.NativeSessionSync.pipe(
+          Effect.provide(Layer.fresh(NativeSessionSync.layer)),
+        );
+        yield* restartedAgain.sync;
+        assert.equal((yield* store.getThread(id)).title, "Durable user title");
       }).pipe(Effect.provide(context));
     }).pipe(Effect.scoped),
 );

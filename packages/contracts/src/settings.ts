@@ -711,6 +711,21 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         providerSettingsForm: { placeholder: "All directories", clearWhenEmpty: "omit" },
       }),
     ),
+    modelActivityUpstreamUrl: Schema.optionalKey(TrimmedString).pipe(
+      Schema.annotateKey({
+        title: "Local model activity upstream",
+        description:
+          "Experimental: explicit Anthropic Messages API or compatible gateway base URL for local streaming observation. API-key authentication only; OAuth, Bedrock and Vertex are unsupported. Existing workers keep their original route.",
+        providerSettingsForm: { placeholder: "https://api.anthropic.com", clearWhenEmpty: "omit" },
+      }),
+    ),
+    modelActivityForNewSessions: Schema.optionalKey(Schema.Boolean).pipe(
+      Schema.annotateKey({
+        title: "Observe model activity in new sessions",
+        description:
+          "Opt in new Claude workers to the local observer above. Streams may include auxiliary model activity and remain provisional until Claude saves them. Does not change existing workers or global Claude settings.",
+      }),
+    ),
     customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),

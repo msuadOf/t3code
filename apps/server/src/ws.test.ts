@@ -1,3 +1,4 @@
+import * as NativeModelActivityService from "./provider/NativeModelActivityService.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -294,6 +295,7 @@ import * as NativeSessionSync from "./provider/NativeSessionSync.ts";
 
 const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(NativeSessionSync.NativeSessionSync)({}),
+  Layer.mock(NativeModelActivityService.NativeModelActivityService)({}),
   Layer.mock(ServerSecretStore.ServerSecretStore)({}),
   Layer.mock(WorkspacePaths.WorkspacePaths)({}),
   Layer.mock(TraceDiagnostics.TraceDiagnostics)({}),

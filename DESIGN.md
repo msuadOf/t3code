@@ -65,3 +65,10 @@ native `/bg` handoff instruction instead of starting a second writer.
 Provider-confirmed native questions remain pending after submission. Web and mobile
 disable repeat submission and show a waiting state until the provider supplies an
 actual result. Transport acknowledgement alone never means the question was answered.
+
+Model activity is an opt-in observer surface, separate from saved conversation
+items. Web/desktop and mobile read the same transient reducer. Confirmed native
+message IDs collapse their observed response and say “Saved in conversation”;
+unconfirmed blocks say “Not yet saved by Claude”. Preserve partial text, thinking
+and tool JSON as plain text, show gaps, and never classify main versus auxiliary
+requests from their content. API gateway observation is off by default.

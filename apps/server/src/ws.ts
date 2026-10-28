@@ -1,3 +1,4 @@
+import * as NativeModelActivityService from "./provider/NativeModelActivityService.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -1294,6 +1295,7 @@ export const layerWsRpc = (
       const repositoryIdentityResolver =
         yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
       const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+      const nativeModelActivity = yield* NativeModelActivityService.NativeModelActivityService;
       const nativeSessionSharing = yield* NativeSessionSync.NativeSessionSync;
       const agentSessionScanner = yield* AgentSessionScanner.AgentSessionScanner;
       const agentSessionImporter = yield* AgentSessionImporter.AgentSessionImporter;
@@ -2767,6 +2769,7 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.attachmentsCreateUploadUrl]: (input) => issueAttachmentUploadUrl(input),
         [WS_METHODS.attachmentsDelete]: (input) => deletePendingAttachment(input.attachmentId),
+        [WS_METHODS.modelActivitySubscribe]: (input) => nativeModelActivity.subscribe(input),
         [WS_METHODS.nativeSessionsList]: (input) => nativeSessionSharing.list(input),
         [WS_METHODS.nativeSessionsOpen]: (input) => nativeSessionSharing.open(input),
         [WS_METHODS.agentSessionsScan]: () => agentSessionScanner.scan,

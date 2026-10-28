@@ -14,6 +14,7 @@ export const NativeSessionSharingCandidate = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   updatedAt: Schema.Number,
   historyAvailable: Schema.Boolean,
+  modelActivityAvailable: Schema.optional(Schema.Boolean),
   state: Schema.Literals(["history", "foreground", "shared"]),
 });
 export type NativeSessionSharingCandidate = typeof NativeSessionSharingCandidate.Type;
@@ -23,6 +24,7 @@ export const NativeSessionSharingListResult = Schema.Struct({
 });
 export type NativeSessionSharingListResult = typeof NativeSessionSharingListResult.Type;
 export const NativeSessionSharingOpenInput = Schema.Struct({
+  observeModelActivity: Schema.optional(Schema.Boolean),
   instanceId: ProviderInstanceId,
   sessionId: Schema.String.check(
     Schema.isPattern(/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i),

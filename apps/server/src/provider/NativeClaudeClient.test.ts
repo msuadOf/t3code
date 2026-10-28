@@ -350,3 +350,225 @@ fi
     );
   });
 });
+
+describe("explicit native model activity observation", () => {
+  it("refuses to upgrade a running unbound worker without preparing settings or launching", async () => {
+    let prepared = 0;
+    await withLauncher(
+      () => `
+if [ "$1" = "agents" ]; then printf '%s' '${JSON.stringify([{ ...session, status: "idle" }])}'; else exit 41; fi
+`,
+      async (_client, directory) => {
+        const client = new NativeClaudeClient({
+          binaryPath: NodePath.join(directory, "fake-claude"),
+          modelActivity: {
+            prepare: async () => {
+              prepared++;
+              throw new Error("must not prepare");
+            },
+            isBound: async () => false,
+            bind: async () => {
+              throw new Error("must not bind");
+            },
+          },
+        });
+        await expect(
+          client.startBackground({
+            cwd: directory,
+            sessionId: session.sessionId!,
+            resume: true,
+            observeModelActivity: true,
+          }),
+        ).rejects.toMatchObject({ code: "EOBSERVERUPGRADE" });
+        expect(prepared).toBe(0);
+      },
+    );
+  });
+
+  it("reuses a bound worker without changing its launch or observer settings", async () => {
+    const recovered: string[] = [];
+    await withLauncher(
+      () => `
+if [ "$1" = "agents" ]; then printf '%s' '${JSON.stringify([{ ...session, status: "idle" }])}'; else exit 41; fi
+`,
+      async (_client, directory) => {
+        const client = new NativeClaudeClient({
+          binaryPath: NodePath.join(directory, "fake-claude"),
+          modelActivity: {
+            prepare: async () => {
+              throw new Error("must not prepare");
+            },
+            isBound: async () => true,
+            recoverBound: async (id) => {
+              recovered.push(id);
+            },
+            bind: async () => {
+              throw new Error("must not bind again");
+            },
+          },
+        });
+        expect(
+          (
+            await client.startBackground({
+              cwd: directory,
+              sessionId: session.sessionId!,
+              resume: true,
+              observeModelActivity: true,
+            })
+          ).sessionId,
+        ).toBe(session.sessionId);
+      },
+    );
+    expect(recovered).toEqual([session.sessionId]);
+  });
+
+  it("binds only the verified historical UUID and passes only a settings path in argv", async () => {
+    let binding: string | undefined;
+    const prepared = {
+      settingsPath: "/observer/settings.json",
+      observerStateDir: "/private/state",
+      upstreamUrl: "https://private-upstream.invalid/token-secret",
+    };
+    await withLauncher(
+      (directory) => `
+if [ "$1" = "agents" ]; then
+ if [ -f '${directory}/ready' ]; then printf '%s' '${JSON.stringify([{ ...session, status: "idle" }])}'; else printf '[]'; fi
+elif [ "$1" = "--bg" ]; then
+ printf '%s\\n' "$@" > '${directory}/argv'
+ touch '${directory}/ready'; printf 'backgrounded · 1234abcd\\n'
+else exit 41; fi
+`,
+      async (_client, directory) => {
+        const client = new NativeClaudeClient({
+          binaryPath: NodePath.join(directory, "fake-claude"),
+          modelActivity: {
+            prepare: async () => prepared,
+            isBound: async () => false,
+            bind: async (id, value) => {
+              expect(value).toEqual(prepared);
+              binding = id;
+            },
+          },
+        });
+        await client.startBackground({
+          cwd: directory,
+          sessionId: session.sessionId!,
+          resume: true,
+          observeModelActivity: true,
+        });
+        expect(binding).toBe(session.sessionId);
+        expect(
+          (await NodeFSP.readFile(NodePath.join(directory, "argv"), "utf8")).trim().split("\n"),
+        ).toEqual(["--bg", "--settings", prepared.settingsPath, "--resume", session.sessionId]);
+      },
+    );
+  });
+
+  it("never prepares observation settings for default launches", async () => {
+    await withLauncher(
+      () => `printf '%s' '${JSON.stringify([{ ...session, status: "idle" }])}'`,
+      async (_client, directory) => {
+        const client = new NativeClaudeClient({
+          binaryPath: NodePath.join(directory, "fake-claude"),
+          modelActivity: {
+            prepare: async () => {
+              throw new Error("default must not prepare");
+            },
+            isBound: async () => {
+              throw new Error("default must not inspect binding");
+            },
+            bind: async () => {
+              throw new Error("default must not bind");
+            },
+          },
+        });
+        expect(
+          (
+            await client.startBackground({
+              cwd: directory,
+              sessionId: session.sessionId!,
+              resume: true,
+            })
+          ).sessionId,
+        ).toBe(session.sessionId);
+      },
+    );
+  });
+});
+
+it("does not bind an observer when the native historical claim forks a different UUID", async () => {
+  let bindings = 0;
+  await withLauncher(
+    (directory) => `
+if [ "$1" = "agents" ]; then
+ if [ -f '${directory}/ready' ]; then printf '%s' '${JSON.stringify([{ ...session, sessionId: "aaaaaaaa-1234-1234-1234-123456789abc", status: "idle" }])}'; else printf '[]'; fi
+elif [ "$1" = "--bg" ]; then touch '${directory}/ready'; printf 'backgrounded · 1234abcd\\n'
+elif [ "$1" = "stop" ]; then touch '${directory}/stopped'; else exit 41; fi
+`,
+    async (_client, directory) => {
+      const client = new NativeClaudeClient({
+        binaryPath: NodePath.join(directory, "fake-claude"),
+        modelActivity: {
+          prepare: async () => ({
+            settingsPath: "/observer/settings.json",
+            observerStateDir: "/observer",
+            upstreamUrl: "https://upstream.invalid",
+          }),
+          isBound: async () => false,
+          bind: async () => {
+            bindings++;
+          },
+        },
+      });
+      await expect(
+        client.startBackground({
+          cwd: directory,
+          sessionId: session.sessionId!,
+          resume: true,
+          observeModelActivity: true,
+        }),
+      ).rejects.toMatchObject({ code: "ESESSIONCOPY" });
+      expect(bindings).toBe(0);
+      expect((await NodeFSP.stat(NodePath.join(directory, "stopped"))).isFile()).toBe(true);
+    },
+  );
+});
+
+it.each([true, false])(
+  "ordinary reopen recovers only an already-bound route (%s)",
+  async (bound) => {
+    const recovered: string[] = [];
+    await withLauncher(
+      () => `
+if [ "$1" = "agents" ]; then printf '%s' '${JSON.stringify([{ ...session, status: "idle" }])}'; else exit 41; fi
+`,
+      async (_client, directory) => {
+        const client = new NativeClaudeClient({
+          binaryPath: NodePath.join(directory, "fake-claude"),
+          modelActivity: {
+            prepare: async () => {
+              throw new Error("reopen must not prepare a new route");
+            },
+            isBound: async () => bound,
+            recoverBound: async (id) => {
+              recovered.push(id);
+            },
+            bind: async () => {
+              throw new Error("reopen must not bind a new route");
+            },
+          },
+        });
+        expect(
+          (
+            await client.startBackground({
+              cwd: directory,
+              sessionId: session.sessionId!,
+              resume: true,
+            })
+          ).sessionId,
+        ).toBe(session.sessionId);
+      },
+    );
+    expect(recovered).toEqual(bound ? [session.sessionId] : []);
+  },
+);
