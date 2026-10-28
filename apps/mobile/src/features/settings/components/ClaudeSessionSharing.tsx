@@ -62,7 +62,11 @@ export function ClaudeSessionSharing({
       );
     }
   }
-  async function openSession(sessionId: string, observeModelActivity = false) {
+  async function openSession(
+    sessionId: string,
+    observeModelActivity = false,
+    modelActivityAction?: "enable" | "disable",
+  ) {
     if (gate.current || !canOpen) return;
     gate.current = true;
     setBusy(true);
@@ -73,6 +77,7 @@ export function ClaudeSessionSharing({
         instanceId,
         sessionId,
         ...(observeModelActivity ? { observeModelActivity: true } : {}),
+        ...(modelActivityAction === undefined ? {} : { modelActivityAction }),
       },
     });
     gate.current = false;
@@ -164,6 +169,32 @@ export function ClaudeSessionSharing({
               onPress={() => void openSession(session.sessionId)}
             />
           )}
+          {session.state !== "foreground" && session.modelActivityEnabled !== undefined ? (
+            <>
+              <Text className="px-4 py-2 text-sm text-foreground-muted">
+                Model activity is {session.modelActivityEnabled ? "enabled" : "disabled"}. Changing
+                it restarts this native worker and disconnects terminal attachments. The session
+                UUID stays the same. Restart is available only while Claude is idle.
+              </Text>
+              {session.active === false ? (
+                <SettingsActionRow
+                  label={
+                    session.modelActivityEnabled
+                      ? "Restart without model activity"
+                      : "Restart with model activity"
+                  }
+                  disabled={busy || !canOpen || query !== loadedQuery}
+                  onPress={() =>
+                    void openSession(
+                      session.sessionId,
+                      false,
+                      session.modelActivityEnabled ? "disable" : "enable",
+                    )
+                  }
+                />
+              ) : null}
+            </>
+          ) : null}
           {session.state === "history" && session.modelActivityAvailable === true ? (
             <SettingsActionRow
               label="Continue with model activity"

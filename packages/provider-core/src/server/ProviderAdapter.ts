@@ -421,6 +421,7 @@ export interface ProviderAdapterV2OpenSessionInput {
     readonly threadId: ThreadId;
     readonly nativeTurnId: string;
     readonly nativeRequestId: string;
+    readonly nativeThreadId?: string;
   }) => Effect.Effect<OrchestrationV2RuntimeRequest | undefined, ProviderAdapterProtocolError>;
 
   /** Native worker state, separate from semantic output or actionable approvals. */

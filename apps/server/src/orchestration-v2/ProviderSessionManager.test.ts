@@ -19,7 +19,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
-  type ProviderSessionId,
+  ProviderSessionId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -3833,6 +3833,123 @@ it.effect("native progress preserves root metadata and rejects foreign or termin
         ],
       });
       assert.deepEqual(yield* findRequest(lookup), uncertain);
+      const nativeLookup = { ...lookup, nativeThreadId: "shared-native-thread" };
+      const discovered = {
+        ...providerThread,
+        providerSessionId: null,
+        nativeThreadRef: {
+          driver,
+          nativeId: nativeLookup.nativeThreadId,
+          strength: "strong" as const,
+        },
+      };
+      const duplicateId = yield* ids.allocate.runtimeRequest({
+        driver,
+        providerTurnId,
+        nativeRequestId: "persisted-tool",
+      });
+      const { submittedAt: _submittedAt, answers: _answers, ...unsubmitted } = persisted;
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: discovered,
+          },
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "runtime-request.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              ...unsubmitted,
+              id: duplicateId,
+              createdAt: DateTime.makeUnsafe(DateTime.toEpochMillis(now) + 1000),
+            },
+          },
+        ],
+      });
+      assert.isUndefined(yield* findRequest(lookup));
+      assert.isUndefined(
+        yield* findRequest({ ...nativeLookup, nativeThreadId: "foreign-native-thread" }),
+      );
+      assert.deepEqual(yield* findRequest(nativeLookup), uncertain);
+      const duplicates = (yield* store.getThreadRecords(threadId, ["runtimeRequests"]))
+        .runtimeRequests;
+      assert.equal(duplicates.find((request) => request.id === duplicateId)?.status, "cancelled");
+      assert.equal(
+        duplicates.find((request) => request.id === duplicateId)?.responseCapability.type,
+        "not_resumable",
+      );
+      assert.deepEqual(yield* findRequest(nativeLookup), uncertain);
+      const freshId = yield* ids.allocate.runtimeRequest({
+        driver,
+        providerTurnId,
+        nativeRequestId: "fresh-tool",
+      });
+      const freshDuplicateId = yield* ids.allocate.runtimeRequest({
+        driver,
+        providerTurnId,
+        nativeRequestId: "fresh-tool",
+      });
+      const fresh = {
+        ...unsubmitted,
+        id: freshId,
+        nativeRequestRef: { driver, nativeId: "fresh-tool", strength: "strong" as const },
+      };
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "runtime-request.updated",
+            threadId,
+            occurredAt: now,
+            payload: fresh,
+          },
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "runtime-request.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              ...fresh,
+              id: freshDuplicateId,
+              createdAt: DateTime.makeUnsafe(DateTime.toEpochMillis(now) + 1000),
+            },
+          },
+        ],
+      });
+      const freshLookup = { ...nativeLookup, nativeRequestId: "fresh-tool" };
+      assert.deepEqual(yield* findRequest(freshLookup), fresh);
+      assert.deepEqual(yield* findRequest(freshLookup), fresh);
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              ...discovered,
+              providerSessionId: ProviderSessionId.make("foreign-runtime"),
+            },
+          },
+        ],
+      });
+      assert.isUndefined(yield* findRequest(nativeLookup));
+      yield* sink.write({
+        events: [
+          {
+            id: yield* ids.allocate.event({ threadId }),
+            type: "provider-thread.updated",
+            threadId,
+            occurredAt: now,
+            payload: providerThread,
+          },
+        ],
+      });
       assert.isDefined(progress);
       if (!progress) return;
       const input = {

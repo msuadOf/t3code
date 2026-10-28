@@ -5,8 +5,10 @@ import { NativeClaudeSessions } from "../NativeClaudeSessions.ts";
 import { ensureClaudeModelObserver } from "../ClaudeModelObserver.ts";
 import {
   isClaudeModelObserverBindingCurrent,
+  hasClaudeModelObserverBindingRouting,
   prepareClaudeModelObserverSettings,
   readClaudeModelObserverBinding,
+  setClaudeModelObserverEnabled,
   writeClaudeModelObserverBinding,
 } from "../ClaudeModelObserverBindings.ts";
 import { ClaudeSettings, ProviderDriverKind } from "@t3tools/contracts";
@@ -177,6 +179,22 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     });
 
     const modelActivity: NativeClaudeModelActivity = {
+      hasBinding: async (nativeSessionId) => {
+        return hasClaudeModelObserverBindingRouting({
+          stateDir,
+          instanceId,
+          nativeSessionId,
+          configDirectory: configDir,
+        });
+      },
+      setEnabled: (nativeSessionId, enabled) =>
+        setClaudeModelObserverEnabled({
+          stateDir,
+          instanceId,
+          nativeSessionId,
+          configDirectory: configDir,
+          enabled,
+        }),
       recoverBound: async (nativeSessionId) => {
         const binding = await readClaudeModelObserverBinding({
           stateDir,
@@ -212,6 +230,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           configDirectory: configDir,
           observerStateDir: prepared.observerStateDir,
           upstreamUrl: prepared.upstreamUrl,
+          settingsPath: prepared.settingsPath,
         }),
       isBound: async (nativeSessionId) => {
         return isClaudeModelObserverBindingCurrent({
@@ -484,14 +503,40 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
             catch: nativeSessionError,
           }),
         sharing: {
+          setModelActivityEnabled: (sessionId, enabled) =>
+            Effect.tryPromise({
+              try: () => nativeClaudeSessions.setModelActivityEnabled(sessionId, enabled),
+              catch: nativeSessionError,
+            }),
           list: Effect.tryPromise({
             try: async () =>
-              (await nativeClaudeSessions.available()).map((session) => ({
-                ...session,
-                modelActivityAvailable:
-                  session.sharingState === "history" &&
-                  Boolean(effectiveConfig.modelActivityUpstreamUrl?.trim()),
-              })),
+              Promise.all(
+                (await nativeClaudeSessions.available()).map(async (session) => {
+                  const binding =
+                    session.sharingState === "shared"
+                      ? await readClaudeModelObserverBinding({
+                          stateDir,
+                          instanceId,
+                          nativeSessionId: session.id,
+                        })
+                      : undefined;
+                  return {
+                    ...session,
+                    ...(binding &&
+                    (await hasClaudeModelObserverBindingRouting({
+                      stateDir,
+                      instanceId,
+                      nativeSessionId: session.id,
+                      configDirectory: configDir,
+                    }))
+                      ? { modelActivityEnabled: binding.enabled }
+                      : {}),
+                    modelActivityAvailable:
+                      session.sharingState === "history" &&
+                      Boolean(effectiveConfig.modelActivityUpstreamUrl?.trim()),
+                  };
+                }),
+              ),
             catch: nativeSessionError,
           }),
           open: (sessionId, options) =>

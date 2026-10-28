@@ -438,6 +438,7 @@ it.effect.each(["completed", "failed", "interrupted"] as const)(
 
 it.effect.each([
   "answer",
+  "multi-answer",
   "stale",
   "cli",
   "no-actual",
@@ -457,16 +458,19 @@ it.effect.each([
     const directory = path.join(root, "projects", "workspace");
     yield* fs.makeDirectory(directory, { recursive: true });
     const file = path.join(directory, `${nativeId}.jsonl`);
+    const multi = mode === "multi-answer";
+    const actualAnswer = multi ? ['Green "forest"', "Blue, Navy"] : "Green";
+    const nativeActualAnswer = multi ? '"Green \\"forest\\"", "Blue, Navy"' : "Green";
     const question = {
       questions: [
         {
           question: "Choose color",
           header: "Color",
           options: [
-            { label: "Blue", description: "Use blue" },
-            { label: "Green", description: "Use green" },
+            { label: multi ? "Blue, Navy" : "Blue", description: "Use blue" },
+            { label: multi ? 'Green "forest"' : "Green", description: "Use green" },
           ],
-          multiSelect: false,
+          multiSelect: multi,
         },
       ],
     };
@@ -760,12 +764,17 @@ it.effect.each([
       ).toBe("cancelled");
       return;
     }
-    if (mode === "answer" || mode === "no-actual" || mode === "read-failure") {
+    if (
+      mode === "answer" ||
+      mode === "multi-answer" ||
+      mode === "no-actual" ||
+      mode === "read-failure"
+    ) {
       yield* runtime.respondToRuntimeRequest({
         requestId: request.id,
-        answers: { "Choose color": ["blue"] },
+        answers: { "Choose color": multi ? ["Blue, Navy", 'Green "forest"'] : ["blue"] },
       });
-      expect(client.replies).toEqual(["Blue"]);
+      expect(client.replies).toEqual([multi ? '"Blue, Navy", "Green \\"forest\\""' : "Blue"]);
       expect(
         (yield* runtime.readThreadSnapshot({ providerThread })).runtimeRequests[0]?.status,
       ).toBe("pending");
@@ -790,7 +799,7 @@ it.effect.each([
           uuid: "q-answer",
           ...(mode === "no-actual"
             ? {}
-            : { toolUseResult: { answers: { "Choose color": "Green" } } }),
+            : { toolUseResult: { answers: { "Choose color": nativeActualAnswer } } }),
           parentUuid: "q-tool",
           sessionId: nativeId,
           cwd: "/work",
@@ -840,10 +849,10 @@ it.effect.each([
         completedItem.turnItem.type === "user_input_request"
         ? completedItem.turnItem.questionAnswer?.answers
         : undefined,
-    ).toEqual(mode === "no-actual" ? undefined : { "Choose color": "Green" });
+    ).toEqual(mode === "no-actual" ? undefined : { "Choose color": actualAnswer });
     expect((yield* runtime.readThreadSnapshot({ providerThread })).runtimeRequests).toEqual([]);
     expect((yield* Deferred.await(resolved)).answers).toEqual(
-      mode === "no-actual" ? undefined : { "Choose color": "Green" },
+      mode === "no-actual" ? undefined : { "Choose color": actualAnswer },
     );
   }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
 );
@@ -938,4 +947,365 @@ it.effect("keeps a replacement watcher alive when its predecessor's scope closes
     expect(controllers[0]?.aborted).toBe(true);
     expect(controllers[1]?.aborted).toBe(false);
   }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
+);
+
+it.effect(
+  "hydrates native todo and proposed-plan artifacts without replacing the original tool records",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped();
+      const directory = path.join(root, "projects", "workspace");
+      yield* fs.makeDirectory(directory, { recursive: true });
+      const entries: unknown[] = [
+        { type: "user", uuid: "planning-user", parentUuid: null, message: { content: "plan" } },
+      ];
+      let parent = "planning-user";
+      for (const [id, name, input, result] of [
+        [
+          "todo-one",
+          "TodoWrite",
+          { todos: [] },
+          { newTodos: [{ content: "Do work", status: "in_progress" }] },
+        ],
+        [
+          "todo-two",
+          "TodoWrite",
+          { todos: [] },
+          { newTodos: [{ content: "Do work", status: "completed" }] },
+        ],
+        [
+          "plan",
+          "ExitPlanMode",
+          { plan: "# Original" },
+          { plan: "# Native edited plan", isAgent: false },
+        ],
+      ] as const) {
+        entries.push({
+          type: "assistant",
+          uuid: `${id}-call`,
+          parentUuid: parent,
+          message: { content: [{ type: "tool_use", id, name, input }], stop_reason: "tool_use" },
+        });
+        parent = `${id}-result`;
+        entries.push({
+          type: "user",
+          uuid: parent,
+          parentUuid: `${id}-call`,
+          toolUseResult: result,
+          message: {
+            content: [{ type: "tool_result", tool_use_id: id, content: "Native result" }],
+          },
+        });
+      }
+      entries.push({
+        type: "assistant",
+        uuid: "done",
+        parentUuid: parent,
+        message: { content: "done", stop_reason: "end_turn" },
+      });
+      yield* fs.writeFileString(
+        path.join(directory, `${nativeId}.jsonl`),
+        entries
+          .map((entry) =>
+            JSON.stringify({
+              ...(entry as object),
+              sessionId: nativeId,
+              cwd: "/work",
+              timestamp: "2026-10-29T00:00:00Z",
+            }),
+          )
+          .join("\n") + "\n",
+      );
+      const client = new FixtureClient("background");
+      Object.assign(client.inventory[0]!, { state: "done" });
+      const now = DateTime.makeUnsafe(1);
+      const providerThreadId = ProviderThreadId.make("planning-thread");
+      const providerThread: OrchestrationV2ProviderThread = {
+        id: providerThreadId,
+        driver: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: instanceId,
+        providerSessionId: ProviderSessionId.make("planning-session"),
+        appThreadId: threadId,
+        nativeThreadRef: {
+          driver: ProviderDriverKind.make("claudeAgent"),
+          nativeId,
+          strength: "strong",
+        },
+        nativeConversationHeadRef: null,
+        status: "active",
+        ownerNodeId: null,
+        firstRunOrdinal: null,
+        lastRunOrdinal: null,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const adapter = yield* makeNativeClaudeAdapter({
+        instanceId,
+        configDirectory: root,
+        binaryPath: "never-executed",
+        environment: {},
+        client,
+      });
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: providerThread.providerSessionId!,
+        modelSelection,
+        runtimePolicy,
+        onExternalTurn: () =>
+          Effect.succeed({
+            threadId,
+            providerThread,
+            modelSelection,
+            runtimePolicy,
+            runId: RunId.make("planning-run"),
+            runOrdinal: 1,
+            providerTurnOrdinal: 1,
+            attemptId: RunAttemptId.make("planning-attempt"),
+            rootNodeId: NodeId.make("planning-root"),
+            appThread: fixtureAppThread(now, providerThreadId),
+            message: {
+              createdBy: "user",
+              creationSource: "provider",
+              messageId: MessageId.make("planning-message"),
+              text: "plan",
+              attachments: [],
+            },
+          }),
+      });
+      yield* runtime.resumeThread({ threadId, providerThread });
+      const events = yield* runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
+      );
+      const plans = events
+        .filter((event) => event.type === "plan.updated")
+        .map((event) => event.plan);
+      expect(plans.map((plan) => [plan.kind, plan.status])).toEqual([
+        ["todo_list", "active"],
+        ["todo_list", "superseded"],
+        ["todo_list", "completed"],
+        ["proposed_plan", "active"],
+      ]);
+      expect(plans.at(-1)?.id).toBe(
+        `plan:claude-native:${encodeURIComponent(threadId)}:proposed_plan%3Aplan`,
+      );
+      expect(plans.at(-1)).toMatchObject({
+        markdown: "# Native edited plan",
+        runId: "planning-run",
+      });
+      const items = events
+        .filter((event) => event.type === "turn_item.updated")
+        .map((event) => event.turnItem);
+      expect(items.filter((item) => item.type === "dynamic_tool")).toHaveLength(3);
+      expect(items.filter((item) => item.type === "todo_list")).toHaveLength(2);
+      expect(items.filter((item) => item.type === "proposed_plan")).toHaveLength(1);
+      expect(client.resumes).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
+);
+
+it.effect(
+  "observes a native background child after its parent turn ends without creating a child conversation or another input",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped();
+      const directory = path.join(root, "projects", "workspace");
+      const childDirectory = path.join(directory, nativeId, "subagents");
+      yield* fs.makeDirectory(childDirectory, { recursive: true });
+      const agentId = "a5321b469ff7aa652";
+      const records = [
+        {
+          type: "user",
+          uuid: "agent-user",
+          parentUuid: null,
+          message: { content: "Spawn native child" },
+        },
+        {
+          type: "assistant",
+          uuid: "agent-call",
+          parentUuid: "agent-user",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "agent-tool",
+                name: "Agent",
+                input: { prompt: "Child work", description: "Native child" },
+              },
+            ],
+            stop_reason: "tool_use",
+          },
+        },
+        {
+          type: "user",
+          uuid: "agent-result",
+          parentUuid: "agent-call",
+          toolUseResult: {
+            status: "async_launched",
+            agentId,
+            prompt: "Child work",
+            description: "Native child",
+          },
+          message: {
+            content: [{ type: "tool_result", tool_use_id: "agent-tool", content: "Launched" }],
+          },
+        },
+        {
+          type: "assistant",
+          uuid: "parent-done",
+          parentUuid: "agent-result",
+          message: { content: "Parent done", stop_reason: "end_turn" },
+        },
+      ];
+      const file = path.join(directory, `${nativeId}.jsonl`);
+      yield* fs.writeFileString(
+        file,
+        records
+          .map((entry) =>
+            JSON.stringify({
+              ...entry,
+              sessionId: nativeId,
+              cwd: "/work",
+              timestamp: "2026-10-29T00:00:00Z",
+            }),
+          )
+          .join("\n") + "\n",
+      );
+      const meta = path.join(childDirectory, `agent-${agentId}.meta.json`);
+      yield* fs.writeFileString(meta, JSON.stringify({ toolUseId: "agent-tool" }));
+      yield* fs.writeFileString(
+        path.join(childDirectory, `agent-${agentId}.jsonl`),
+        JSON.stringify({
+          type: "assistant",
+          sessionId: nativeId,
+          agentId,
+          isSidechain: true,
+          timestamp: "2026-10-29T00:00:01Z",
+          message: {
+            content: [{ type: "text", text: "Child model stopped; children may still run" }],
+            stop_reason: "end_turn",
+          },
+        }) + "\n",
+      );
+      const client = new FixtureClient("background");
+      Object.assign(client.inventory[0]!, { state: "done" });
+      const now = DateTime.makeUnsafe(1);
+      const providerThreadId = ProviderThreadId.make("subagent-thread");
+      const providerThread: OrchestrationV2ProviderThread = {
+        id: providerThreadId,
+        driver: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: instanceId,
+        providerSessionId: ProviderSessionId.make("subagent-session"),
+        appThreadId: threadId,
+        nativeThreadRef: {
+          driver: ProviderDriverKind.make("claudeAgent"),
+          nativeId,
+          strength: "strong",
+        },
+        nativeConversationHeadRef: null,
+        status: "active",
+        ownerNodeId: null,
+        firstRunOrdinal: null,
+        lastRunOrdinal: null,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      let adoptions = 0;
+      const adapter = yield* makeNativeClaudeAdapter({
+        instanceId,
+        configDirectory: root,
+        binaryPath: "never-executed",
+        environment: {},
+        client,
+      });
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: providerThread.providerSessionId!,
+        modelSelection,
+        runtimePolicy,
+        onExternalTurn: () => {
+          adoptions++;
+          return Effect.succeed({
+            threadId,
+            providerThread,
+            modelSelection,
+            runtimePolicy,
+            runId: RunId.make("subagent-run"),
+            runOrdinal: 1,
+            providerTurnOrdinal: 1,
+            attemptId: RunAttemptId.make("subagent-attempt"),
+            rootNodeId: NodeId.make("subagent-root"),
+            appThread: fixtureAppThread(now, providerThreadId),
+            message: {
+              createdBy: "user",
+              creationSource: "provider",
+              messageId: MessageId.make("subagent-message"),
+              text: "Spawn native child",
+              attachments: [],
+            },
+          });
+        },
+      });
+      const events: ProviderAdapter.ProviderAdapterV2Event[] = [];
+      const running = yield* Deferred.make<void>();
+      const terminal = yield* Deferred.make<void>();
+      const childFailed = yield* Deferred.make<void>();
+      yield* runtime.events.pipe(
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            events.push(event);
+            if (event.type === "subagent.updated" && event.subagent.status === "running")
+              yield* Deferred.succeed(running, undefined);
+            if (event.type === "turn.terminal") yield* Deferred.succeed(terminal, undefined);
+            if (event.type === "subagent.updated" && event.subagent.status === "failed")
+              yield* Deferred.succeed(childFailed, undefined);
+          }),
+        ),
+        Effect.forkScoped,
+      );
+      yield* runtime.resumeThread({ threadId, providerThread });
+      yield* Deferred.await(running);
+      yield* Deferred.await(terminal);
+      yield* fs.writeFileString(meta, JSON.stringify({ toolUseId: "agent-tool", finished: true }));
+      yield* fs.writeFileString(
+        file,
+        (yield* fs.readFileString(file)) +
+          JSON.stringify({
+            type: "user",
+            uuid: "child-report",
+            parentUuid: "parent-done",
+            sessionId: nativeId,
+            timestamp: "2026-10-29T00:00:02Z",
+            promptSource: "system",
+            turnOrigin: "task_notification",
+            origin: { kind: "task-notification", producer: "session-task" },
+            message: {
+              content: `<task-notification>\n<task-id>${agentId}</task-id>\n<tool-use-id>agent-tool</tool-use-id>\n<status>failed</status>\n</task-notification>`,
+            },
+          }) +
+          "\n",
+      );
+      yield* runtime.resumeThread({ threadId, providerThread });
+      yield* Deferred.await(childFailed);
+      const lifecycle = events
+        .filter((event) => event.type === "subagent.updated")
+        .map((event) => event.subagent);
+      expect(lifecycle.map((entry) => entry.status)).toEqual(["running", "failed"]);
+      expect(lifecycle[0]?.id).toBe(lifecycle[1]?.id);
+      expect(lifecycle[1]).toMatchObject({
+        runId: "subagent-run",
+        childThreadId: null,
+        nativeTaskRef: { nativeId: agentId, strength: "strong" },
+      });
+      expect(events.some((event) => event.type === "app_thread.created")).toBe(false);
+      expect(adoptions).toBe(1);
+      expect(client.resumes).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
 );

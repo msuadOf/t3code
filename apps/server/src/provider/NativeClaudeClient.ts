@@ -101,6 +101,8 @@ export interface NativeClaudeModelActivity {
   ) => Promise<void>;
   readonly isBound: (sessionId: string) => Promise<boolean>;
   readonly recoverBound?: (sessionId: string) => Promise<void>;
+  readonly hasBinding?: (sessionId: string) => Promise<boolean>;
+  readonly setEnabled?: (sessionId: string, enabled: boolean) => Promise<void>;
 }
 
 export interface NativeClaudeClientOptions {
@@ -459,6 +461,93 @@ export class NativeClaudeClient {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
       await closed;
     }
+  }
+
+  /** Explicit route changes require stopping an idle, already owned native worker. */
+  async setModelActivityEnabled(sessionId: string, enabled: boolean): Promise<NativeClaudeSession> {
+    if (!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(sessionId))
+      throw new NativeClaudeError("ESESSION", "A canonical Claude session UUID is required.");
+    const activity = this.options.modelActivity;
+    if (!activity?.hasBinding || !activity.setEnabled || !(await activity.hasBinding(sessionId)))
+      throw new NativeClaudeError(
+        "EOBSERVERUNAVAILABLE",
+        "This native worker has no owned model activity settings to change.",
+      );
+    const readOwner = async () => {
+      const owners = (await this.listSessions()).filter((value) => value.sessionId === sessionId);
+      if (owners.length !== 1 || owners[0]?.kind !== "background")
+        throw new NativeClaudeError(
+          "EOBSERVERSTATE",
+          "Claude ownership changed. No further model activity changes were made.",
+        );
+      const owner = owners[0];
+      requireNativeClaudeBackgroundId(owner);
+      if (owner.status === "busy" || owner.status === "waiting")
+        throw new NativeClaudeError(
+          "EBUSY",
+          "Finish or interrupt the native Claude turn before changing model activity.",
+        );
+      return owner;
+    };
+    let owner = await readOwner();
+    const stopped = (job: NativeClaudeSession) => job.state === "stopped" || job.state === "failed";
+    if (!stopped(owner)) {
+      if (owner.status !== "idle" || !Number.isSafeInteger(owner.pid) || owner.pid! <= 0)
+        throw new NativeClaudeError(
+          "EOBSERVERSTATE",
+          "Claude must expose an idle worker identity before changing model activity.",
+        );
+      const current = await readOwner();
+      if (
+        current.id !== owner.id ||
+        current.pid !== owner.pid ||
+        current.status !== "idle" ||
+        stopped(current)
+      )
+        throw new NativeClaudeError(
+          "EOBSERVERSTATE",
+          "Claude worker changed before stop. No stop was sent.",
+        );
+      if (!(await activity.hasBinding(sessionId)))
+        throw new NativeClaudeError(
+          "EOBSERVERSTATE",
+          "Claude model activity ownership changed before stop. No stop was sent.",
+        );
+      // Native stop has no atomic idle/PID precondition; callers must avoid concurrent CLI input.
+      await this.runCLI(["stop", requireNativeClaudeBackgroundId(current)], current.cwd);
+      owner = await readOwner();
+      if (owner.id !== current.id || !stopped(owner))
+        throw new NativeClaudeError(
+          "EOBSERVERSTATE",
+          "Claude did not remain stopped. Model activity settings were not changed.",
+        );
+    }
+    if (!(await activity.hasBinding(sessionId)))
+      throw new NativeClaudeError(
+        "EOBSERVERSTATE",
+        "Claude model activity ownership changed. Private settings were not changed.",
+      );
+    try {
+      await activity.setEnabled(sessionId, enabled);
+    } catch {
+      throw new NativeClaudeError(
+        "EOBSERVERSETTINGS",
+        "Model activity settings could not be changed. This worker was not restarted; inspect it in Claude before continuing.",
+      );
+    }
+    const current = await readOwner();
+    if (current.id !== owner.id || !stopped(current))
+      throw new NativeClaudeError(
+        "EOBSERVERSTATE",
+        "Claude ownership changed after the settings update. No restart was sent.",
+      );
+    const ready = await this.wakeBackground(current, current.cwd);
+    if (ready.sessionId !== sessionId || ready.id !== current.id || ready.kind !== "background")
+      throw new NativeClaudeError(
+        "ESESSIONCOPY",
+        "Claude reopened a different native worker; no prompt was sent.",
+      );
+    return ready;
   }
 
   /** Launch one daemon-owned native session; never creates a second writer for a live session. */

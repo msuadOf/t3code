@@ -6,6 +6,8 @@ import { ensureClaudeModelObserver } from "./ClaudeModelObserver.ts";
 
 export interface ClaudeModelObserverBinding {
   readonly observerStateDir: string;
+  readonly settingsPath: string;
+  readonly enabled: boolean;
   readonly upstreamUrl: string;
   readonly configDirectory: string;
   readonly instanceId: string;
@@ -61,13 +63,15 @@ const validateBinding = (value: unknown, stateDir: string): ClaudeModelObserverB
   const item = value as Record<string, unknown>;
   const fields = [
     "observerStateDir",
+    "settingsPath",
     "upstreamUrl",
     "configDirectory",
     "instanceId",
     "nativeSessionId",
   ];
   if (
-    Object.keys(item).length !== fields.length ||
+    Object.keys(item).length !== fields.length + 1 ||
+    typeof item.enabled !== "boolean" ||
     fields.some((key) => typeof item[key] !== "string")
   )
     throw new Error("Invalid Claude observer binding");
@@ -80,6 +84,13 @@ const validateBinding = (value: unknown, stateDir: string): ClaudeModelObserverB
       deriveClaudeModelObserverStateDir({ stateDir, instanceId: binding.instanceId })
   )
     throw new Error("Invalid Claude observer binding paths");
+  if (
+    NodePath.dirname(binding.settingsPath) !==
+      NodePath.join(binding.observerStateDir, "settings") ||
+    !UUID.test(NodePath.basename(binding.settingsPath, ".json")) ||
+    !binding.settingsPath.endsWith(".json")
+  )
+    throw new Error("Invalid Claude observer private settings path");
   upstreamHref(binding.upstreamUrl);
   return binding;
 };
@@ -115,14 +126,24 @@ export async function readClaudeModelObserverBinding(input: {
   const binding = validateBinding(parsed, input.stateDir);
   if (binding.instanceId !== input.instanceId || binding.nativeSessionId !== input.nativeSessionId)
     throw new Error("Claude observer binding identity mismatch");
+  // Routing is the atomic source of truth. The descriptor flag can lag after a crash
+  // between the private settings rename and the descriptor rename.
+  const actualRoute = await privateSettingsRoute(binding.settingsPath);
+  if (actualRoute === binding.upstreamUrl) return { ...binding, enabled: false };
+  if (actualRoute !== undefined && proxyRoute(actualRoute)) return { ...binding, enabled: true };
   return binding;
 }
 
 export async function writeClaudeModelObserverBinding(
-  input: ClaudeModelObserverBinding & { readonly stateDir: string },
+  input: Omit<ClaudeModelObserverBinding, "enabled"> & {
+    readonly enabled?: boolean;
+    readonly stateDir: string;
+  },
 ): Promise<void> {
   const binding: ClaudeModelObserverBinding = {
     observerStateDir: input.observerStateDir,
+    settingsPath: input.settingsPath,
+    enabled: input.enabled ?? true,
     upstreamUrl: upstreamHref(input.upstreamUrl),
     configDirectory: input.configDirectory,
     instanceId: input.instanceId,
@@ -132,35 +153,31 @@ export async function writeClaudeModelObserverBinding(
   await atomicPrivateJson(bindingPath(input), binding);
 }
 
-const settingsPathFor = (observerStateDir: string, upstreamUrl: string) =>
-  NodePath.join(observerStateDir, "settings", `${hash(upstreamHref(upstreamUrl))}.json`);
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
-
-/** A durable UUID alone cannot prove an externally recreated worker retained its observer route. */
-export async function isClaudeModelObserverBindingCurrent(input: {
+const readRoutingJson = async (path: string): Promise<unknown> => {
+  let raw: string;
+  try {
+    raw = await NodeFSP.readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error("Invalid Claude observer routing JSON");
+  }
+};
+interface BindingIdentity {
   readonly stateDir: string;
   readonly instanceId: string;
   readonly nativeSessionId: string;
   readonly configDirectory: string;
-}): Promise<boolean> {
-  const binding = await readClaudeModelObserverBinding(input);
-  if (!binding || binding.configDirectory !== input.configDirectory) return false;
-  const readJson = async (path: string): Promise<unknown> => {
-    let raw: string;
-    try {
-      raw = await NodeFSP.readFile(path, "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-      throw error;
-    }
-    try {
-      return JSON.parse(raw);
-    } catch {
-      throw new Error("Invalid Claude observer routing JSON");
-    }
-  };
-  const job = await readJson(
+}
+const boundJob = async (input: BindingIdentity, binding: ClaudeModelObserverBinding) => {
+  if (binding.configDirectory !== input.configDirectory) return undefined;
+  const job = await readRoutingJson(
     NodePath.join(
       input.configDirectory,
       "jobs",
@@ -168,7 +185,7 @@ export async function isClaudeModelObserverBindingCurrent(input: {
       "state.json",
     ),
   );
-  if (job === undefined) return false;
+  if (job === undefined) return undefined;
   if (
     !record(job) ||
     typeof job.sessionId !== "string" ||
@@ -177,8 +194,7 @@ export async function isClaudeModelObserverBindingCurrent(input: {
     job.respawnFlags.some((flag: unknown) => typeof flag !== "string")
   )
     throw new Error("Invalid Claude observer native job routing state");
-  if (job.sessionId !== input.nativeSessionId) return false;
-  const settingsPath = settingsPathFor(binding.observerStateDir, binding.upstreamUrl);
+  if (job.sessionId !== input.nativeSessionId) return undefined;
   const settingsFlags = job.respawnFlags
     .map((flag: string, index: number) =>
       flag === "--settings" || flag.startsWith("--settings=") ? index : -1,
@@ -187,20 +203,23 @@ export async function isClaudeModelObserverBindingCurrent(input: {
   if (
     settingsFlags.length !== 1 ||
     job.respawnFlags[settingsFlags[0]!] !== "--settings" ||
-    job.respawnFlags[settingsFlags[0]! + 1] !== settingsPath
+    job.respawnFlags[settingsFlags[0]! + 1] !== binding.settingsPath
   )
-    return false;
+    return undefined;
+  return job;
+};
+const privateSettingsRoute = async (settingsPath: string): Promise<string | undefined> => {
   let stat;
   try {
     stat = await NodeFSP.lstat(settingsPath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   }
   if (!stat.isFile() || (stat.mode & 0o077) !== 0)
     throw new Error("Claude observer settings must be a private regular file");
-  const settings = await readJson(settingsPath);
-  if (settings === undefined) return false;
+  const settings = await readRoutingJson(settingsPath);
+  if (settings === undefined) return undefined;
   if (
     !record(settings) ||
     Object.keys(settings).length !== 1 ||
@@ -209,24 +228,81 @@ export async function isClaudeModelObserverBindingCurrent(input: {
     typeof settings.env.ANTHROPIC_BASE_URL !== "string"
   )
     throw new Error("Invalid Claude observer private settings");
+  return settings.env.ANTHROPIC_BASE_URL;
+};
+const proxyRoute = (value: string): boolean => {
   let route: URL;
   try {
-    route = new URL(settings.env.ANTHROPIC_BASE_URL);
+    route = new URL(value);
   } catch {
-    throw new Error("Invalid Claude observer private model route");
+    return false;
   }
-  if (
-    route.protocol !== "http:" ||
-    route.hostname !== "127.0.0.1" ||
-    !route.port ||
-    route.username ||
-    route.password ||
-    route.search ||
-    route.hash ||
-    !/^\/proxy\/[a-f0-9]{64}$/.test(route.pathname)
-  )
+  return (
+    route.protocol === "http:" &&
+    route.hostname === "127.0.0.1" &&
+    !!route.port &&
+    !route.username &&
+    !route.password &&
+    !route.search &&
+    !route.hash &&
+    /^\/proxy\/[a-f0-9]{64}$/.test(route.pathname)
+  );
+};
+
+const routedBinding = async (
+  input: BindingIdentity,
+): Promise<ClaudeModelObserverBinding | undefined> => {
+  const binding = await readClaudeModelObserverBinding(input);
+  if (!binding || !(await boundJob(input, binding))) return undefined;
+  const route = await privateSettingsRoute(binding.settingsPath);
+  if (route === undefined) return undefined;
+  if (!URL.canParse(route)) throw new Error("Invalid Claude observer private model route");
+  if (route === binding.upstreamUrl) return { ...binding, enabled: false };
+  if (proxyRoute(route)) return { ...binding, enabled: true };
+  return undefined;
+};
+
+/** Includes disabled bindings, but only while the native job retains this owned settings route. */
+export async function hasClaudeModelObserverBindingRouting(
+  input: BindingIdentity,
+): Promise<boolean> {
+  return (await routedBinding(input)) !== undefined;
+}
+
+/** A durable UUID alone cannot prove an externally recreated worker retained its observer route. */
+export async function isClaudeModelObserverBindingCurrent(
+  input: BindingIdentity,
+): Promise<boolean> {
+  return (await routedBinding(input))?.enabled === true;
+}
+
+/** Caller must first verify native inventory has no live owner; this helper never stops a worker. */
+export async function setClaudeModelObserverEnabled(
+  input: BindingIdentity & { readonly enabled: boolean },
+): Promise<void> {
+  const binding = await readClaudeModelObserverBinding(input);
+  if (!binding) throw new Error("Claude observer binding was not found");
+  const job = await boundJob(input, binding);
+  if (!job) throw new Error("Claude observer binding no longer matches the native worker");
+  if (job.state !== "stopped" && job.state !== "failed")
+    throw new Error("Stop the native Claude worker before changing model observation");
+  const current = await privateSettingsRoute(binding.settingsPath);
+  if (current !== undefined && current !== binding.upstreamUrl && !proxyRoute(current))
     throw new Error("Invalid Claude observer private model route");
-  return true;
+  const route = input.enabled
+    ? (
+        await ensureClaudeModelObserver({
+          stateDir: binding.observerStateDir,
+          upstreamUrl: binding.upstreamUrl,
+        })
+      ).modelBaseUrl
+    : binding.upstreamUrl;
+  await atomicPrivateJson(binding.settingsPath, { env: { ANTHROPIC_BASE_URL: route } });
+  await writeClaudeModelObserverBinding({
+    ...binding,
+    stateDir: input.stateDir,
+    enabled: input.enabled,
+  });
 }
 
 /** Private settings keep the model-route bearer secret out of the native worker's argv. */
@@ -238,7 +314,11 @@ export async function prepareClaudeModelObserverSettings(input: {
   const upstreamUrl = upstreamHref(input.upstreamUrl);
   const observerStateDir = deriveClaudeModelObserverStateDir(input);
   const observer = await ensureClaudeModelObserver({ stateDir: observerStateDir, upstreamUrl });
-  const settingsPath = settingsPathFor(observerStateDir, upstreamUrl);
+  const settingsPath = NodePath.join(
+    observerStateDir,
+    "settings",
+    `${NodeCrypto.randomUUID()}.json`,
+  );
   await atomicPrivateJson(settingsPath, { env: { ANTHROPIC_BASE_URL: observer.modelBaseUrl } });
   return { settingsPath, observerStateDir, upstreamUrl };
 }

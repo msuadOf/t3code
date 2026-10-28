@@ -572,3 +572,236 @@ if [ "$1" = "agents" ]; then printf '%s' '${JSON.stringify([{ ...session, status
     expect(recovered).toEqual(bound ? [session.sessionId] : []);
   },
 );
+
+describe("owned model activity lifecycle changes", () => {
+  it("stops an idle owned worker, changes private settings, and wakes the same UUID for enable and disable", async () => {
+    await withLauncher(
+      (directory) => `
+printf '%s\\n' "$*" >> '${directory}/calls'
+if [ "$1" = "agents" ]; then cat '${directory}/inventory'
+elif [ "$1" = "stop" ] && [ "$2" = "1234abcd" ]; then printf '%s' '${JSON.stringify([{ ...session, cwd: directory, state: "stopped" }])}' > '${directory}/inventory'
+elif [ "$1" = "attach" ] && [ "$2" = "1234abcd" ]; then
+  printf '%s' '${JSON.stringify([{ ...session, cwd: directory, status: "idle", state: "working", pid: 43 }])}' > '${directory}/inventory'
+  while read input; do :; done
+else exit 42
+fi
+`,
+      async (_client, directory) => {
+        await NodeFSP.writeFile(
+          NodePath.join(directory, "inventory"),
+          JSON.stringify([
+            { ...session, cwd: directory, status: "idle", state: "working", pid: 42 },
+          ]),
+        );
+        const changed: boolean[] = [];
+        const client = new NativeClaudeClient({
+          binaryPath: NodePath.join(directory, "fake-claude"),
+          modelActivity: {
+            prepare: async () => {
+              throw new Error("must retain original launch");
+            },
+            bind: async () => {
+              throw new Error("must retain binding");
+            },
+            isBound: async () => false,
+            hasBinding: async () => true,
+            setEnabled: async (id, enabled) => {
+              expect(id).toBe(session.sessionId);
+              const inventory = JSON.parse(
+                await NodeFSP.readFile(NodePath.join(directory, "inventory"), "utf8"),
+              );
+              expect(inventory[0].state).toBe("stopped");
+              changed.push(enabled);
+            },
+          },
+        });
+        expect((await client.setModelActivityEnabled(session.sessionId!, false)).sessionId).toBe(
+          session.sessionId,
+        );
+        expect((await client.setModelActivityEnabled(session.sessionId!, true)).sessionId).toBe(
+          session.sessionId,
+        );
+        expect(changed).toEqual([false, true]);
+        const calls = await NodeFSP.readFile(NodePath.join(directory, "calls"), "utf8");
+        expect(calls.match(/stop 1234abcd/g)).toHaveLength(2);
+        expect(calls).not.toContain("--bg");
+        expect(calls).not.toContain("--resume");
+        expect(calls).not.toContain("reply");
+      },
+    );
+  });
+  it("refuses unbound, busy and racing owners without stopping them", async () => {
+    await withLauncher(
+      (directory) => `printf '%s\\n' "$*" >> '${directory}/calls'; exit 42`,
+      async (_client, directory) => {
+        let bound = false;
+        let mode = "idle";
+        let reads = 0;
+        class Client extends NativeClaudeClient {
+          override async listSessions(): Promise<readonly NativeClaudeSession[]> {
+            reads++;
+            return [
+              {
+                ...session,
+                pid: 42,
+                status: mode === "race" && reads === 2 ? "busy" : mode === "race" ? "idle" : mode,
+              },
+            ];
+          }
+        }
+        let changes = 0;
+        const client = new Client({
+          binaryPath: NodePath.join(directory, "fake-claude"),
+          modelActivity: {
+            prepare: async () => {
+              throw new Error("not used");
+            },
+            bind: async () => {},
+            isBound: async () => false,
+            hasBinding: async () => bound,
+            setEnabled: async () => {
+              changes++;
+            },
+          },
+        });
+        await expect(client.setModelActivityEnabled("bad", false)).rejects.toMatchObject({
+          code: "ESESSION",
+        });
+        await expect(
+          client.setModelActivityEnabled(session.sessionId!, false),
+        ).rejects.toMatchObject({ code: "EOBSERVERUNAVAILABLE" });
+        bound = true;
+        mode = "busy";
+        await expect(
+          client.setModelActivityEnabled(session.sessionId!, false),
+        ).rejects.toMatchObject({ code: "EBUSY" });
+        mode = "waiting";
+        await expect(
+          client.setModelActivityEnabled(session.sessionId!, false),
+        ).rejects.toMatchObject({ code: "EBUSY" });
+        mode = "race";
+        reads = 0;
+        await expect(
+          client.setModelActivityEnabled(session.sessionId!, false),
+        ).rejects.toMatchObject({ code: "EBUSY" });
+        expect(changes).toBe(0);
+        await expect(NodeFSP.stat(NodePath.join(directory, "calls"))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      },
+    );
+  });
+  it("keeps a stopped worker stopped if its settings callback fails", async () => {
+    await withLauncher(
+      () => "exit 42",
+      async (_client, directory) => {
+        class Client extends NativeClaudeClient {
+          override async listSessions(): Promise<readonly NativeClaudeSession[]> {
+            return [{ ...session, cwd: directory, state: "stopped" }];
+          }
+        }
+        const client = new Client({
+          binaryPath: NodePath.join(directory, "fake-claude"),
+          modelActivity: {
+            prepare: async () => {
+              throw new Error("not used");
+            },
+            bind: async () => {},
+            isBound: async () => false,
+            hasBinding: async () => true,
+            setEnabled: async () => {
+              throw new Error("private failure");
+            },
+          },
+        });
+        await expect(
+          client.setModelActivityEnabled(session.sessionId!, false),
+        ).rejects.toMatchObject({ code: "EOBSERVERSETTINGS" });
+      },
+    );
+  });
+});
+
+it.each(["busy", "missing"] as const)(
+  "does not edit settings when the owner becomes %s after stop",
+  async (mode) => {
+    let changes = 0;
+    await withLauncher(
+      (directory) => `
+if [ "$1" = "agents" ]; then
+  if [ -f '${directory}/stopped' ]; then printf '%s' '${JSON.stringify(mode === "busy" ? [{ ...session, cwd: directory, status: "busy", pid: 99 }] : [])}'; else printf '%s' '${JSON.stringify([{ ...session, cwd: directory, status: "idle", pid: 42 }])}'; fi
+elif [ "$1" = "stop" ]; then touch '${directory}/stopped'
+else exit 42
+fi
+`,
+      async (_client, directory) => {
+        const client = new NativeClaudeClient({
+          binaryPath: NodePath.join(directory, "fake-claude"),
+          modelActivity: {
+            prepare: async () => {
+              throw new Error("not used");
+            },
+            bind: async () => {},
+            isBound: async () => false,
+            hasBinding: async () => true,
+            setEnabled: async () => {
+              changes++;
+            },
+          },
+        });
+        await expect(
+          client.setModelActivityEnabled(session.sessionId!, false),
+        ).rejects.toMatchObject({ code: mode === "busy" ? "EBUSY" : "EOBSERVERSTATE" });
+        expect(changes).toBe(0);
+      },
+    );
+  },
+);
+
+it.each(["idle", "stopped"] as const)(
+  "does not stop or edit an externally replaced %s owner after binding ownership changes",
+  async (state) => {
+    await withLauncher(
+      (directory) => `printf '%s\\n' "$*" >> '${directory}/calls'; exit 42`,
+      async (_client, directory) => {
+        let checks = 0;
+        let changes = 0;
+        class Client extends NativeClaudeClient {
+          override async listSessions(): Promise<readonly NativeClaudeSession[]> {
+            return [
+              {
+                ...session,
+                cwd: directory,
+                pid: 77,
+                status: "idle",
+                state: state === "stopped" ? "stopped" : "working",
+              },
+            ];
+          }
+        }
+        const client = new Client({
+          binaryPath: NodePath.join(directory, "fake-claude"),
+          modelActivity: {
+            prepare: async () => {
+              throw new Error("must not prepare");
+            },
+            bind: async () => {},
+            isBound: async () => false,
+            hasBinding: async () => ++checks === 1,
+            setEnabled: async () => {
+              changes++;
+            },
+          },
+        });
+        await expect(
+          client.setModelActivityEnabled(session.sessionId!, false),
+        ).rejects.toMatchObject({ code: "EOBSERVERSTATE" });
+        expect(checks).toBe(2);
+        expect(changes).toBe(0);
+        await expect(NodeFSP.stat(NodePath.join(directory, "calls"))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      },
+    );
+  },
+);

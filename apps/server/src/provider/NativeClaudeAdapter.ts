@@ -1,6 +1,7 @@
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import {
   ProviderDriverKind,
+  PlanId,
   type ProviderInstanceId,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderSession,
@@ -9,6 +10,7 @@ import {
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2PlanArtifact,
   type ProviderUserInputAnswers,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -37,9 +39,11 @@ import {
   type NativeClaudeSession,
   type NativeClaudeModelActivity,
 } from "./NativeClaudeClient.ts";
+import type { NativeClaudeSubagentObservation } from "./NativeClaudeSubagents.ts";
+import { nativeClaudePlan } from "./NativeClaudePlanning.ts";
 import { NativeClaudeSessions } from "./NativeClaudeSessions.ts";
 
-const encodeQuestionInput = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const encodeNativeInput = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 /** A reply ACK has no native turn ID. Correlate only a new, matching user message. */
 export const nativeClaudeMatchesPendingTurn = (
@@ -103,15 +107,15 @@ export const nativeClaudeCapabilities = {
   },
   planning: {
     ...ClaudeProviderCapabilitiesV2.planning,
-    emitsPlanUpdated: false,
-    emitsTodoList: false,
-    emitsProposedPlan: false,
+    emitsPlanUpdated: true,
+    emitsTodoList: true,
+    emitsProposedPlan: true,
     supportsStructuredQuestions: true,
   },
   subagents: {
     ...ClaudeProviderCapabilitiesV2.subagents,
-    supportsSubagents: false,
-    emitsSubagentLifecycle: false,
+    supportsSubagents: true,
+    emitsSubagentLifecycle: true,
   },
   tools: {
     ...ClaudeProviderCapabilitiesV2.tools,
@@ -226,6 +230,8 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         }
       >();
       const eventSignatures = new Map<string, string>();
+      const plans = new Map<string, { signature: string; plan: OrchestrationV2PlanArtifact }>();
+      const latestPlans = new Map<string, OrchestrationV2PlanArtifact>();
       const progressStates = new Map<string, "running" | "waiting">();
       const emit = (event: ProviderAdapter.ProviderAdapterV2Event) => {
         if (
@@ -385,6 +391,117 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
           Effect.forkIn(sessionScope),
         );
       });
+      const subagentOwners = new Map<
+        string,
+        {
+          owner: ProviderAdapter.ProviderAdapterV2TurnInput;
+          providerTurnId: OrchestrationV2ProviderTurn["id"];
+        }
+      >();
+      const subagentSignatures = new Map<string, string>();
+      const publishSubagent = Effect.fnUntraced(function* (
+        sessionId: string,
+        observed: NativeClaudeSubagentObservation,
+      ) {
+        const key = `${sessionId}:${observed.toolId}`;
+        const binding = subagentOwners.get(key);
+        if (binding === undefined) return;
+        const signature = encodeNativeInput(observed);
+        if (subagentSignatures.get(key) === signature) return;
+        const { owner, providerTurnId } = binding;
+        const nativeItemId = `subagent:${sessionId}:${observed.toolId}`;
+        const nodeId = allocator.derive.nodeFromProviderItem({ driver, nativeItemId });
+        const at = yield* DateTime.now;
+        const startedAt = DateTime.makeUnsafe(observed.startedAt);
+        const completedAt =
+          observed.completedAt === undefined ? null : DateTime.makeUnsafe(observed.completedAt);
+        const status = observed.status === "unknown" ? "waiting" : observed.status;
+        const nativeItemRef = { driver, nativeId: observed.agentId, strength: "strong" as const };
+        const progress =
+          observed.status === "unknown"
+            ? "Native agent ended; its outcome is not yet confirmed."
+            : observed.progress;
+        yield* emit({
+          type: "node.updated",
+          driver,
+          node: {
+            id: nodeId,
+            threadId: owner.threadId,
+            runId: owner.runId,
+            parentNodeId: owner.rootNodeId,
+            rootNodeId: owner.rootNodeId,
+            kind: "subagent",
+            status,
+            countsForRun: false,
+            providerThreadId: owner.providerThread.id,
+            providerTurnId,
+            nativeItemRef,
+            runtimeRequestId: null,
+            checkpointScopeId: null,
+            startedAt,
+            completedAt,
+          },
+        });
+        yield* emit({
+          type: "subagent.updated",
+          driver,
+          subagent: {
+            id: nodeId,
+            threadId: owner.threadId,
+            runId: owner.runId,
+            parentNodeId: owner.rootNodeId,
+            origin: "provider_native",
+            createdBy: "agent",
+            driver,
+            providerInstanceId: options.instanceId,
+            providerThreadId: owner.providerThread.id,
+            childThreadId: null,
+            nativeTaskRef: nativeItemRef,
+            prompt: observed.prompt,
+            title: observed.title,
+            model: observed.model ?? null,
+            status: observed.status === "unknown" ? "idle" : observed.status,
+            ...(progress === undefined ? {} : { progress }),
+            result: observed.result ?? null,
+            startedAt,
+            completedAt,
+            updatedAt: at,
+          },
+        });
+        yield* emit({
+          type: "turn_item.updated",
+          driver,
+          turnItem: {
+            id: allocator.derive.turnItemFromProviderItem({ driver, nativeItemId }),
+            threadId: owner.threadId,
+            runId: owner.runId,
+            nodeId,
+            providerThreadId: owner.providerThread.id,
+            providerTurnId,
+            nativeItemRef,
+            parentItemId: allocator.derive.turnItemFromProviderItem({
+              driver,
+              nativeItemId: observed.toolId,
+            }),
+            ordinal: itemOrdinal(observed.turnId, nativeItemId),
+            status,
+            title: observed.title,
+            startedAt,
+            completedAt,
+            updatedAt: at,
+            type: "subagent",
+            subagentId: nodeId,
+            origin: "provider_native",
+            driver,
+            providerInstanceId: options.instanceId,
+            childThreadId: null,
+            prompt: observed.prompt,
+            ...(progress === undefined ? {} : { progress }),
+            result: observed.result ?? null,
+          },
+        });
+        subagentSignatures.set(key, signature);
+      });
       const hydrate = Effect.fn("NativeClaudeAdapter.observe")(function* () {
         const inventory = yield* attempt(() => client.listSessions());
         for (const [id, watcher] of watchers) {
@@ -406,6 +523,11 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
               }),
             ),
           );
+          const subagents = historyAvailable
+            ? yield* attempt(() => source.subagents(id)).pipe(
+                Effect.catch(() => Effect.succeed([])),
+              )
+            : [];
           const pending = active.get(id);
           const terminalJob = inventory.find((session) => session.sessionId === id);
           if (
@@ -539,6 +661,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                 const restored = yield* (
                   input.findNativeRuntimeRequest?.({
                     threadId: owner.threadId,
+                    nativeThreadId: id,
                     nativeTurnId: turn.id,
                     nativeRequestId: item.id,
                   }) ?? Effect.succeed(undefined)
@@ -632,7 +755,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                     nativeSessionId: id,
                     nativeTurnId: turn.id,
                     nativeToolId: item.id,
-                    inputSignature: encodeQuestionInput(item.input),
+                    inputSignature: encodeNativeInput(item.input),
                     answering: blocked,
                     request,
                     node,
@@ -734,6 +857,100 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                   output: item.text,
                 };
               yield* emit({ type: "turn_item.updated", driver, turnItem: projected });
+              const nativePlan = nativeClaudePlan(item);
+              if (nativePlan !== undefined) {
+                const nativeItemId = `${nativePlan.kind}:${item.id}`;
+                const key = `${owner.threadId}:${nativeItemId}`;
+                const signature = encodeNativeInput(nativePlan);
+                const previous = plans.get(key);
+                if (previous?.signature === signature) continue;
+                // Native tool IDs survive observer reconnects and T3 restarts.
+                const planId = PlanId.make(
+                  `plan:claude-native:${encodeURIComponent(owner.threadId)}:${encodeURIComponent(nativeItemId)}`,
+                );
+                const nodeId = allocator.derive.nodeFromProviderItem({ driver, nativeItemId });
+                const plan: OrchestrationV2PlanArtifact =
+                  nativePlan.kind === "todo_list"
+                    ? {
+                        id: planId,
+                        threadId: owner.threadId,
+                        runId: owner.runId,
+                        nodeId,
+                        kind: "todo_list",
+                        steps: [...nativePlan.steps],
+                        status: nativePlan.steps.every((step) => step.status === "completed")
+                          ? "completed"
+                          : "active",
+                      }
+                    : {
+                        id: planId,
+                        threadId: owner.threadId,
+                        runId: owner.runId,
+                        nodeId,
+                        kind: "proposed_plan",
+                        markdown: nativePlan.markdown,
+                        status: "active",
+                      };
+                const latestKey = `${owner.threadId}:${nativePlan.kind}`;
+                const latest = latestPlans.get(latestKey);
+                if (latest !== undefined && latest.id !== plan.id)
+                  yield* emit({
+                    type: "plan.updated",
+                    driver,
+                    plan: { ...latest, status: "superseded" },
+                  });
+                yield* emit({
+                  type: "node.updated",
+                  driver,
+                  node: {
+                    id: nodeId,
+                    threadId: owner.threadId,
+                    runId: owner.runId,
+                    parentNodeId: owner.rootNodeId,
+                    rootNodeId: owner.rootNodeId,
+                    kind: nativePlan.kind === "todo_list" ? "todo_list" : "plan",
+                    status: "completed",
+                    countsForRun: false,
+                    providerThreadId: thread.id,
+                    providerTurnId,
+                    nativeItemRef: common.nativeItemRef,
+                    runtimeRequestId: null,
+                    checkpointScopeId: null,
+                    startedAt,
+                    completedAt: updatedAt,
+                  },
+                });
+                yield* emit({ type: "plan.updated", driver, plan });
+                const planCommon = {
+                  ...common,
+                  id: allocator.derive.turnItemFromProviderItem({ driver, nativeItemId }),
+                  nodeId,
+                  ordinal: itemOrdinal(turn.id, nativeItemId),
+                  status: "completed" as const,
+                  completedAt: updatedAt,
+                  planId,
+                };
+                yield* emit({
+                  type: "turn_item.updated",
+                  driver,
+                  turnItem:
+                    nativePlan.kind === "todo_list"
+                      ? { ...planCommon, type: "todo_list", steps: [...nativePlan.steps] }
+                      : {
+                          ...planCommon,
+                          type: "proposed_plan",
+                          markdown: nativePlan.markdown,
+                          streaming: false,
+                        },
+                });
+                plans.set(key, { signature, plan });
+                latestPlans.set(latestKey, plan);
+              }
+            }
+            for (const child of subagents) {
+              if (child.turnId !== turn.id) continue;
+              subagentOwners.set(`${id}:${child.toolId}`, { owner, providerTurnId });
+              yield* publishSubagent(id, child);
             }
             if (finished) {
               const common = {
@@ -766,6 +983,8 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
               active.delete(id);
             }
           }
+          // Background children can finish after their parent model turn has ended.
+          for (const child of subagents) yield* publishSubagent(id, child);
           for (const [key, entry] of questions) {
             if (entry.nativeSessionId !== id || !historyAvailable) continue;
             const current = history.at(-1);
@@ -933,7 +1152,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
             const answer = nativeClaudeQuestionAnswer(entry.item.questions[0]!, response.answers);
             if (answer === undefined)
               return yield* unsupported(
-                "Claude requires one nonempty answer without command prefixes or control characters.",
+                "Choose known options for a multi-select question, or provide one nonempty answer without command prefixes or control characters.",
               );
             entry.answering = true;
             entry.request = {
@@ -961,7 +1180,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                     item.title === "AskUserQuestion" &&
                     item.status === "running",
                 ).length !== 1 ||
-                encodeQuestionInput(tool.input) !== entry.inputSignature
+                encodeNativeInput(tool.input) !== entry.inputSignature
               )
                 return yield* unsupported(
                   "The native Claude question changed or was answered in the CLI; no answer was sent.",

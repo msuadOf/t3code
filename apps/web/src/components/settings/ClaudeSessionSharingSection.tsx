@@ -62,7 +62,11 @@ export function ClaudeSessionSharingSection({
       );
     }
   }
-  async function openSession(sessionId: string, observeModelActivity = false) {
+  async function openSession(
+    sessionId: string,
+    observeModelActivity = false,
+    modelActivityAction?: "enable" | "disable",
+  ) {
     if (gate.current || !canOpen) return;
     gate.current = true;
     setBusy(true);
@@ -73,6 +77,7 @@ export function ClaudeSessionSharingSection({
         instanceId,
         sessionId,
         ...(observeModelActivity ? { observeModelActivity: true } : {}),
+        ...(modelActivityAction === undefined ? {} : { modelActivityAction }),
       },
     });
     gate.current = false;
@@ -183,7 +188,33 @@ export function ClaudeSessionSharingSection({
                         Continue with model activity
                       </Button>
                     ) : null}
+                    {session.modelActivityEnabled !== undefined && session.active === false ? (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={busy || !canOpen || query !== loadedQuery}
+                        onClick={() =>
+                          void openSession(
+                            session.sessionId,
+                            false,
+                            session.modelActivityEnabled ? "disable" : "enable",
+                          )
+                        }
+                      >
+                        {session.modelActivityEnabled
+                          ? "Restart without model activity"
+                          : "Restart with model activity"}
+                      </Button>
+                    ) : null}
                   </div>
+                  {session.modelActivityEnabled !== undefined ? (
+                    <p className="text-xs text-muted-foreground">
+                      Model activity is {session.modelActivityEnabled ? "enabled" : "disabled"}.
+                      Changing it restarts this native worker and disconnects terminal attachments.
+                      The session UUID stays the same. Restart is available only while Claude is
+                      idle.
+                    </p>
+                  ) : null}
                   {session.state === "history" && session.modelActivityAvailable === true ? (
                     <p className="text-xs text-muted-foreground">
                       Model activity is off by default. Enable it for this inactive session to see

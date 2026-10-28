@@ -623,7 +623,10 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     Layer.provide(ProjectionStoreV2.layer),
     Layer.provide(IdAllocator.layer),
   ),
-  NativeModelActivityService.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
+  NativeModelActivityService.layer.pipe(
+    Layer.provide(ProjectionStoreV2.layer),
+    Layer.provide(RuntimeLayer.layerEventSink),
+  ),
   ProviderUsageLimitsIngestion.layer,
   layerProviderInstallationRefresh,
   ReplayMarkers.layer,

@@ -21,6 +21,27 @@ describe("ProviderSettingsForm helpers", () => {
     ]);
   });
 
+  it("offers Claude model observation as a boolean opt-in rather than a text input", () => {
+    const claude = providerClients.get(ProviderDriverKind.make("claudeAgent"));
+    expect(claude).toBeDefined();
+    const field = deriveProviderSettingsFields(claude!).find(
+      (item) => item.key === "modelActivityForNewSessions",
+    )!;
+    expect(field.control).toBe("switch");
+    const enabled = nextProviderConfigWithFieldValue(
+      { modelActivityUpstreamUrl: "http://localhost:4000" },
+      field,
+      true,
+    );
+    expect(enabled).toEqual({
+      modelActivityUpstreamUrl: "http://localhost:4000",
+      modelActivityForNewSessions: true,
+    });
+    expect(nextProviderConfigWithFieldValue(enabled, field, false)).toEqual({
+      modelActivityUpstreamUrl: "http://localhost:4000",
+    });
+  });
+
   it("preserves unknown config keys while omitting empty configurable fields", () => {
     const opencode = providerClients.get(ProviderDriverKind.make("opencode"));
     expect(opencode).toBeDefined();

@@ -509,6 +509,10 @@ const make = Effect.gen(function* () {
           ...(session.modelActivityAvailable === undefined
             ? {}
             : { modelActivityAvailable: session.modelActivityAvailable }),
+          ...(session.modelActivityEnabled === undefined
+            ? {}
+            : { modelActivityEnabled: session.modelActivityEnabled }),
+          active: session.active,
           state: session.sharingState,
         })),
         nextOffset: offset + 30 < filtered.length ? offset + 30 : null,
@@ -528,12 +532,25 @@ const make = Effect.gen(function* () {
           return yield* new NativeSessionSharingError({ reason: "outside-root" });
         if (candidate.sharingState === "foreground")
           return yield* new NativeSessionSharingError({ reason: "foreground" });
-        const shared = yield* source.open(
-          input.sessionId,
-          input.observeModelActivity === undefined
-            ? undefined
-            : { observeModelActivity: input.observeModelActivity },
-        );
+        if (
+          input.modelActivityAction &&
+          (input.observeModelActivity !== undefined ||
+            candidate.active ||
+            !source.setModelActivityEnabled)
+        )
+          return yield* new NativeSessionSharingError({ reason: "open-failed" });
+        const shared =
+          input.modelActivityAction && source.setModelActivityEnabled
+            ? yield* source.setModelActivityEnabled(
+                input.sessionId,
+                input.modelActivityAction === "enable",
+              )
+            : yield* source.open(
+                input.sessionId,
+                input.observeModelActivity === undefined
+                  ? undefined
+                  : { observeModelActivity: input.observeModelActivity },
+              );
         if (shared.id !== input.sessionId || !isWithinSharedRoot(path, shared.cwd, root))
           return yield* new NativeSessionSharingError({ reason: "open-failed" });
         const owners = new Map<string, ThreadId>();
@@ -568,6 +585,22 @@ const make = Effect.gen(function* () {
                 providerInstanceId: instance.instanceId,
                 occurredAt: now,
                 payload: { ...target.appThread, archivedAt: null, updatedAt: now },
+              },
+            ],
+          });
+        }
+        if (input.modelActivityAction) {
+          const current = yield* store.getThread(target.appThread.id);
+          const now = yield* DateTime.now;
+          yield* sink.write({
+            events: [
+              {
+                id: yield* ids.allocate.event({ threadId: current.id }),
+                type: "thread.metadata-updated",
+                threadId: current.id,
+                providerInstanceId: instance.instanceId,
+                occurredAt: now,
+                payload: { ...current, updatedAt: now },
               },
             ],
           });

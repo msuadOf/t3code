@@ -150,16 +150,19 @@ export async function startClaudeModelObserver(input: {
     const requestId = NodeCrypto.randomUUID();
     let messageId: string | null = null;
     let messageStopped = false;
+    let captureGap = false;
+    let successfulNonStream = false;
     let requestEnded = false;
     const finish = (reason: "completed" | "upstream-error" | "client-disconnected") => {
       if (!sessionId || relative.endsWith("count_tokens") || requestEnded) return;
       requestEnded = true;
+      if (successfulNonStream && reason === "completed") return;
       publish({
         sessionId,
         requestId,
         messageId,
         type: "observer.request_end",
-        data: { reason, complete: messageStopped },
+        data: { reason, complete: messageStopped && !captureGap },
       });
     };
     const target = new URL(upstream.href);
@@ -172,6 +175,10 @@ export async function startClaudeModelObserver(input: {
       { method: request.method, headers: nativeHeaders },
       (native) => {
         response.writeHead(native.statusCode ?? 502, headers(native.headers));
+        successfulNonStream =
+          (native.statusCode ?? 502) >= 200 &&
+          (native.statusCode ?? 502) < 300 &&
+          !String(native.headers["content-type"]).includes("text/event-stream");
         const observing = Boolean(
           sessionId &&
           !relative.endsWith("count_tokens") &&
@@ -182,7 +189,8 @@ export async function startClaudeModelObserver(input: {
           sessionId &&
           native.headers["content-encoding"] &&
           String(native.headers["content-type"]).includes("text/event-stream")
-        )
+        ) {
+          captureGap = true;
           publish({
             sessionId,
             requestId,
@@ -190,6 +198,7 @@ export async function startClaudeModelObserver(input: {
             type: "observer.capture_gap",
             data: { reason: "compressed-response" },
           });
+        }
         const decoder = new TextDecoder();
         let buffered = "";
         let stopped = false;
@@ -197,6 +206,7 @@ export async function startClaudeModelObserver(input: {
           if (!observing || stopped) return;
           buffered = (buffered + decoder.decode(chunk, { stream: true })).replace(/\r\n/g, "\n");
           if (buffered.length > 2 * 1024 * 1024) {
+            captureGap = true;
             publish({
               sessionId: sessionId!,
               requestId,
@@ -218,6 +228,7 @@ export async function startClaudeModelObserver(input: {
                 .filter((line) => line.startsWith("data:"))
                 .map((line) => line.slice(5).trimStart())
                 .join("\n");
+              if (raw.length === 0) continue;
               const value: unknown = JSON.parse(raw);
               if (!object(value) || typeof value.type !== "string") continue;
               if (
@@ -246,12 +257,21 @@ export async function startClaudeModelObserver(input: {
                   data: value,
                 });
             } catch {
-              /* Malformed/unobserved SSE must not change the native response. */
+              captureGap = true;
+              publish({
+                sessionId: sessionId!,
+                requestId,
+                messageId,
+                type: "observer.capture_gap",
+                data: { reason: "malformed-event" },
+              });
             }
           }
         };
         native.on("data", tap);
-        native.on("end", () => finish("completed"));
+        native.on("end", () =>
+          finish((native.statusCode ?? 502) >= 400 ? "upstream-error" : "completed"),
+        );
         native.on("error", () => {
           finish("upstream-error");
           response.destroy();

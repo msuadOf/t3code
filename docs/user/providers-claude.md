@@ -43,16 +43,23 @@ The current native daemon integration has these limits:
 - Saved replies, tool output, and thinking blocks appear after Claude persists them.
   Opt-in local model activity can show provisional text and thinking earlier;
   see [Local model activity](#local-model-activity).
-- T3 can display and answer a native `AskUserQuestion` containing one single-select
-  or free-text question. It waits for Claude’s actual tool result before marking
-  the answer complete; submission alone is not confirmation. Multi-question and
-  multi-select prompts, and command/file permission approvals, still require
+- T3 can display and answer a native `AskUserQuestion` containing one single-select,
+  multiple-select, or free-text question. Multiple-select answers use the listed
+  options. It waits for Claude’s actual tool result before marking the answer
+  complete; submission alone is not confirmation. Multi-question prompts and
+  command/file permission approvals still require
   `claude attach`. T3 does not install hooks to forward these requests. The native
   reply API cannot atomically target a question, so avoid answering simultaneously
   from T3 and the CLI. The recorded native answer wins if another client answered.
 - Native daemon state notifications refresh progress promptly, with polling as a
   reconnect fallback. These notifications are separate from body/thinking token
   streams; terminal output is not parsed into chat messages.
+- Native `TodoWrite` results appear as structured task lists, and explicit
+  `ExitPlanMode` plan fields appear as proposed plans. A proposal is not an approval.
+- Native `Agent` and `Task` children appear with their original parent tool and
+  lifecycle. A background launch is not a completion; T3 requires a native terminal
+  notification or the child's own confirmed terminal state. Unconfirmed outcomes
+  remain unknown. These are observed children, not separately controllable T3 threads.
 - Claude supplies automatic conversation titles. Explicit title regeneration remains
   available; T3 auxiliary model tasks use separate, explicitly identified sessions
   without saving them to Claude’s history. Old auxiliary history without trustworthy
@@ -102,9 +109,14 @@ model request is not replayed automatically.
 A running worker cannot be upgraded in place. Stop it through Claude before
 explicitly reopening its inactive history with observation. Changing the upstream
 or disabling the new-session switch affects future launches; previously observed
-workers retain their original route. To stop observing one, stop its worker and
-reopen it normally through Claude without the observer settings. Global Claude
-settings are not changed.
+workers retain their original route. For an idle shared session, use **Restart
+without model activity** in the session browser to stop observing, or **Restart
+with model activity** to enable it again. This restarts the native worker and
+can disconnect terminal attachments, while preserving the session UUID and history.
+Avoid sending CLI input during this operation: the native stop command has no atomic
+idle precondition. T3 changes only that worker's private settings; global Claude
+settings and other workers remain unchanged. Simply stopping and resuming a job in
+Claude retains its saved launch settings and does not turn observation off.
 
 ## Separate accounts or configurations
 

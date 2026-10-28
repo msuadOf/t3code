@@ -38,6 +38,7 @@ export interface NativeHistoryTurn {
 export interface NativeSessionCandidate extends NativeSession {
   readonly historyAvailable?: boolean;
   readonly modelActivityAvailable?: boolean;
+  readonly modelActivityEnabled?: boolean;
   readonly sharingState: "history" | "foreground" | "shared";
 }
 
@@ -49,6 +50,10 @@ export interface NativeSessionSource {
   ) => Effect.Effect<ReadonlyArray<string>, ProviderDriverError>;
 
   readonly sharing?: {
+    readonly setModelActivityEnabled?: (
+      sessionId: string,
+      enabled: boolean,
+    ) => Effect.Effect<NativeSession, ProviderDriverError>;
     readonly list: Effect.Effect<ReadonlyArray<NativeSessionCandidate>, ProviderDriverError>;
     readonly open: (
       sessionId: string,

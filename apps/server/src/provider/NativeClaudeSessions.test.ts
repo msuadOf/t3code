@@ -387,3 +387,124 @@ it.effect("confirms only persisted native model message IDs with a bounded recen
     ]);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it.effect(
+  "reads only sidecars correlated to a parent Agent receipt in the original full-UUID session",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped();
+      const id = "1234abcd-1234-1234-1234-123456789abc";
+      const agentId = "a5321b469ff7aa652";
+      const directory = path.join(root, "projects", "workspace");
+      const childDirectory = path.join(directory, id, "subagents");
+      yield* fs.makeDirectory(childDirectory, { recursive: true });
+      const records = [
+        {
+          type: "user",
+          uuid: "prompt",
+          parentUuid: null,
+          timestamp: "2026-10-28T17:24:29Z",
+          message: { content: "work" },
+        },
+        {
+          type: "assistant",
+          uuid: "call",
+          parentUuid: "prompt",
+          message: {
+            content: [
+              { type: "tool_use", id: "agent-tool", name: "Agent", input: { prompt: "Child" } },
+            ],
+            stop_reason: "tool_use",
+          },
+        },
+        {
+          type: "user",
+          uuid: "result",
+          parentUuid: "call",
+          toolUseResult: { status: "async_launched", agentId, prompt: "Child" },
+          message: {
+            content: [{ type: "tool_result", tool_use_id: "agent-tool", content: "launched" }],
+          },
+        },
+      ];
+      yield* fs.writeFileString(
+        path.join(directory, `${id}.jsonl`),
+        records.map((record) => JSON.stringify(record)).join("\n") + "\n",
+      );
+      yield* fs.writeFileString(
+        path.join(childDirectory, `agent-${agentId}.meta.json`),
+        JSON.stringify({ toolUseId: "agent-tool", finished: true }),
+      );
+      yield* fs.writeFileString(
+        path.join(childDirectory, `agent-${agentId}.jsonl`),
+        JSON.stringify({
+          type: "assistant",
+          sessionId: id,
+          agentId,
+          isSidechain: true,
+          timestamp: "2026-10-28T17:24:30Z",
+          message: {
+            stop_reason: "end_turn",
+            model: "native-child-model",
+            content: [{ type: "text", text: "Child result" }],
+          },
+        }) + "\n",
+      );
+      const source = new NativeClaudeSessions(root, new NativeClaudeClient());
+      const children = yield* Effect.promise(() => source.subagents(id));
+      expect(children).toHaveLength(1);
+      expect(children[0]).toMatchObject({
+        toolId: "agent-tool",
+        agentId,
+        status: "completed",
+        result: "Child result",
+        model: "native-child-model",
+      });
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it("keeps machine child notifications on the existing turn without hiding a user's identical pasted XML", () => {
+  const xml =
+    "<task-notification><task-id>agent</task-id><status>completed</status></task-notification>";
+  const entries = [
+    { type: "user", uuid: "human", parentUuid: null, message: { content: "work" } },
+    {
+      type: "assistant",
+      uuid: "first",
+      parentUuid: "human",
+      message: { content: "started", stop_reason: "end_turn" },
+    },
+    {
+      type: "user",
+      uuid: "machine",
+      parentUuid: "first",
+      turnOrigin: "task_notification",
+      origin: { kind: "task-notification", producer: "session-task" },
+      promptSource: "system",
+      message: { content: xml },
+    },
+    {
+      type: "assistant",
+      uuid: "report",
+      parentUuid: "machine",
+      message: { content: "Child finished", stop_reason: "end_turn" },
+    },
+    { type: "user", uuid: "paste", parentUuid: "report", message: { content: xml } },
+  ];
+  const turns = nativeClaudeHistory(entries);
+  expect(turns).toHaveLength(2);
+  expect(turns[0]?.items.map((item) => item.text)).toEqual(["work", "started", "Child finished"]);
+  expect(turns[1]?.id).toBe("paste");
+  expect(turns[1]?.items[0]?.text).toBe(xml);
+  expect(
+    nativeClaudeHistory(
+      entries.map((entry) =>
+        entry.uuid === "machine"
+          ? { ...entry, origin: { kind: "task-notification", producer: "other" } }
+          : entry,
+      ),
+    ),
+  ).toHaveLength(3);
+});

@@ -54,6 +54,9 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
+const DUPLICATE_NATIVE_REQUEST_REASON =
+  "Duplicate native request was superseded by its original persisted identity.";
+
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_IDLE_PIN_MS = 4 * 60 * 60 * 1000;
 const RELEASE_SCOPE_CLOSE_TIMEOUT_MS = 30 * 1000;
@@ -2220,6 +2223,8 @@ export const layerWithOptions = (
                         "runtimeRequests",
                         "providerTurns",
                         "providerThreads",
+                        "nodes",
+                        "turnItems",
                       ]);
                       const turns = new Set(
                         records.providerTurns
@@ -2230,9 +2235,16 @@ export const layerWithOptions = (
                             return (
                               turn.nativeTurnRef?.nativeId === request.nativeTurnId &&
                               turn.nativeTurnRef.driver === entry.runtime.driver &&
-                              thread?.providerSessionId === entry.runtime.providerSessionId &&
+                              thread?.appThreadId === request.threadId &&
                               thread.driver === entry.runtime.driver &&
-                              thread.providerInstanceId === entry.runtime.instanceId
+                              thread.providerInstanceId === entry.runtime.instanceId &&
+                              (request.nativeThreadId === undefined ||
+                                thread.nativeThreadRef?.nativeId === request.nativeThreadId) &&
+                              (thread.providerSessionId === entry.runtime.providerSessionId ||
+                                (thread.providerSessionId === null &&
+                                  request.nativeThreadId !== undefined &&
+                                  thread.nativeThreadRef?.driver === entry.runtime.driver &&
+                                  thread.nativeThreadRef.nativeId === request.nativeThreadId))
                             );
                           })
                           .map((turn) => turn.id),
@@ -2245,13 +2257,95 @@ export const layerWithOptions = (
                           driver: adapter.driver,
                           detail: "Native request runtime changed during lookup.",
                         });
-                      return records.runtimeRequests.findLast(
+                      const candidates = records.runtimeRequests.filter(
                         (candidate) =>
                           candidate.providerTurnId !== null &&
                           turns.has(candidate.providerTurnId) &&
                           candidate.nativeRequestRef?.nativeId === request.nativeRequestId &&
-                          candidate.nativeRequestRef.driver === entry.runtime.driver,
+                          candidate.nativeRequestRef.driver === entry.runtime.driver &&
+                          !(
+                            candidate.status === "cancelled" &&
+                            candidate.responseCapability.type === "not_resumable" &&
+                            candidate.responseCapability.reason === DUPLICATE_NATIVE_REQUEST_REASON
+                          ),
                       );
+                      const priority = (candidate: OrchestrationV2RuntimeRequest) =>
+                        candidate.status === "resolved"
+                          ? 0
+                          : candidate.submittedAt !== undefined ||
+                              candidate.responseCapability.type === "not_resumable"
+                            ? 1
+                            : 2;
+                      candidates.sort(
+                        (a, b) =>
+                          priority(a) - priority(b) ||
+                          DateTime.toEpochMillis(a.createdAt) -
+                            DateTime.toEpochMillis(b.createdAt) ||
+                          a.id.localeCompare(b.id),
+                      );
+                      const canonical = candidates[0];
+                      const duplicates = candidates
+                        .slice(1)
+                        .filter((candidate) => candidate.status === "pending");
+                      if (duplicates.length > 0) {
+                        const now = yield* DateTime.now;
+                        const events: OrchestrationV2DomainEvent[] = [];
+                        for (const duplicate of duplicates) {
+                          events.push({
+                            id: yield* idAllocator.allocate.event({ threadId: request.threadId }),
+                            type: "runtime-request.updated",
+                            threadId: request.threadId,
+                            occurredAt: now,
+                            payload: {
+                              ...duplicate,
+                              status: "cancelled",
+                              resolvedAt: now,
+                              responseCapability: {
+                                type: "not_resumable",
+                                reason: DUPLICATE_NATIVE_REQUEST_REASON,
+                              },
+                            },
+                          });
+                          const node = records.nodes.find((node) => node.id === duplicate.nodeId);
+                          if (
+                            node &&
+                            (node.kind === "user_input_request" ||
+                              node.kind === "approval_request") &&
+                            node.runtimeRequestId === duplicate.id &&
+                            (node.status === "waiting" || node.status === "running")
+                          )
+                            events.push({
+                              id: yield* idAllocator.allocate.event({ threadId: request.threadId }),
+                              type: "node.updated",
+                              threadId: request.threadId,
+                              occurredAt: now,
+                              payload: { ...node, status: "cancelled", completedAt: now },
+                            });
+                          for (const item of records.turnItems)
+                            if (
+                              (item.type === "user_input_request" ||
+                                item.type === "approval_request") &&
+                              item.requestId === duplicate.id &&
+                              (item.status === "waiting" || item.status === "running")
+                            )
+                              events.push({
+                                id: yield* idAllocator.allocate.event({
+                                  threadId: request.threadId,
+                                }),
+                                type: "turn-item.updated",
+                                threadId: request.threadId,
+                                occurredAt: now,
+                                payload: {
+                                  ...item,
+                                  status: "cancelled",
+                                  completedAt: now,
+                                  updatedAt: now,
+                                },
+                              });
+                        }
+                        yield* eventSink.write({ events });
+                      }
+                      return canonical;
                     },
                     Effect.mapError(
                       (cause) =>

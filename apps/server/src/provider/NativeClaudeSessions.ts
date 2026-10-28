@@ -14,6 +14,13 @@ import {
   type NativeClaudeSession,
 } from "./NativeClaudeClient.ts";
 
+import {
+  isNativeClaudeTaskNotification,
+  nativeClaudeSubagentLaunches,
+  observeNativeClaudeSubagent,
+  type NativeClaudeSubagentObservation,
+} from "./NativeClaudeSubagents.ts";
+
 function nativeSessionTitle(session: NativeClaudeSession | undefined): string | undefined {
   const name = session?.name?.trim();
   if (
@@ -91,6 +98,8 @@ export function nativeClaudeHistory(entries: readonly Entry[]): readonly NativeH
   const assistantTurns = new Map<string, (typeof turns)[number]>();
   const promptTurns = new Map<string, (typeof turns)[number]>();
   for (const entry of conversationBranch(entries)) {
+    // Native child reports belong to the original work, not to a new human prompt.
+    if (isNativeClaudeTaskNotification(entry)) continue;
     if (!object(entry.message)) continue;
     const message = entry.message;
     const content =
@@ -268,6 +277,23 @@ export class NativeClaudeSessions {
     return shared;
   }
 
+  async setModelActivityEnabled(sessionId: string, enabled: boolean): Promise<NativeSession> {
+    const candidate = (await this.available()).find((session) => session.id === sessionId);
+    if (!candidate || candidate.sharingState !== "shared" || candidate.active)
+      throw new NativeClaudeError(
+        "EOBSERVERSTATE",
+        "Model activity can only be changed for an idle shared Claude worker.",
+      );
+    await this.client.setModelActivityEnabled(sessionId, enabled);
+    const shared = (await this.list()).find((session) => session.id === sessionId);
+    if (!shared)
+      throw new NativeClaudeError(
+        "ENOJOB",
+        "Claude did not expose the original shared session after restarting.",
+      );
+    return shared;
+  }
+
   async available(onlyShared = false): Promise<readonly NativeSessionCandidate[]> {
     // CLI inventory failure must be surfaced: otherwise a live writer could appear safely idle.
     const live = await this.client.listSessions();
@@ -396,6 +422,48 @@ export class NativeClaudeSessions {
     );
     if (job && (await this.localJob(job))) return [];
     throw new Error("Claude session transcript was not found.");
+  }
+
+  /** Read only sidecars named by a canonical parent Agent/Task receipt, never its outputFile path. */
+  async subagents(sessionId: string): Promise<readonly NativeClaudeSubagentObservation[]> {
+    if (!UUID.test(sessionId)) throw new Error("Invalid Claude session ID.");
+    for (const file of await this.files()) {
+      if (NodePath.basename(file, ".jsonl") !== sessionId) continue;
+      const entries = (await this.transcript(file)).entries;
+      const launches = nativeClaudeSubagentLaunches(
+        nativeClaudeHistory(entries),
+        conversationBranch(entries),
+      );
+      return await Promise.all(
+        launches.map(async (launch) => {
+          const base = NodePath.join(
+            NodePath.dirname(file),
+            sessionId,
+            "subagents",
+            `agent-${launch.agentId}`,
+          );
+          let sidecar: { metadata: unknown; entries: readonly Entry[] } | undefined;
+          try {
+            const [metadata, transcript] = await Promise.all([
+              NodeFSP.readFile(`${base}.meta.json`, "utf8").then(
+                (text) => JSON.parse(text) as unknown,
+              ),
+              this.transcript(`${base}.jsonl`),
+            ]);
+            sidecar = { metadata, entries: transcript.entries };
+          } catch (cause) {
+            if (!object(cause) || cause.code !== "ENOENT") throw cause;
+          }
+          return observeNativeClaudeSubagent(
+            sessionId,
+            launch,
+            conversationBranch(entries),
+            sidecar,
+          );
+        }),
+      );
+    }
+    return [];
   }
 
   async history(

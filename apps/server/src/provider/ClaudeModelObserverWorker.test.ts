@@ -303,3 +303,87 @@ it("cancels the upstream model request when native CLI disconnects before respon
     await new Promise<void>((resolve) => upstream.close(() => resolve()));
   }
 });
+
+it.each([
+  {
+    name: "malformed SSE JSON",
+    status: 200,
+    contentType: "text/event-stream",
+    payload: 'data: {broken}\n\ndata: {"type":"message_stop"}\n\n',
+    gap: true,
+    complete: false,
+    events: 3,
+  },
+  {
+    name: "SSE comments and ping",
+    status: 200,
+    contentType: "text/event-stream",
+    payload:
+      ': heartbeat\n\nevent: ping\n\ndata: {"type":"ping"}\n\ndata: {"type":"message_stop"}\n\n',
+    gap: false,
+    complete: true,
+    events: 2,
+  },
+  {
+    name: "successful non-stream JSON",
+    status: 200,
+    contentType: "application/json",
+    payload: '{"type":"message","content":[{"type":"text","text":"normal reply"}]}',
+    gap: false,
+    complete: undefined,
+    events: 0,
+  },
+  {
+    name: "non-stream native HTTP error",
+    status: 403,
+    contentType: "application/json",
+    payload: '{"type":"error","error":{"type":"permission_error","message":"native error"}}',
+    gap: false,
+    complete: false,
+    events: 1,
+  },
+])("preserves the native response and reports observation accurately for $name", async (test) => {
+  const sessionId = "11111111-2222-4333-8444-555555555555";
+  const upstream = NodeHttp.createServer(async (request, response) => {
+    for await (const _chunk of request) {
+      /* Consume the native request before sending its response. */
+    }
+    response.writeHead(test.status, {
+      "content-type": test.contentType,
+      "x-native-fixture": "unchanged",
+    });
+    response.end(test.payload);
+  });
+  await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const address = upstream.address();
+  if (!address || typeof address === "string") throw new Error("No upstream");
+  const observer = await startClaudeModelObserver({
+    upstreamUrl: `http://127.0.0.1:${address.port}`,
+    token: "fixture",
+  });
+  try {
+    const url = `http://127.0.0.1:${observer.port}`;
+    const result = await fetch(`${url}/proxy/fixture/v1/messages`, {
+      method: "POST",
+      body: JSON.stringify({ metadata: { user_id: JSON.stringify({ session_id: sessionId }) } }),
+    });
+    expect(result.status).toBe(test.status);
+    expect(result.headers.get("content-type")).toBe(test.contentType);
+    expect(result.headers.get("x-native-fixture")).toBe("unchanged");
+    expect(await result.text()).toBe(test.payload);
+    const { readClaudeModelActivitySnapshot } = await import("./ClaudeModelObserver.ts");
+    const snapshot = await readClaudeModelActivitySnapshot({ url, token: "fixture", sessionId });
+    expect(snapshot.events).toHaveLength(test.events);
+    expect(snapshot.events.some((event) => event.type === "observer.capture_gap")).toBe(test.gap);
+    if (test.gap) expect(snapshot.events[0]?.data).toEqual({ reason: "malformed-event" });
+    if (test.complete !== undefined)
+      expect(snapshot.events.at(-1)?.data).toMatchObject({
+        complete: test.complete,
+        reason: test.status >= 400 ? "upstream-error" : "completed",
+      });
+  } finally {
+    await observer.close();
+    upstream.closeAllConnections();
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  }
+});

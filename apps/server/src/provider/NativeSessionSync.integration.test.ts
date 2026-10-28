@@ -798,3 +798,77 @@ it.effect(
       }).pipe(Effect.provide(context.layer));
     }).pipe(Effect.scoped),
 );
+
+it.effect(
+  "changes model activity only through the idle owned session action and preserves its thread",
+  () =>
+    Effect.gen(function* () {
+      const idle = {
+        ...native("owned"),
+        sharingState: "shared" as const,
+        modelActivityEnabled: true,
+      };
+      const busy = {
+        ...native("busy", "/host/repo", true),
+        sharingState: "shared" as const,
+        modelActivityEnabled: true,
+      };
+      const calls: Array<{ id: string; enabled: boolean }> = [];
+      const context = fixture([
+        provider(claude, claudeDriver, {
+          list: Effect.succeed([idle, busy]),
+          history: () => Effect.succeed([]),
+          sharing: {
+            list: Effect.succeed([idle, busy]),
+            open: () => Effect.die("An activity action must use the native reconfiguration method"),
+            setModelActivityEnabled: (id, enabled) =>
+              Effect.sync(() => {
+                calls.push({ id, enabled });
+                return { ...idle, modelActivityEnabled: enabled };
+              }),
+          },
+        }),
+      ]);
+      yield* Effect.gen(function* () {
+        const sync = yield* NativeSessionSync.NativeSessionSync;
+        const listed = yield* sync.list({ instanceId: claude });
+        assert.isTrue(listed.sessions.find((session) => session.sessionId === "busy")?.active);
+        assert.isTrue(
+          listed.sessions.find((session) => session.sessionId === "owned")?.modelActivityEnabled,
+        );
+        const disabled = yield* sync.open({
+          instanceId: claude,
+          sessionId: "owned",
+          modelActivityAction: "disable",
+        });
+        const enabled = yield* sync.open({
+          instanceId: claude,
+          sessionId: "owned",
+          modelActivityAction: "enable",
+        });
+        assert.equal(disabled.threadId, enabled.threadId);
+        assert.deepEqual(calls, [
+          { id: "owned", enabled: false },
+          { id: "owned", enabled: true },
+        ]);
+        assert.equal(
+          (yield* sync
+            .open({ instanceId: claude, sessionId: "busy", modelActivityAction: "disable" })
+            .pipe(Effect.flip)).reason,
+          "open-failed",
+        );
+        assert.equal(
+          (yield* sync
+            .open({
+              instanceId: claude,
+              sessionId: "owned",
+              modelActivityAction: "enable",
+              observeModelActivity: true,
+            })
+            .pipe(Effect.flip)).reason,
+          "open-failed",
+        );
+        assert.lengthOf(calls, 2);
+      }).pipe(Effect.provide(context.layer));
+    }).pipe(Effect.scoped),
+);

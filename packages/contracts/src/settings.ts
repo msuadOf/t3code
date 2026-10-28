@@ -722,6 +722,7 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     modelActivityForNewSessions: Schema.optionalKey(Schema.Boolean).pipe(
       Schema.annotateKey({
         title: "Observe model activity in new sessions",
+        providerSettingsForm: { control: "switch" },
         description:
           "Opt in new Claude workers to the local observer above. Streams may include auxiliary model activity and remain provisional until Claude saves them. Does not change existing workers or global Claude settings.",
       }),
