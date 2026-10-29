@@ -1121,6 +1121,7 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   context: Schema.optional(OrchestrationMessageContext),
   attachments: Schema.Array(ChatAttachment),
   streaming: Schema.Boolean,
+  textPrefixMissing: Schema.optional(Schema.Boolean),
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
   delegatedCompletion: Schema.optional(
@@ -1380,12 +1381,14 @@ export const OrchestrationV2TurnItem = Schema.Union([
     text: Schema.String,
     attachments: Schema.optional(Schema.Array(ChatAttachment)),
     streaming: Schema.Boolean,
+    textPrefixMissing: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("reasoning"),
     text: Schema.String,
     streaming: Schema.Boolean,
+    textPrefixMissing: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2146,12 +2149,14 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     text: Schema.String,
     attachments: Schema.optional(Schema.Array(ChatAttachment)),
     streaming: Schema.Boolean,
+    textPrefixMissing: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("reasoning"),
     text: Schema.String,
     streaming: Schema.Boolean,
+    textPrefixMissing: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,

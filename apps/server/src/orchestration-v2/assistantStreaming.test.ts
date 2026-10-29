@@ -55,3 +55,17 @@ it("holds a streamed section heading until its content has a boundary", () => {
     rest: "Next",
   });
 });
+
+it("delivers a changed missing-prefix warning even when paragraph text has not changed", () => {
+  const filter = makeAssistantStreamingFilter("paragraph");
+  const message = {
+    type: "message.updated",
+    driver: "opencode",
+    message: { id: "reply", role: "assistant", text: "Same paragraph.\n\n", streaming: true },
+  } as Extract<ProviderAdapter.ProviderAdapterV2Event, { type: "message.updated" }>;
+  expect(filter(message, 0)).not.toBeNull();
+  const partial = { ...message, message: { ...message.message, textPrefixMissing: true } };
+  expect(filter(partial, 1)).toEqual(partial);
+  expect(filter(partial, 500)).toBeNull();
+  expect(filter(message, 501)).toEqual(message);
+});

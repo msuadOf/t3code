@@ -42,7 +42,7 @@ export interface NativeSessionHistoryInput {
   >;
 }
 
-/** Materialize historical native items without replacing any live-owned record. */
+/** Fill native history and repair explicitly incomplete text from completed native blocks. */
 export const mapHistory = (
   input: NativeSessionHistoryInput,
   idAllocator: IdAllocator.IdAllocatorV2["Service"],
@@ -58,7 +58,9 @@ export const mapHistory = (
         turn.providerThreadId === input.providerThread.id ? Math.max(max, turn.ordinal) : max,
       0,
     ) ?? 0;
-  const existingMessages = new Set(input.existing?.messages.map((message) => message.id));
+  const existingMessages = new Map(
+    input.existing?.messages.map((message) => [message.id, message]),
+  );
   const existingItems = new Map(input.existing?.turnItems.map((item) => [item.id, item]));
   for (const turn of input.turns) {
     const active = turn.status === "running";
@@ -236,10 +238,35 @@ export const mapHistory = (
       completedAt,
       updatedAt: completedAt,
     });
-    const appendItem = (item: OrchestrationV2TurnItem) => {
-      if (existingItems.has(item.id)) return;
+    const appendItem = (item: OrchestrationV2TurnItem, source?: NativeHistoryItem) => {
+      const previous = existingItems.get(item.id);
+      if (previous !== undefined) {
+        if (
+          source?.status !== "completed" ||
+          previous.providerThreadId !== input.providerThread.id ||
+          !("textPrefixMissing" in previous) ||
+          previous.textPrefixMissing !== true ||
+          !(
+            (previous.type === "assistant_message" && item.type === "assistant_message") ||
+            (previous.type === "reasoning" && item.type === "reasoning")
+          ) ||
+          item.text.length === 0
+        )
+          return;
+        const { textPrefixMissing: _missing, ...complete } = previous;
+        item = {
+          ...complete,
+          text: item.text,
+          streaming: false,
+          status: item.status,
+          completedAt: item.completedAt,
+          updatedAt: item.updatedAt,
+        };
+      }
       events.push({
-        id: EventId.make(`native-${driver}-history:${input.appThread.id}:item:${item.id}`),
+        id: EventId.make(
+          `native-${driver}-history:${input.appThread.id}:item:${item.id}${previous === undefined ? "" : ":prefix-recovered"}`,
+        ),
         type: "turn-item.updated",
         threadId: input.appThread.id,
         runId,
@@ -270,8 +297,17 @@ export const mapHistory = (
             existingUserItem?.id ?? idAllocator.derive.userTurnItem({ messageId: rootMessageId });
         }
         const text = item.text;
-        if (!existingMessages.has(messageId)) {
-          const message: OrchestrationV2ConversationMessage = {
+        const previousMessage = existingMessages.get(messageId);
+        const repairMessage =
+          item.type === "assistant" &&
+          item.status === "completed" &&
+          text.length > 0 &&
+          previousMessage?.role === "assistant" &&
+          previousMessage.threadId === input.appThread.id &&
+          "textPrefixMissing" in previousMessage &&
+          previousMessage.textPrefixMissing === true;
+        if (previousMessage === undefined || repairMessage) {
+          let message: OrchestrationV2ConversationMessage = {
             id: messageId,
             createdBy: item.type === "user" ? "user" : "agent",
             creationSource: "provider",
@@ -285,8 +321,14 @@ export const mapHistory = (
             createdAt: startedAt,
             updatedAt: completedAt,
           };
+          if (previousMessage !== undefined && "textPrefixMissing" in previousMessage) {
+            const { textPrefixMissing: _missing, ...complete } = previousMessage;
+            message = { ...complete, text, streaming: false, updatedAt: completedAt };
+          }
           events.push({
-            id: EventId.make(`native-${driver}-history:${input.appThread.id}:message:${messageId}`),
+            id: EventId.make(
+              `native-${driver}-history:${input.appThread.id}:message:${messageId}${previousMessage === undefined ? "" : ":prefix-recovered"}`,
+            ),
             type: "message.updated",
             threadId: input.appThread.id,
             runId,
@@ -308,9 +350,10 @@ export const mapHistory = (
                 creationSource: "provider",
               }
             : { ...common, type: "assistant_message", messageId, text, streaming: false },
+          item,
         );
       } else if (item.type === "reasoning") {
-        appendItem({ ...base(item), type: "reasoning", text: item.text, streaming: false });
+        appendItem({ ...base(item), type: "reasoning", text: item.text, streaming: false }, item);
       } else {
         appendItem({
           ...base(item),

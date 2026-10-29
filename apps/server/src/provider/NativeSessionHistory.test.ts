@@ -245,6 +245,136 @@ for (const provider of ["claudeAgent", "opencode"] as const) {
         assert.equal(existing.runs[0]?.status, "running");
       }),
     );
+    it.effect(
+      "repairs only marked text from completed native blocks without changing identity",
+      () =>
+        Effect.gen(function* () {
+          const allocator = yield* IdAllocator.IdAllocatorV2;
+          const input = fixture(ProviderDriverKind.make(provider));
+          const existing = recordsOf(mapHistory(input, allocator));
+          existing.messages = existing.messages.map((message) =>
+            message.role === "assistant"
+              ? {
+                  ...message,
+                  text: "latest suffix",
+                  textPrefixMissing: true,
+                  streaming: false,
+                  createdAt: DateTime.makeUnsafe(115000),
+                }
+              : message,
+          );
+          existing.turnItems = existing.turnItems.map((item) =>
+            item.type === "assistant_message" || item.type === "reasoning"
+              ? {
+                  ...item,
+                  text: "latest suffix",
+                  textPrefixMissing: true,
+                  streaming: false,
+                  ordinal: item.ordinal + 10,
+                  title: "Keep live title",
+                }
+              : item,
+          );
+          const events = mapHistory({ ...input, existing }, allocator);
+          const repaired = recordsOf(events);
+          assert.equal(events.length, 3);
+          assert.equal(repaired.messages.length, 1);
+          assert.equal(repaired.messages[0]?.id, existing.messages[1]?.id);
+          assert.equal(repaired.messages[0]?.text, "The repository is clean.");
+          assert.equal(repaired.messages[0]?.createdAt, existing.messages[1]?.createdAt);
+          assert.isFalse(Object.hasOwn(repaired.messages[0]!, "textPrefixMissing"));
+          assert.deepEqual(
+            repaired.turnItems.map((item) => [item.id, "text" in item ? item.text : undefined]),
+            existing.turnItems
+              .filter((item) => item.type === "reasoning" || item.type === "assistant_message")
+              .map((item) => [
+                item.id,
+                item.type === "reasoning" ? "Find the entry point" : "The repository is clean.",
+              ]),
+          );
+          for (const item of repaired.turnItems) {
+            const previous = existing.turnItems.find((candidate) => candidate.id === item.id)!;
+            assert.equal(item.ordinal, previous.ordinal);
+            assert.equal(item.nodeId, previous.nodeId);
+            assert.equal(item.providerTurnId, previous.providerTurnId);
+            assert.equal(item.title, previous.title);
+            assert.isFalse(Object.hasOwn(item, "textPrefixMissing"));
+          }
+          const recovered = {
+            ...existing,
+            messages: existing.messages.map(
+              (message) => repaired.messages.find((entry) => entry.id === message.id) ?? message,
+            ),
+            turnItems: existing.turnItems.map(
+              (item) => repaired.turnItems.find((entry) => entry.id === item.id) ?? item,
+            ),
+          };
+          assert.deepEqual(mapHistory({ ...input, existing: recovered }, allocator), []);
+        }),
+    );
+    it.effect(
+      "repairs completed thinking in an active turn without touching its assistant suffix",
+      () =>
+        Effect.gen(function* () {
+          const allocator = yield* IdAllocator.IdAllocatorV2;
+          const input = fixture(ProviderDriverKind.make(provider));
+          const existing = recordsOf(mapHistory(input, allocator));
+          existing.messages = existing.messages.map((message) =>
+            message.role === "assistant"
+              ? { ...message, text: "latest suffix", textPrefixMissing: true, streaming: true }
+              : message,
+          );
+          existing.turnItems = existing.turnItems.map((item) =>
+            item.type === "assistant_message" || item.type === "reasoning"
+              ? { ...item, text: "latest suffix", textPrefixMissing: true, streaming: true }
+              : item,
+          );
+          const turns = input.turns.map((turn) => ({
+            ...turn,
+            status: "running" as const,
+            completedAt: null,
+          }));
+          const events = mapHistory({ ...input, turns, existing }, allocator);
+          assert.equal(events.length, 1);
+          const reasoning = recordsOf(events).turnItems[0];
+          assert.equal(reasoning?.type, "reasoning");
+          assert.equal(
+            reasoning && "text" in reasoning ? reasoning.text : null,
+            "Find the entry point",
+          );
+          assert.isFalse(Object.hasOwn(reasoning!, "textPrefixMissing"));
+        }),
+    );
+    it.effect("keeps missing-text markers through unfinished and empty native history", () =>
+      Effect.gen(function* () {
+        const allocator = yield* IdAllocator.IdAllocatorV2;
+        const input = fixture(ProviderDriverKind.make(provider));
+        const existing = recordsOf(mapHistory(input, allocator));
+        existing.messages = existing.messages.map((message) =>
+          message.role === "assistant"
+            ? { ...message, text: "latest suffix", textPrefixMissing: true }
+            : message,
+        );
+        existing.turnItems = existing.turnItems.map((item) =>
+          item.type === "assistant_message" || item.type === "reasoning"
+            ? { ...item, text: "latest suffix", textPrefixMissing: true }
+            : item,
+        );
+        for (const incomplete of ["unfinished", "empty"] as const) {
+          const turns = input.turns.map((turn) => ({
+            ...turn,
+            items: turn.items.map((item) =>
+              item.type === "assistant" || item.type === "reasoning"
+                ? incomplete === "empty"
+                  ? { ...item, text: "" }
+                  : { ...item, status: "running" as const }
+                : item,
+            ),
+          }));
+          assert.deepEqual(mapHistory({ ...input, turns, existing }, allocator), []);
+        }
+      }),
+    );
   });
 }
 

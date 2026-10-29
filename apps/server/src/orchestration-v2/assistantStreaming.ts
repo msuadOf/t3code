@@ -82,7 +82,7 @@ export function splitBufferedAssistantText(text: string): { ready: string; rest:
 }
 
 export function makeAssistantStreamingFilter(mode: ResponseStreamingMode) {
-  const delivered = new Map<string, { text: string; at: number }>();
+  const delivered = new Map<string, { text: string; at: number; prefixMissing: boolean }>();
   return (
     event: ProviderAdapter.ProviderAdapterV2Event,
     now: number,
@@ -109,10 +109,12 @@ export function makeAssistantStreamingFilter(mode: ResponseStreamingMode) {
     }
     if (mode === "turn") return null;
     const previous = delivered.get(key);
-    if (previous && now - previous.at < 400) return null;
+    const prefixMissing = message.textPrefixMissing === true;
+    const completenessChanged = previous !== undefined && previous.prefixMissing !== prefixMissing;
+    if (previous && now - previous.at < 400 && !completenessChanged) return null;
     const { ready } = splitBufferedAssistantText(message.text);
-    if (!ready || ready === previous?.text) return null;
-    delivered.set(key, { text: ready, at: now });
+    if (!ready || (ready === previous?.text && !completenessChanged)) return null;
+    delivered.set(key, { text: ready, at: now, prefixMissing });
     if (event.type === "message.updated")
       return { ...event, message: { ...event.message, text: ready } };
     if (

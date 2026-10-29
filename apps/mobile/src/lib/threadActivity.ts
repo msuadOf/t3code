@@ -138,6 +138,7 @@ export interface ThreadFeedMessage {
   readonly attachments: ReadonlyArray<ChatAttachment>;
   readonly runId: RunId | null;
   readonly streaming: boolean;
+  readonly textPrefixMissing?: boolean | undefined;
   readonly inputIntent?: OrchestrationV2UserMessageInputIntent;
   readonly createdBy?: OrchestrationV2Actor;
   readonly creationSource?: OrchestrationV2CreationSource;
@@ -2158,6 +2159,9 @@ export function buildThreadFeed(
           attachments: item.attachments ?? [],
           runId: item.runId,
           streaming: item.type === "assistant_message" && item.streaming,
+          ...(item.type === "assistant_message" && item.textPrefixMissing
+            ? { textPrefixMissing: true }
+            : {}),
           ...(item.type === "user_message"
             ? {
                 inputIntent: item.inputIntent,

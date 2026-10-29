@@ -4,6 +4,7 @@ import { ThreadId, TurnItemId, type OrchestrationV2TurnItem } from "@t3tools/con
 import * as DateTime from "effect/DateTime";
 
 import {
+  streamedTextNotice,
   workEntryPreparationLabel,
   commandDetailRepeatsCommand,
   extractCommandOutputText,
@@ -262,4 +263,17 @@ it("labels raw arguments as preparation rather than an executable command", () =
       structuredPayload: commandItem({ toolPhase: "running" }),
     }),
   ).toBeNull();
+});
+
+describe("streamed text completeness", () => {
+  it("keeps a missing-prefix warning after streaming stops", () => {
+    expect(streamedTextNotice({ streaming: true })).toBeNull();
+    expect(streamedTextNotice({ streaming: true, textPrefixMissing: true })).toBe(
+      "Showing the latest text. Earlier text will appear when available.",
+    );
+    expect(streamedTextNotice({ streaming: false, textPrefixMissing: true })).toBe(
+      "Showing the latest text. Earlier text is missing.",
+    );
+    expect(streamedTextNotice({ streaming: false, textPrefixMissing: false })).toBeNull();
+  });
 });

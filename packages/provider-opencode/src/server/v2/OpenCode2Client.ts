@@ -97,6 +97,7 @@ const ObserverEventSchema = Schema.Union([
       ordinal: Schema.Number,
       kind: Schema.Literals(["text", "reasoning"]),
       text: Schema.String,
+      prefixMissing: Schema.optional(Schema.Boolean),
     }),
   }),
 ]);

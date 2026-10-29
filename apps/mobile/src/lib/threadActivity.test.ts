@@ -1659,3 +1659,16 @@ it("lets mobile expand a read tool before its path arguments have arrived", () =
   expect(activity?.fetchesDetail).toBe(false);
   expect(activity?.getFullDetail()).toBe('{"filePath":');
 });
+
+it("preserves missing-prefix state in native message projection", () => {
+  const cache = createThreadFeedCache();
+  const partial = { ...assistantMessage(), text: "latest suffix", textPrefixMissing: true };
+  const entry = buildThreadFeed([projected(partial, 0)], { cache }).find(
+    (entry) => entry.type === "message",
+  );
+  expect(entry).toMatchObject({ message: { text: "latest suffix", textPrefixMissing: true } });
+  const complete = buildThreadFeed([projected(assistantMessage(), 0)], { cache }).find(
+    (entry) => entry.type === "message",
+  );
+  expect(complete?.type === "message" && complete.message.textPrefixMissing).not.toBe(true);
+});

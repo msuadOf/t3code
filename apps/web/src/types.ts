@@ -88,6 +88,7 @@ export interface ChatMessage {
   readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
   readonly runId: RunId | null;
   readonly streaming: boolean;
+  readonly textPrefixMissing?: boolean | undefined;
   readonly createdBy?: OrchestrationV2Actor;
   readonly creationSource?: OrchestrationV2CreationSource;
   readonly scheduledTaskId?: ScheduledTaskId;

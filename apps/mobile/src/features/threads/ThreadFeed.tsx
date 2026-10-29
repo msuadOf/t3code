@@ -1,3 +1,4 @@
+import { StreamedTextContent } from "./StreamedTextContent";
 import { Button } from "../../components/ui/Button";
 import * as Dialog from "../../components/ui/Dialog";
 import { useOpenPullRequest } from "../../native/useOpenPullRequest";
@@ -1636,17 +1637,23 @@ function renderFeedEntry(
         {...(enterAnimated ? { entering: FadeIn.duration(220) } : {})}
       >
         {renderedText.trim().length > 0 ? (
-          <MarkdownImageAvailableWidthContext value={props.markdownContentWidth}>
-            <AssistantMarkdownContent
-              markdown={renderedText}
-              environmentId={props.environmentId}
-              markdownStyles={styles}
-              linkHandlers={props.markdownLinkHandlers}
-              onUseArtifactTemplate={props.onUseArtifactTemplate}
-              renderImage={props.renderMarkdownImage}
-              skills={props.skills}
-            />
-          </MarkdownImageAvailableWidthContext>
+          <StreamedTextContent
+            text={renderedText}
+            streaming={message.streaming}
+            textPrefixMissing={message.textPrefixMissing}
+          >
+            <MarkdownImageAvailableWidthContext value={props.markdownContentWidth}>
+              <AssistantMarkdownContent
+                markdown={renderedText}
+                environmentId={props.environmentId}
+                markdownStyles={styles}
+                linkHandlers={props.markdownLinkHandlers}
+                onUseArtifactTemplate={props.onUseArtifactTemplate}
+                renderImage={props.renderMarkdownImage}
+                skills={props.skills}
+              />
+            </MarkdownImageAvailableWidthContext>
+          </StreamedTextContent>
         ) : null}
         {attachments.map((attachment) => {
           return isImageAttachment(attachment) ? (

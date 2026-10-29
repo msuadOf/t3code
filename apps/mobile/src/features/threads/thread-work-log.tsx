@@ -1,3 +1,4 @@
+import { StreamedTextContent } from "./StreamedTextContent";
 import { Button } from "../../components/ui/Button";
 import { SubagentStatusDot } from "./SubagentStatusDot";
 import { ThreadSubagentGroup } from "./thread-subagent-group";
@@ -546,7 +547,19 @@ export function ThreadWorkLog(props: ThreadWorkLogProps) {
     return (
       <ScrollView nestedScrollEnabled className="ml-7 max-h-96 py-1">
         {props.activities.map((row) => (
-          <View key={row.id}>{props.renderReasoning(row.workEntry.detail ?? "")}</View>
+          <StreamedTextContent
+            key={row.id}
+            text={row.workEntry.detail ?? ""}
+            streaming={
+              row.projectedItem.item.type === "reasoning" && row.projectedItem.item.streaming
+            }
+            textPrefixMissing={
+              row.projectedItem.item.type === "reasoning" &&
+              row.projectedItem.item.textPrefixMissing
+            }
+          >
+            {props.renderReasoning(row.workEntry.detail ?? "")}
+          </StreamedTextContent>
         ))}
       </ScrollView>
     );
@@ -1222,7 +1235,13 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
             contentContainerStyle={{ paddingRight: 8 }}
           >
             {reasoning ? (
-              props.renderReasoning(reasoning.text)
+              <StreamedTextContent
+                text={reasoning.text}
+                streaming={reasoning.streaming}
+                textPrefixMissing={reasoning.textPrefixMissing}
+              >
+                {props.renderReasoning(reasoning.text)}
+              </StreamedTextContent>
             ) : call ? (
               [
                 call.command,

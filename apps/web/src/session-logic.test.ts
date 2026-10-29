@@ -1922,3 +1922,30 @@ it("renders automatic completion as a work entry instead of a user bubble", () =
     })[0]?.kind,
   ).toBe("message");
 });
+
+it("preserves a missing-prefix warning through same-text timeline updates", () => {
+  const fixture = makeStreamingTimelineFixture("latest suffix");
+  const input = { visibleTurnItems: fixture.visibleTurnItems, optimisticMessages: [] };
+  const previous = deriveTimelineEntriesFromVisibleTurnItemsWithState(input);
+  const marked = {
+    ...input,
+    visibleTurnItems: input.visibleTurnItems.map((row) =>
+      row.item.type === "assistant_message"
+        ? { ...row, item: { ...row.item, textPrefixMissing: true } }
+        : row,
+    ),
+  };
+  const partial = deriveTimelineEntriesFromVisibleTurnItemsWithState(marked, previous);
+  expect(
+    partial.entries.findLast(
+      (entry) => entry.kind === "message" && entry.message.role === "assistant",
+    ),
+  ).toMatchObject({ message: { textPrefixMissing: true } });
+  const complete = deriveTimelineEntriesFromVisibleTurnItemsWithState(input, partial);
+  const message = complete.entries
+    .flatMap((entry) =>
+      entry.kind === "message" && entry.message.role === "assistant" ? [entry.message] : [],
+    )
+    .at(-1);
+  expect(message?.textPrefixMissing).not.toBe(true);
+});

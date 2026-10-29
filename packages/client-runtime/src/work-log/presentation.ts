@@ -793,3 +793,14 @@ export function liveThoughtLine(markdown: string): string {
   const end = /[.?!]["'”’)]?(?=\s)/.exec(text);
   return end ? text.slice(0, end.index + end[0].length) : text;
 }
+
+/** A suffix after a stream gap must remain distinguishable even after interruption. */
+export function streamedTextNotice(input: {
+  readonly textPrefixMissing?: boolean | undefined;
+  readonly streaming: boolean;
+}): string | null {
+  if (!input.textPrefixMissing) return null;
+  return input.streaming
+    ? "Showing the latest text. Earlier text will appear when available."
+    : "Showing the latest text. Earlier text is missing.";
+}

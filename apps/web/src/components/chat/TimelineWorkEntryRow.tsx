@@ -1,3 +1,4 @@
+import { StreamedTextContent } from "./StreamedTextContent";
 import { WorkLogDetails, WorkLogRow } from "./WorkLog";
 import {
   getQuestionAnswerPreview,
@@ -121,21 +122,30 @@ export function ReasoningTraceContent({ entries }: { entries: ReadonlyArray<Time
     isWorking && entry.runId === latestRunId && entry.toolLifecycleStatus === "inProgress";
   return (
     <WorkLogDetails followLive={entries.some(isStreaming)}>
-      {entries.map((entry) => (
-        <ChatMarkdown
-          key={entry.id}
-          className="text-foreground"
-          text={entry.detail ?? ""}
-          cwd={ctx.markdownCwd}
-          threadRef={ctx.threadRef ?? undefined}
-          skills={ctx.skills}
-          isStreaming={isStreaming(entry)}
-          headingLevelOffset={MESSAGE_HEADING_LEVEL}
-          onUseArtifactTemplate={ctx.onUseArtifactTemplate}
-          onImageExpand={ctx.onImageExpand}
-          lineBreaks
-        />
-      ))}
+      {entries.map((entry) => {
+        const item = entry.projectedItem?.item ?? entry.structuredPayload;
+        return (
+          <StreamedTextContent
+            key={entry.id}
+            text={entry.detail ?? ""}
+            streaming={isStreaming(entry)}
+            textPrefixMissing={item?.type === "reasoning" && item.textPrefixMissing}
+          >
+            <ChatMarkdown
+              className="text-foreground"
+              text={entry.detail ?? ""}
+              cwd={ctx.markdownCwd}
+              threadRef={ctx.threadRef ?? undefined}
+              skills={ctx.skills}
+              isStreaming={isStreaming(entry)}
+              headingLevelOffset={MESSAGE_HEADING_LEVEL}
+              onUseArtifactTemplate={ctx.onUseArtifactTemplate}
+              onImageExpand={ctx.onImageExpand}
+              lineBreaks
+            />
+          </StreamedTextContent>
+        );
+      })}
     </WorkLogDetails>
   );
 }

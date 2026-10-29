@@ -74,3 +74,8 @@ and tool JSON as plain text, show gaps, and never classify main versus auxiliary
 requests from their content. API gateway observation is off by default.
 Tool names come from native stream metadata. Receiving or completing an argument
 block describes model preparation; only native execution records establish tool outcomes.
+
+When a native stream loses a text prefix, all clients identify the current text as
+the latest fragment and render it as plain text. Do not join text across a missing
+segment or treat interruption as evidence of completeness. Only a complete native
+block clears the notice and restores normal Markdown rendering.

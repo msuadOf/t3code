@@ -142,9 +142,18 @@ describe("OpenCode observer process", () => {
       const resumed = frames(await fetch(`${endpoint}/events`, { headers }));
       expect((await resumed.next()).type).toBe("t3.observer.gap");
       expect((await resumed.next()).type).toBe("t3.observer.ready");
-      // Missing old text stays suppressed. A new block has its own complete
-      // native start and must stream before either block or execution ends.
+      // The missing prefix is explicit; both its live suffix and a new block
+      // remain observable before either block or execution ends.
       emit("session.text.delta", { ...block, delta: "unknown old tail" });
+      expect((await resumed.next()).data).toMatchObject({
+        ...block,
+        text: "unknown old tail",
+        prefixMissing: true,
+      });
+      for (let index = 0; index < 64; index++)
+        emit("session.text.delta", { ...block, delta: " live suffix" });
+      for (let index = 0; index < 64; index++)
+        expect((await resumed.next()).data.delta).toBe(" live suffix");
       const nextBlock = { ...block, ordinal: 1 };
       emit("session.text.started", nextBlock);
       expect((await resumed.next()).type).toBe("session.text.started");
@@ -155,6 +164,11 @@ describe("OpenCode observer process", () => {
         expect((await resumed.next()).data.delta).toBe(chunk);
       const joined = frames(await fetch(`${endpoint}/events`, { headers }));
       expect((await joined.next()).type).toBe("t3.observer.gap");
+      expect((await joined.next()).data).toMatchObject({
+        ...block,
+        text: "unknown old tail" + " live suffix".repeat(64),
+        prefixMissing: true,
+      });
       expect((await joined.next()).data).toMatchObject({
         ...nextBlock,
         kind: "text",

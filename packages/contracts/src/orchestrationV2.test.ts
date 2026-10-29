@@ -18,6 +18,7 @@ import {
 
 const now = DateTime.makeUnsafe("2026-04-20T00:00:00.000Z");
 
+const decodeOrchestrationV2TurnItem = Schema.decodeUnknownSync(OrchestrationV2TurnItem);
 const decodeOrchestrationV2TurnItemJson = Schema.decodeUnknownSync(OrchestrationV2TurnItemJson);
 const encodeOrchestrationV2TurnItemJson = Schema.encodeSync(OrchestrationV2TurnItemJson);
 const decodeOrchestrationV2Subagent = Schema.decodeUnknownSync(OrchestrationV2Subagent);
@@ -571,4 +572,40 @@ describe("latestProviderTurnForAttempt", () => {
     expect(latestProviderTurnForAttempt(turns, RunAttemptId.make("goal-attempt"))?.id).toBe("last");
     expect(latestProviderTurnForAttempt(turns, null)).toBeUndefined();
   });
+});
+
+describe("missing native text prefixes", () => {
+  it.each(["assistant_message", "reasoning"] as const)(
+    "preserves %s completeness through runtime and wire codecs",
+    (type) => {
+      const raw = {
+        id: "item",
+        threadId: "thread",
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 0,
+        status: "completed",
+        title: null,
+        startedAt: null,
+        completedAt: null,
+        updatedAt: now,
+        type,
+        messageId: "message",
+        text: "latest suffix",
+        streaming: false,
+        textPrefixMissing: true,
+      };
+      const item = decodeOrchestrationV2TurnItem(raw);
+      expect(item).toMatchObject({ textPrefixMissing: true, streaming: false });
+      const encoded = encodeOrchestrationV2TurnItemJson(item);
+      expect(decodeOrchestrationV2TurnItemJson(encoded)).toMatchObject({
+        textPrefixMissing: true,
+        streaming: false,
+      });
+    },
+  );
 });

@@ -1,5 +1,5 @@
 // Bump when the worker changes so an older process retires after its active executions.
-export const OBSERVER_REVISION = 2;
+export const OBSERVER_REVISION = 3;
 
 /** Cumulative values let subscribers join without replaying or double-appending deltas. */
 export interface ObserverText {
@@ -10,6 +10,7 @@ export interface ObserverText {
     readonly ordinal: number;
     readonly kind: "text" | "reasoning";
     readonly text: string;
+    readonly prefixMissing?: boolean | undefined;
   };
 }
 export interface ObserverGap {
@@ -25,7 +26,7 @@ type NativeEvent = { readonly type: string; readonly data?: unknown };
 const object = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
 
-/** A missing delta cannot be repaired until OpenCode emits the completed block. */
+/** After a gap, keep a marked live suffix until the native complete block repairs it. */
 export class OpenCode2ObserverCache {
   private readonly blocks = new Map<string, ObserverText>();
   private readonly active = new Set<string>();
@@ -118,7 +119,11 @@ export class OpenCode2ObserverCache {
     const match = /^session\.(text|reasoning)\.(started|delta|ended)$/.exec(event.type);
     if (!match || typeof data.assistantMessageID !== "string" || typeof data.ordinal !== "number")
       return event;
+    const unknownExecution = !this.active.has(session);
     this.addActive(session);
+    // The active-session request may race completion while the SSE response
+    // already buffers a tail. An observed start is still needed to trust its prefix.
+    if (unknownExecution && !this.degraded) this.gap(session);
     const kind = match[1] as "text" | "reasoning";
     const key = this.key(session, data.assistantMessageID, kind, data.ordinal);
     if (match[2] === "ended") {
@@ -148,7 +153,6 @@ export class OpenCode2ObserverCache {
       }
       return event;
     }
-    if (this.gaps.has(session) && !this.blocks.has(key)) return undefined;
     if (match[2] !== "delta" || typeof data.delta !== "string") return event;
     const previous = this.blocks.get(key);
     const extra = data.delta.length * 2 + (previous === undefined ? key.length * 2 + 512 : 0);
@@ -162,10 +166,15 @@ export class OpenCode2ObserverCache {
         ordinal: data.ordinal,
         kind,
         text: (previous?.data.text ?? "") + data.delta,
+        ...(previous?.data.prefixMissing || (this.gaps.has(session) && previous === undefined)
+          ? { prefixMissing: true }
+          : {}),
       },
     };
     this.blocks.set(key, next);
     this.size += extra;
-    return event;
+    // Seed missing-prefix state once; later native deltas stay small. The
+    // cumulative marked value is still available to every reconnect snapshot.
+    return next.data.prefixMissing && previous === undefined ? next : event;
   }
 }

@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
+import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import { describe } from "vite-plus/test";
@@ -46,3 +47,34 @@ describe("OpenCode2Client authorization", () => {
     }),
   );
 });
+
+it.effect("preserves the missing-prefix marker through observer SSE decoding", () =>
+  Effect.gen(function* () {
+    const partial = {
+      type: "t3.observer.text",
+      data: {
+        sessionID: "session",
+        assistantMessageID: "message",
+        ordinal: 0,
+        kind: "text",
+        text: "latest suffix",
+        prefixMissing: true,
+      },
+    } as const;
+    const http = HttpClient.make((request) =>
+      Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(`data: ${JSON.stringify(partial)}\n\n`, {
+            headers: { "content-type": "text/event-stream" },
+          }),
+        ),
+      ),
+    );
+    const stream = yield* OpenCode2Client.observerEvents(http, {
+      url: "http://127.0.0.1:4096",
+      token: "test-only",
+    });
+    assert.deepEqual(yield* Stream.runCollect(stream), [partial]);
+  }).pipe(Effect.scoped),
+);

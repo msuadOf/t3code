@@ -2474,6 +2474,160 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("marks a live suffix and replaces it only with the complete native block", () =>
+    Effect.gen(function* () {
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, id: PROMPT_ID, text: "<any>" }),
+        promptAccepted,
+        event("session.text.delta", {
+          sessionID: SESSION,
+          assistantMessageID: "msg_partial",
+          ordinal: 0,
+          delta: "known prefix ",
+        }),
+        event("t3.observer.gap", { sessionID: SESSION }),
+        event("t3.observer.text", {
+          sessionID: SESSION,
+          assistantMessageID: "msg_partial",
+          ordinal: 0,
+          kind: "text",
+          text: "latest suffix",
+          prefixMissing: true,
+        }),
+        event("session.text.ended", {
+          sessionID: SESSION,
+          assistantMessageID: "msg_partial",
+          ordinal: 0,
+          text: "known prefix missing middle latest suffix",
+        }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const events = yield* runtime.events.pipe(
+        Stream.takeUntil((entry) => entry.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(turnInput(thread));
+      const collected = yield* Fiber.join(events);
+      const items = collected.flatMap((entry) =>
+        entry.type === "turn_item.updated" && entry.turnItem.type === "assistant_message"
+          ? [entry.turnItem]
+          : [],
+      );
+      assert.deepInclude(
+        items.find((item) => item.text === "latest suffix"),
+        { textPrefixMissing: true, streaming: true },
+      );
+      assert.equal(items.at(-1)?.text, "known prefix missing middle latest suffix");
+      assert.notPropertyVal(items.at(-1), "textPrefixMissing", true);
+      const messages = collected.flatMap((entry) =>
+        entry.type === "message.updated" ? [entry.message] : [],
+      );
+      assert.deepInclude(
+        messages.find((message) => message.text === "latest suffix"),
+        { textPrefixMissing: true, streaming: true },
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect.each([
+    { kind: "text", emptyEnd: false },
+    { kind: "text", emptyEnd: true },
+    { kind: "reasoning", emptyEnd: false },
+    { kind: "reasoning", emptyEnd: true },
+  ] as const)(
+    "preserves $kind suffix completeness (empty native ending: $emptyEnd)",
+    ({ kind, emptyEnd }) =>
+      Effect.gen(function* () {
+        const block = {
+          sessionID: SESSION,
+          assistantMessageID: "msg_partial_terminal",
+          ordinal: 0,
+        };
+        const { runtime, thread } = yield* resumed([
+          out("session.prompt", { sessionID: SESSION, id: PROMPT_ID, text: "<any>" }),
+          promptAccepted,
+          event("t3.observer.text", {
+            ...block,
+            kind,
+            text: "latest suffix",
+            prefixMissing: true,
+          }),
+          event(`session.${kind}.delta`, { ...block, delta: " continued" }),
+          ...(emptyEnd ? [event(`session.${kind}.ended`, { ...block, text: "" })] : []),
+          event("session.execution.interrupted", { sessionID: SESSION }),
+        ]);
+        const events = yield* runtime.events.pipe(
+          Stream.takeUntil((entry) => entry.type === "turn.terminal"),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* runtime.startTurn(turnInput(thread));
+        const collected = yield* Fiber.join(events);
+        const items = collected.flatMap((entry) =>
+          entry.type === "turn_item.updated" &&
+          entry.turnItem.type === (kind === "text" ? "assistant_message" : "reasoning")
+            ? [entry.turnItem]
+            : [],
+        );
+        assert.deepInclude(items.at(-1), {
+          text: emptyEnd ? "" : "latest suffix continued",
+          streaming: false,
+        });
+        if (emptyEnd) assert.notPropertyVal(items.at(-1), "textPrefixMissing", true);
+        else assert.deepInclude(items.at(-1), { textPrefixMissing: true });
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.each([false, true])(
+    "does not downgrade captured text during reconnect (complete native history: %s)",
+    (completedHistory) =>
+      Effect.gen(function* () {
+        const block = { sessionID: SESSION, assistantMessageID: "msg_assistant_gap", ordinal: 0 };
+        const partial = event("t3.observer.text", {
+          ...block,
+          kind: "text",
+          text: "latest suffix",
+          prefixMissing: true,
+        });
+        const { runtime, thread } = yield* resumed([
+          out("session.prompt", { sessionID: SESSION, id: PROMPT_ID, text: "<any>" }),
+          promptAccepted,
+          partial,
+          ...reconnected({ [SESSION]: { type: "running" } }, undefined, {
+            finish: completedHistory ? "stop" : undefined,
+            content: [
+              {
+                type: "text",
+                text: completedHistory ? "full native text" : "old unfinished prefix",
+              },
+            ],
+          }),
+          ...openRequests([]),
+          ...(completedHistory ? [partial] : []),
+          event("session.execution.interrupted", { sessionID: SESSION }),
+        ]);
+        const events = yield* runtime.events.pipe(
+          Stream.takeUntil((entry) => entry.type === "turn.terminal"),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* runtime.startTurn(turnInput(thread));
+        const collected = yield* Fiber.join(events);
+        const items = collected.flatMap((entry) =>
+          entry.type === "turn_item.updated" && entry.turnItem.type === "assistant_message"
+            ? [entry.turnItem]
+            : [],
+        );
+        assert.equal(items.at(-1)?.text, completedHistory ? "full native text" : "latest suffix");
+        assert.equal(items.at(-1)?.textPrefixMissing === true, !completedHistory);
+        assert.notInclude(
+          items.map((item) => item.text),
+          "old unfinished prefix",
+        );
+      }).pipe(Effect.scoped),
+  );
+
   it.effect("reconciles after the observer reconnect snapshot is fully consumed", () =>
     Effect.gen(function* () {
       const resumedEvents = reconnected({ [SESSION]: { type: "running" } }, undefined, {

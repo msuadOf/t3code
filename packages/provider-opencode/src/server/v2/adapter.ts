@@ -210,6 +210,7 @@ interface ActiveTurn {
   readonly input: TurnOwner;
   providerTurn: OrchestrationV2ProviderTurn;
   readonly texts: Map<string, OpenBlock>;
+  readonly finishedTexts: Set<string>;
   readonly tools: Map<
     string,
     {
@@ -290,6 +291,7 @@ interface Wake {
 }
 
 interface OpenBlock {
+  prefixMissing: boolean;
   readonly block: { readonly assistantMessageID: string; readonly ordinal: number };
   readonly kind: "text" | "reasoning";
   readonly startedAt: DateTime.Utc;
@@ -967,23 +969,30 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         readonly assistantMessageID: string;
         readonly ordinal: number;
         readonly text?: string;
+        readonly prefixMissing?: boolean;
       },
       kind: "text" | "reasoning",
       update: (current: string) => string,
       completed = "text" in data,
     ) {
       const nativeId = `${data.assistantMessageID}:${kind}:${data.ordinal}`;
+      if (turn.finishedTexts.has(nativeId)) return;
       const updatedAt = yield* DateTime.now;
       const entry = turn.texts.get(nativeId) ?? {
         block: data,
+        prefixMissing: false,
         kind,
         startedAt: updatedAt,
         text: "",
       };
+      const hadText = entry.text.length > 0;
       entry.text = update(entry.text);
+      entry.prefixMissing = data.prefixMissing ?? (completed ? false : entry.prefixMissing);
+      const completeness = entry.prefixMissing ? { textPrefixMissing: true } : {};
+      if (completed && !entry.prefixMissing) turn.finishedTexts.add(nativeId);
       if (completed) turn.texts.delete(nativeId);
       else turn.texts.set(nativeId, entry);
-      if (entry.text.length === 0) return;
+      if (entry.text.length === 0 && !(completed && hadText)) return;
       const status = completed ? "completed" : "running";
       const completedAt = completed ? updatedAt : null;
       const nodeKind = kind === "text" ? "assistant_message" : "reasoning";
@@ -993,7 +1002,13 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         yield* emit({
           type: "turn_item.updated",
           driver,
-          turnItem: { ...base, type: "reasoning", text: entry.text, streaming: !completed },
+          turnItem: {
+            ...base,
+            type: "reasoning",
+            text: entry.text,
+            streaming: !completed,
+            ...completeness,
+          },
         });
         return;
       }
@@ -1010,6 +1025,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         nodeId: base.nodeId,
         role: "assistant",
         text: entry.text,
+        ...completeness,
         attachments: [],
         streaming: !completed,
         createdAt: entry.startedAt,
@@ -1024,6 +1040,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           type: "assistant_message",
           messageId,
           text: entry.text,
+          ...completeness,
           streaming: !completed,
         },
       });
@@ -1240,6 +1257,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       input: owner,
       providerTurn,
       texts: new Map(),
+      finishedTexts: new Set(),
       tools: new Map(),
       finishedTools: new Set(),
       startedAt: new Map(),
@@ -1667,7 +1685,14 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       }
       const completedAt = yield* DateTime.now;
       for (const open of turn.texts.values()) {
-        yield* emitText(state, turn, open.block, open.kind, (text) => text, true);
+        yield* emitText(
+          state,
+          turn,
+          { ...open.block, prefixMissing: open.prefixMissing },
+          open.kind,
+          (text) => text,
+          true,
+        );
       }
       for (const id of turn.tools.keys()) {
         yield* emitTool(
@@ -2185,9 +2210,14 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           return yield* emitText(
             state,
             turn,
-            event.data,
+            { ...event.data, prefixMissing: event.data.prefixMissing === true },
             event.data.kind,
-            (current) => (current.startsWith(event.data.text) ? current : event.data.text),
+            (current) =>
+              event.data.prefixMissing
+                ? event.data.text
+                : current.startsWith(event.data.text)
+                  ? current
+                  : event.data.text,
             false,
           );
         case "session.text.started":
@@ -2535,7 +2565,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         for (const [key, block] of observedText)
           if (block.data.sessionID === event.data.sessionID) observedText.delete(key);
         yield* Effect.logWarning(
-          "OpenCode observer missed streaming output; waiting for the completed block.",
+          "OpenCode observer missed streaming output; subsequent text is a marked suffix until the completed block arrives.",
           { sessionId: event.data.sessionID },
         );
         return;
@@ -2554,6 +2584,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             ordinal: event.data.ordinal,
             kind,
             text: (previous?.data.text ?? "") + event.data.delta,
+            ...(previous?.data.prefixMissing ? { prefixMissing: true } : {}),
           },
         });
       }
@@ -2834,7 +2865,13 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
               block,
               part.type,
               // Native history may retain an empty or older value until the block ends.
-              (current) => (!completed && current.startsWith(part.text) ? current : part.text),
+              (current) =>
+                !completed &&
+                (turn.texts.get(`${block.assistantMessageID}:${part.type}:${block.ordinal}`)
+                  ?.prefixMissing ||
+                  current.startsWith(part.text))
+                  ? current
+                  : part.text,
               completed,
             );
             continue;
@@ -2891,9 +2928,14 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         yield* emitText(
           state,
           turn,
-          block.data,
+          { ...block.data, prefixMissing: block.data.prefixMissing === true },
           block.data.kind,
-          (current) => (current.startsWith(block.data.text) ? current : block.data.text),
+          (current) =>
+            block.data.prefixMissing
+              ? block.data.text
+              : current.startsWith(block.data.text)
+                ? current
+                : block.data.text,
           false,
         );
       }

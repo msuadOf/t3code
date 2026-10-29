@@ -1,3 +1,4 @@
+import { StreamedTextContent } from "./StreamedTextContent";
 import type {
   EnvironmentId,
   OrchestrationV2ProjectedTurnItem,
@@ -262,15 +263,21 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
     <div className="space-y-2 text-xs" data-v2-item-inspector={item.type}>
       {item.type === "reasoning" && item.text ? (
         <div className="rounded-md border border-border/45 bg-muted/15 p-2 italic text-muted-foreground">
-          <ChatMarkdown
+          <StreamedTextContent
             text={item.text}
-            cwd={props.cwd}
-            threadRef={{
-              environmentId: props.environmentId,
-              threadId: props.projectedItem.sourceThreadId,
-            }}
-            lineBreaks
-          />
+            streaming={item.streaming}
+            textPrefixMissing={item.textPrefixMissing}
+          >
+            <ChatMarkdown
+              text={item.text}
+              cwd={props.cwd}
+              threadRef={{
+                environmentId: props.environmentId,
+                threadId: props.projectedItem.sourceThreadId,
+              }}
+              lineBreaks
+            />
+          </StreamedTextContent>
         </div>
       ) : null}
 
