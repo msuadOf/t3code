@@ -32,7 +32,7 @@ jobs:
           - platform: android
             runner: ubuntu-24.04
           - platform: ios
-            runner: macos-26
+            runner: macos-15
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
@@ -42,6 +42,10 @@ jobs:
             /*
             !/.repos/
           sparse-checkout-cone-mode: false
+
+      - name: Select Xcode 26
+        if: matrix.platform == 'ios'
+        run: sudo xcode-select --switch /Applications/Xcode_26.3.app/Contents/Developer
 
       - name: Free Android build disk
         if: matrix.platform == 'android'
