@@ -1,4 +1,5 @@
 import type * as Effect from "effect/Effect";
+import type * as Stream from "effect/Stream";
 import type { ProviderDriverError } from "./errors.ts";
 import type { OrchestrationV2ProviderThread } from "@t3tools/contracts";
 
@@ -58,6 +59,8 @@ export interface NativeSessionCandidate extends NativeSession {
 }
 
 export interface NativeSessionSource {
+  /** Inventory/execution wakeups; content deltas must not trigger full session scans. */
+  readonly changes?: Stream.Stream<void, ProviderDriverError>;
   readonly identityDirectory?: string;
   /** Native model IDs confirmed by persisted history, independent of native entry UUIDs. */
   readonly confirmedModelMessageIds?: (

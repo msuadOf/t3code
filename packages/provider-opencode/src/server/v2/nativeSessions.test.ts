@@ -1,7 +1,12 @@
 import { Agent, Model, Provider, SessionMessage } from "@opencode/client/effect";
 import { assert, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
-import { mapNativeHistory } from "./nativeSessions.ts";
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
+import { ProviderInstanceId } from "@t3tools/contracts";
+import type { OpenCode2StreamEvent } from "./OpenCode2Client.ts";
+import type { OpenCode2Connection, OpenCode2Server } from "./OpenCode2Server.ts";
+import { makeNativeSessions, mapNativeHistory } from "./nativeSessions.ts";
 
 const at = (value: number) => DateTime.makeUnsafe(value);
 const user = (id: string, text: string, created: number): SessionMessage.User => ({
@@ -92,3 +97,36 @@ it("marks only the latest execution running when attaching mid-stream", () => {
   assert.equal(result[1]?.completedAt, null);
   assert.equal(result[1]?.items.at(-1)?.status, "running");
 });
+
+it.effect.each(["observerEvents", "events"] as const)(
+  "wakes via %s on lifecycle events, ignores streamed text, and cancels the subscription",
+  (eventSource) =>
+    Effect.gen(function* () {
+      let closed = false;
+      const events = Stream.fromIterable([
+        { type: "t3.observer.text", data: {} },
+        { type: "session.created", data: {} },
+        { type: "session.execution.started", data: {} },
+        { type: "session.execution.succeeded", data: {} },
+        { type: "session.deleted", data: {} },
+        { type: "t3.observer.gap", data: {} },
+        { type: "t3.observer.ready", data: {} },
+      ] as unknown as OpenCode2StreamEvent[]).pipe(
+        Stream.concat(Stream.never),
+        Stream.ensuring(
+          Effect.sync(() => {
+            closed = true;
+          }),
+        ),
+      );
+      const server = {
+        withConnection: <A, E, R>(
+          use: (connection: OpenCode2Connection) => Effect.Effect<A, E, R>,
+        ) => use({ [eventSource]: Effect.succeed(events) } as unknown as OpenCode2Connection),
+      } satisfies OpenCode2Server["Service"];
+      const changes = makeNativeSessions(server, ProviderInstanceId.make("test")).changes!;
+      const result = yield* changes.pipe(Stream.take(6), Stream.runCollect);
+      assert.equal(result.length, 6);
+      assert.isTrue(closed);
+    }),
+);

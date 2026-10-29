@@ -24,7 +24,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Option from "effect/Option";
-import * as Schedule from "effect/Schedule";
+import * as Stream from "effect/Stream";
+import { nativeSessionSyncTriggers } from "./NativeSessionWakeups.ts";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
@@ -622,7 +623,11 @@ const make = Effect.gen(function* () {
     list,
     open,
     sync: safeSync,
-    start: safeSync.pipe(Effect.repeat(Schedule.spaced("3 seconds")), forkParked, Effect.asVoid),
+    start: nativeSessionSyncTriggers(registry).pipe(
+      Stream.runForEach(() => safeSync),
+      forkParked,
+      Effect.asVoid,
+    ),
   });
 });
 export const layer = Layer.effect(NativeSessionSync, make);

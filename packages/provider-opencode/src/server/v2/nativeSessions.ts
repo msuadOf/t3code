@@ -107,6 +107,30 @@ export const makeNativeSessions = (
       cause,
     });
   return {
+    changes: Stream.unwrap(
+      server.withConnection((connection) => connection.observerEvents ?? connection.events),
+    ).pipe(
+      Stream.filter((event) =>
+        [
+          "session.created",
+          "session.deleted",
+          "session.forked",
+          "session.renamed",
+          "session.moved",
+          "session.metadata.updated",
+          "session.execution.started",
+          "session.execution.succeeded",
+          "session.execution.failed",
+          "session.execution.interrupted",
+          "unreadable.execution.started",
+          "unreadable.execution.ended",
+          "t3.observer.ready",
+          "t3.observer.gap",
+        ].includes(event.type),
+      ),
+      Stream.map(() => undefined),
+      Stream.mapError(error),
+    ),
     list: server
       .withConnection(({ client }) =>
         Effect.gen(function* () {
