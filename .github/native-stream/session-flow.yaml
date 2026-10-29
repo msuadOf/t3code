@@ -3,7 +3,7 @@ appId: com.t3tools.t3code.dev
 - launchApp:
     clearState: true
 - tapOn: Settings
-- tapOn: Environments
+- tapOn: "^Environments(?:,.*)?$"
 - tapOn: Add environment
 - tapOn: Address
 - inputText: ${DAEMON_ADDRESS}
@@ -25,9 +25,9 @@ appId: com.t3tools.t3code.dev
       - tapOn: Settings
       - tapOn: Close settings
 - extendedWaitUntil:
-    visible: Native stream smoke
+    visible: "(?s).*Native stream smoke.*"
     timeout: 60000
-- tapOn: Native stream smoke
+- tapOn: "(?s).*Native stream smoke.*"
 - assertVisible: Thinking
 - runScript: advance.js
 - extendedWaitUntil:
