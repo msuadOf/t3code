@@ -32,7 +32,7 @@ export class McpProviderSessions extends Context.Service<
   {
     readonly set: (config: McpProviderSessionConfig) => Effect.Effect<void>;
     readonly read: (threadId: ThreadId) => Effect.Effect<McpProviderSessionConfig | undefined>;
-    readonly clear: (threadId: ThreadId) => Effect.Effect<void>;
+    readonly clear: (threadId: ThreadId, expectedProviderSessionId?: string) => Effect.Effect<void>;
     readonly recordHtmlRender: (
       threadId: ThreadId,
       input: { readonly html: string; readonly title: string; readonly height: number },
@@ -93,18 +93,25 @@ const make = Effect.gen(function* () {
       yield* Ref.update(sessions, (current) => new Map(current).set(config.threadId, config));
     }),
     read: (threadId) => Ref.get(sessions).pipe(Effect.map((current) => current.get(threadId))),
-    clear: (threadId) =>
-      Ref.update(sessions, (current) => {
+    clear: (threadId, expectedProviderSessionId) =>
+      Ref.modify(sessions, (current) => {
+        if (
+          expectedProviderSessionId !== undefined &&
+          current.get(threadId)?.providerSessionId !== expectedProviderSessionId
+        )
+          return [false, current] as const;
         const next = new Map(current);
         next.delete(threadId);
-        return next;
+        return [true, next] as const;
       }).pipe(
-        Effect.andThen(
-          Ref.update(htmlRenders, (current) => {
-            const next = new Map(current);
-            next.delete(threadId);
-            return next;
-          }),
+        Effect.flatMap((removed) =>
+          removed
+            ? Ref.update(htmlRenders, (current) => {
+                const next = new Map(current);
+                next.delete(threadId);
+                return next;
+              })
+            : Effect.void,
         ),
       ),
     recordHtmlRender: (threadId, input, reference) =>

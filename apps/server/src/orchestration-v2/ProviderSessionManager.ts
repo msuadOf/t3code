@@ -538,15 +538,9 @@ export const layerWithOptions = (
           ? mcpSessionRegistry
               .revokeThread(threadId)
               .pipe(Effect.tap(() => mcpSessions.clear(threadId)))
-          : mcpSessionRegistry.revokeProviderSession(mcpCredentialId).pipe(
-              Effect.tap(() =>
-                Effect.gen(function* () {
-                  if ((yield* mcpSessions.read(threadId))?.providerSessionId === mcpCredentialId) {
-                    yield* mcpSessions.clear(threadId);
-                  }
-                }),
-              ),
-            );
+          : mcpSessionRegistry
+              .revokeProviderSession(mcpCredentialId)
+              .pipe(Effect.tap(() => mcpSessions.clear(threadId, mcpCredentialId)));
 
       const publishToSubscribers = (
         subscribers: Ref.Ref<
