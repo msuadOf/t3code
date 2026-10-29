@@ -20,6 +20,7 @@ export const ModelActivityFrame = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("snapshot"),
     available: Schema.Boolean,
+    connectionState: Schema.optional(Schema.Literals(["connected", "disconnected"])),
     epoch: Schema.String,
     seq: NonNegativeInt,
     oldestSeq: NonNegativeInt,
@@ -28,6 +29,7 @@ export const ModelActivityFrame = Schema.Union([
     events: Schema.Array(ModelActivity),
     confirmedMessageIds: Schema.Array(Schema.String),
   }),
+  Schema.Struct({ kind: Schema.Literal("disconnected"), epoch: Schema.String }),
   Schema.Struct({ kind: Schema.Literal("event"), epoch: Schema.String, event: ModelActivity }),
   Schema.Struct({
     kind: Schema.Literal("confirmed"),

@@ -87,6 +87,7 @@ export function ModelActivityPanel({
   if (!activity?.available) return null;
   // oxlint-disable-next-line unicorn/no-array-reverse -- Hermes lacks toReversed; reverse only this copy.
   const newestFirst = [...activity.requests].reverse();
+  const disconnected = activity.connectionState === "disconnected" || AsyncResult.isFailure(result);
   const unsaved = activity.requests.filter((request) => !request.confirmed).length;
   return (
     <View
@@ -96,11 +97,12 @@ export function ModelActivityPanel({
       <RowPressable
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
-        accessibilityLabel="Model activity"
+        accessibilityLabel={disconnected ? "Model activity, reconnecting" : "Model activity"}
         onPress={() => setOpen(!open)}
       >
         <Text className="py-2 text-sm text-foreground">
-          {open ? "▾" : "▸"} Model activity{unsaved > 0 ? ` · ${unsaved} not yet saved` : ""}
+          {open ? "▾" : "▸"} Model activity
+          {disconnected ? " · reconnecting" : unsaved > 0 ? ` · ${unsaved} not yet saved` : ""}
         </Text>
       </RowPressable>
       {open ? (
@@ -109,9 +111,10 @@ export function ModelActivityPanel({
             Observed model responses, separate from the saved conversation. Requests are not
             classified as main or auxiliary.
           </Text>
-          {AsyncResult.isFailure(result) ? (
+          {disconnected ? (
             <Text accessibilityRole="alert" className="text-xs text-foreground-muted">
-              Model activity disconnected. The saved conversation remains available.
+              Model activity disconnected. Reconnecting automatically; received activity stays
+              visible. The saved conversation is unaffected.
             </Text>
           ) : null}
           {activity.gap || activity.truncated ? (

@@ -153,3 +153,68 @@ describe("transient model activity", () => {
     expect(state.requests).toHaveLength(3);
   });
 });
+
+it("retains native confirmations arriving before their response event and isolates epochs", () => {
+  let state = reduceModelActivity(emptyModelActivityState, snapshot([]));
+  state = reduceModelActivity(state, {
+    kind: "confirmed",
+    epoch: "epoch",
+    messageIds: ["model-id"],
+  });
+  state = reduceModelActivity(state, {
+    kind: "event",
+    epoch: "epoch",
+    event: event(1, "message_start"),
+  });
+  expect(state.requests[0]?.confirmed).toBe(true);
+  state = reduceModelActivity(state, snapshot([], { epoch: "new" }));
+  state = reduceModelActivity(state, {
+    kind: "event",
+    epoch: "new",
+    event: event(1, "message_start"),
+  });
+  expect(state.requests[0]?.confirmed).toBe(false);
+});
+
+it("retains partial responses and confirmations during disconnection until a fresh snapshot arrives", () => {
+  let state = reduceModelActivity(
+    emptyModelActivityState,
+    snapshot([
+      event(1, "content_block_delta", {
+        index: 0,
+        delta: { type: "text_delta", text: "Partial native reply" },
+      }),
+    ]),
+  );
+  state = reduceModelActivity(state, {
+    kind: "confirmed",
+    epoch: "epoch",
+    messageIds: ["future-message"],
+  });
+  const previous = state;
+  state = reduceModelActivity(state, { kind: "disconnected", epoch: "epoch" });
+  expect(state.available).toBe(true);
+  expect(state.connectionState).toBe("disconnected");
+  expect(state.requests).toBe(previous.requests);
+  expect(state.confirmedMessageIds).toBe(previous.confirmedMessageIds);
+  expect(state.requests[0]?.blocks[0]?.text).toBe("Partial native reply");
+  expect(state.requests[0]?.status).toBe("running");
+  expect(reduceModelActivity(state, { kind: "disconnected", epoch: "old" })).toBe(state);
+  const recovered = reduceModelActivity(
+    state,
+    snapshot(
+      [
+        event(
+          1,
+          "content_block_delta",
+          { index: 0, delta: { type: "text_delta", text: "Fresh native baseline" } },
+          { messageId: "future-message" },
+        ),
+      ],
+      { epoch: "restarted", gap: true },
+    ),
+  );
+  expect(recovered.connectionState).toBe("connected");
+  expect(recovered.requests[0]?.blocks[0]?.text).toBe("Fresh native baseline");
+  expect(recovered.requests[0]?.confirmed).toBe(false);
+});

@@ -141,10 +141,11 @@ const make = Effect.gen(function* () {
         }),
       catch: readError,
     });
-    if (observer) return { source, session, observer };
+    return { source, session, observer };
   });
   type Selected = NonNullable<Effect.Success<ReturnType<typeof prepare>>>;
-  const observeSelected = (selected: Selected, after?: number) =>
+  type Connected = Selected & { readonly observer: NonNullable<Selected["observer"]> };
+  const observeSelected = (selected: Connected, after?: number, recovering = false) =>
     Stream.unwrap(
       Effect.gen(function* () {
         const controller = new AbortController();
@@ -204,7 +205,7 @@ const make = Effect.gen(function* () {
                     seq: frame.seq,
                     oldestSeq: frame.oldestSeq,
                     after: after ?? 0,
-                    gap: frame.gap,
+                    gap: frame.gap || recovering,
                     events: frame.events,
                     confirmedMessageIds: ids.filter((id) =>
                       frame.events.some((event) => event.messageId === id),
@@ -226,7 +227,7 @@ const make = Effect.gen(function* () {
         );
         return Stream.merge(responses, confirmations, { haltStrategy: "left" });
       }),
-    );
+    ).pipe(Stream.scoped);
   return NativeModelActivityService.of({
     subscribe: (input) =>
       Stream.unwrap(
@@ -272,8 +273,8 @@ const make = Effect.gen(function* () {
                       next !== undefined &&
                       previous.source === next.source &&
                       previous.session.id === next.session.id &&
-                      previous.observer.url === next.observer.url &&
-                      previous.observer.epoch === next.observer.epoch),
+                      previous.observer?.url === next.observer?.url &&
+                      previous.observer?.epoch === next.observer?.epoch),
                 ),
                 Stream.switchMap((selected) => {
                   if (!selected) {
@@ -282,7 +283,62 @@ const make = Effect.gen(function* () {
                   }
                   const after = connected ? undefined : input.after;
                   connected = true;
-                  return observeSelected(selected, after);
+                  let delay = 250;
+                  let lastEpoch: string | undefined;
+                  const reconnect = (
+                    recovering: boolean,
+                  ): Stream.Stream<ModelActivityFrame, ModelActivityError> =>
+                    Stream.unwrap(
+                      Effect.gen(function* () {
+                        if (recovering) {
+                          yield* Effect.sleep(delay);
+                          delay = Math.min(delay * 2, 5000);
+                        }
+                        const current = recovering
+                          ? yield* prepare(input, cache).pipe(
+                              Effect.mapError((error) =>
+                                isModelActivityError(error) ? error : readError(),
+                              ),
+                            )
+                          : selected;
+                        if (!current) return Stream.make(unavailable);
+                        const observer = current.observer;
+                        const response = observer
+                          ? observeSelected(
+                              { ...current, observer },
+                              recovering ? undefined : after,
+                              recovering,
+                            ).pipe(
+                              Stream.tap((frame) =>
+                                frame.kind === "snapshot"
+                                  ? Effect.sync(() => {
+                                      delay = 250;
+                                      lastEpoch = frame.epoch;
+                                    })
+                                  : Effect.void,
+                              ),
+                              Stream.catch(() => Stream.empty),
+                            )
+                          : Stream.empty;
+                        return Stream.concat(
+                          response,
+                          Stream.suspend(() => {
+                            const disconnected: ModelActivityFrame =
+                              lastEpoch === undefined
+                                ? {
+                                    ...unavailable,
+                                    available: true,
+                                    connectionState: "disconnected",
+                                    epoch: `offline:${current.session.id}`,
+                                    gap: true,
+                                  }
+                                : { kind: "disconnected", epoch: lastEpoch };
+                            return Stream.make(disconnected);
+                          }),
+                        ).pipe(Stream.concat(Stream.suspend(() => reconnect(true))));
+                      }),
+                    );
+                  return reconnect(false);
                 }),
               );
             }),

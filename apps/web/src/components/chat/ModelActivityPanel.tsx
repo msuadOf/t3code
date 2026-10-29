@@ -82,6 +82,7 @@ export function ModelActivityPanel({
   const activity = Option.getOrNull(AsyncResult.value(result));
   const [open, setOpen] = useState(true);
   if (!activity?.available) return null;
+  const disconnected = activity.connectionState === "disconnected" || AsyncResult.isFailure(result);
   const unsaved = activity.requests.filter((request) => !request.confirmed).length;
   return (
     <aside
@@ -90,7 +91,8 @@ export function ModelActivityPanel({
     >
       <Collapsible open={open} onOpenChange={setOpen}>
         <CollapsibleTrigger render={<Button variant="ghost" size="sm" />}>
-          {open ? "▾" : "▸"} Model activity{unsaved > 0 ? ` · ${unsaved} not yet saved` : ""}
+          {open ? "▾" : "▸"} Model activity
+          {disconnected ? " · reconnecting" : unsaved > 0 ? ` · ${unsaved} not yet saved` : ""}
         </CollapsibleTrigger>
         <CollapsiblePanel animate={false}>
           <div className="max-h-60 space-y-2 overflow-y-auto overscroll-contain py-2">
@@ -98,9 +100,10 @@ export function ModelActivityPanel({
               Observed model responses, separate from the saved conversation. Requests are not
               classified as main or auxiliary.
             </p>
-            {AsyncResult.isFailure(result) ? (
+            {disconnected ? (
               <p role="status" className="text-xs text-muted-foreground">
-                Model activity disconnected. The saved conversation remains available.
+                Model activity disconnected. Reconnecting automatically; received activity stays
+                visible. The saved conversation is unaffected.
               </p>
             ) : null}
             {activity.gap || activity.truncated ? (

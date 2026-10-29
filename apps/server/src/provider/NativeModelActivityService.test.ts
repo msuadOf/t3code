@@ -23,6 +23,7 @@ import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Deferred from "effect/Deferred";
+import * as TestClock from "effect/testing/TestClock";
 import * as Fiber from "effect/Fiber";
 import * as Observer from "./ClaudeModelObserver.ts";
 import type { OrchestrationV2StoredEvent } from "@t3tools/contracts";
@@ -548,5 +549,201 @@ it.effect("revokes observation on registry-only provider, directory, and shared-
       assert.strictEqual(settingsResult.failure.reason, "outside-root");
     assert.isTrue(settingsSignal.aborted);
     yield* Queue.take(closed);
+  }),
+);
+
+it.effect(
+  "schedules recovery after observer EOF without requiring thread or configuration events",
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* routingFixture;
+      const ended = yield* Deferred.make<void>();
+      yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          vi.spyOn(Observer, "observeClaudeModelActivity").mockImplementation(async function* () {
+            try {
+              yield {
+                type: "observer.snapshot",
+                epoch: "fixture",
+                seq: 0,
+                oldestSeq: 1,
+                gap: false,
+                events: [],
+              };
+            } finally {
+              Deferred.doneUnsafe(ended, Effect.void);
+            }
+          }),
+        ),
+        (spy) => Effect.sync(() => spy.mockRestore()),
+      );
+      const frames = yield* Queue.unbounded<import("@t3tools/contracts").ModelActivityFrame>();
+      const consumer = yield* Effect.gen(function* () {
+        const service = yield* NativeModelActivityService.NativeModelActivityService;
+        yield* service
+          .subscribe({ threadId })
+          .pipe(Stream.runForEach((frame) => Queue.offer(frames, frame)));
+      }).pipe(Effect.provide(testLayer("/allowed/repo", true, fixture)), Effect.forkScoped);
+      yield* Queue.take(frames);
+      yield* Deferred.await(ended);
+      yield* TestClock.adjust(0);
+      assert.isTrue((yield* Queue.poll(frames))._tag === "Some");
+      yield* Fiber.interrupt(consumer);
+    }),
+);
+
+it.effect(
+  "recovers an unavailable sidecar, EOF and transport failure with a fresh epoch snapshot",
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* routingFixture;
+      let discoveries = 0;
+      let connections = 0;
+      let listCalls = 0;
+      yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          vi.spyOn(Observer, "discoverClaudeModelObserver").mockImplementation(async () => {
+            discoveries++;
+            return discoveries === 1 || discoveries === 4
+              ? undefined
+              : {
+                  url: "http://127.0.0.1:12345",
+                  token: "a".repeat(64),
+                  epoch: discoveries >= 5 ? "restarted" : "original",
+                };
+          }),
+        ),
+        (spy) => Effect.sync(() => spy.mockRestore()),
+      );
+      const observation = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          vi
+            .spyOn(Observer, "observeClaudeModelActivity")
+            .mockImplementation(async function* (input) {
+              connections++;
+              if (connections === 2) throw new Error("isolated transport failure");
+              const signal = input.signal!;
+              const stopped = new Promise<void>((resolve) => {
+                if (signal.aborted) resolve();
+                else signal.addEventListener("abort", () => resolve(), { once: true });
+              });
+              const restarted = connections >= 3;
+              yield {
+                type: "observer.snapshot",
+                epoch: restarted ? "restarted" : "original",
+                seq: restarted ? 1 : 50,
+                oldestSeq: 1,
+                gap: false,
+                events: restarted
+                  ? [
+                      {
+                        seq: 1,
+                        sessionId: nativeId,
+                        requestId: "new-request",
+                        messageId: "new-model-message",
+                        type: "content_block_delta",
+                        data: {
+                          index: 0,
+                          delta: { type: "text_delta", text: "Recovered native text" },
+                        },
+                      },
+                    ]
+                  : [],
+              };
+              if (restarted) await stopped;
+            }),
+        ),
+        (spy) => Effect.sync(() => spy.mockRestore()),
+      );
+      const frames = yield* Queue.unbounded<import("@t3tools/contracts").ModelActivityFrame>();
+      const consumer = yield* Effect.gen(function* () {
+        const service = yield* NativeModelActivityService.NativeModelActivityService;
+        yield* service
+          .subscribe({ threadId, after: 17 })
+          .pipe(Stream.runForEach((frame) => Queue.offer(frames, frame)));
+      }).pipe(
+        Effect.provide(
+          testLayer("/allowed/repo", true, {
+            ...fixture,
+            onList: () => {
+              listCalls++;
+            },
+          }),
+        ),
+        Effect.forkScoped,
+      );
+      const offline = yield* Queue.take(frames);
+      assert.isTrue(offline.kind === "snapshot" && offline.connectionState === "disconnected");
+      yield* TestClock.adjust(250);
+      const original = yield* Queue.take(frames);
+      assert.isTrue(
+        original.kind === "snapshot" &&
+          original.available &&
+          original.epoch === `original:${nativeId}`,
+      );
+      const eof = yield* Queue.take(frames);
+      assert.strictEqual(eof.kind, "disconnected");
+      assert.isTrue(observation.mock.calls[0]?.[0].signal?.aborted);
+      yield* TestClock.adjust(250);
+      const broken = yield* Queue.take(frames);
+      assert.strictEqual(broken.kind, "disconnected");
+      assert.isTrue(observation.mock.calls[1]?.[0].signal?.aborted);
+      yield* TestClock.adjust(500);
+      const absent = yield* Queue.take(frames);
+      assert.strictEqual(absent.kind, "disconnected");
+      yield* TestClock.adjust(1000);
+      const recovered = yield* Queue.take(frames);
+      assert.isTrue(recovered.kind === "snapshot" && recovered.available);
+      if (recovered.kind === "snapshot") {
+        assert.strictEqual(recovered.epoch, `restarted:${nativeId}`);
+        assert.strictEqual(recovered.after, 0);
+        assert.strictEqual(recovered.seq, 1);
+        assert.isTrue(recovered.gap);
+        assert.strictEqual(recovered.events[0]?.messageId, "new-model-message");
+      }
+      assert.strictEqual(discoveries, 5);
+      assert.strictEqual(connections, 3);
+      assert.strictEqual(listCalls, 1);
+      assert.isTrue(observation.mock.calls.every(([input]) => input.after === undefined));
+      yield* Fiber.interrupt(consumer);
+      assert.isTrue(observation.mock.calls.at(-1)?.[0].signal?.aborted);
+      yield* TestClock.adjust("1 minute");
+      assert.strictEqual(discoveries, 5);
+    }),
+);
+
+it.effect("does not poll unconfigured native sessions while the subscription remains mounted", () =>
+  Effect.gen(function* () {
+    const fixture = yield* routingFixture;
+    let scans = 0;
+    const discovery = yield* Effect.acquireRelease(
+      Effect.sync(() => vi.spyOn(Observer, "discoverClaudeModelObserver")),
+      (spy) => Effect.sync(() => spy.mockRestore()),
+    );
+    const frames = yield* Queue.unbounded<import("@t3tools/contracts").ModelActivityFrame>();
+    const consumer = yield* Effect.gen(function* () {
+      const service = yield* NativeModelActivityService.NativeModelActivityService;
+      yield* service
+        .subscribe({ threadId })
+        .pipe(Stream.runForEach((frame) => Queue.offer(frames, frame)));
+    }).pipe(
+      Effect.provide(
+        testLayer("/allowed/repo", true, {
+          ...fixture,
+          stateDir: NodePath.join(fixture.stateDir, "unconfigured"),
+          onList: () => {
+            scans++;
+          },
+        }),
+      ),
+      Effect.forkScoped,
+    );
+    const initial = yield* Queue.take(frames);
+    assert.isTrue(initial.kind === "snapshot" && !initial.available);
+    yield* TestClock.adjust("1 hour");
+    assert.strictEqual(scans, 1);
+    assert.strictEqual(discovery.mock.calls.length, 0);
+    assert.strictEqual((yield* Queue.poll(frames))._tag, "None");
+    yield* Fiber.interrupt(consumer);
   }),
 );

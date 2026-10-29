@@ -17,19 +17,23 @@ export interface ModelActivityRequest {
 }
 export interface ModelActivityState {
   readonly available: boolean;
+  readonly connectionState: "unavailable" | "connected" | "disconnected";
   readonly epoch: string;
   readonly seq: number;
   readonly gap: boolean;
   readonly truncated: boolean;
   readonly requests: ReadonlyArray<ModelActivityRequest>;
+  readonly confirmedMessageIds: ReadonlyArray<string>;
 }
 export const emptyModelActivityState: ModelActivityState = {
   available: false,
+  connectionState: "unavailable",
   epoch: "",
   seq: 0,
   gap: false,
   truncated: false,
   requests: [],
+  confirmedMessageIds: [],
 };
 const MAX_REQUESTS = 32;
 const MAX_TEXT = 256 * 1024;
@@ -49,11 +53,17 @@ function applyEvent(state: ModelActivityState, event: ModelActivity): ModelActiv
     id: event.requestId,
     sessionId: event.sessionId,
     messageId: event.messageId,
-    confirmed: false,
+    confirmed: event.messageId !== null && state.confirmedMessageIds.includes(event.messageId),
     status: "running",
     blocks: [],
   };
-  request = { ...request, messageId: event.messageId ?? request.messageId };
+  request = {
+    ...request,
+    messageId: event.messageId ?? request.messageId,
+    confirmed:
+      request.confirmed ||
+      (event.messageId !== null && state.confirmedMessageIds.includes(event.messageId)),
+  };
   const index = event.data.index;
   if (typeof index === "number" && Number.isSafeInteger(index) && index >= 0 && index < 1024) {
     const blocks = [...request.blocks];
@@ -147,11 +157,13 @@ export function reduceModelActivity(
     let next: ModelActivityState = {
       ...(continuing ? state : emptyModelActivityState),
       available: frame.available,
+      connectionState: frame.connectionState ?? (frame.available ? "connected" : "unavailable"),
       epoch: frame.epoch,
       gap: frame.gap || (continuing && state.gap) || (frame.after > 0 && !continuing),
     };
+    const confirmed = new Set([...next.confirmedMessageIds, ...frame.confirmedMessageIds]);
+    next = { ...next, confirmedMessageIds: [...confirmed].slice(-256) };
     for (const event of frame.events) next = applyEvent(next, event);
-    const confirmed = new Set(frame.confirmedMessageIds);
     return {
       ...next,
       seq: frame.seq,
@@ -163,10 +175,13 @@ export function reduceModelActivity(
     };
   }
   if (frame.epoch !== state.epoch) return state;
+  if (frame.kind === "disconnected")
+    return { ...state, connectionState: "disconnected", gap: true };
   if (frame.kind === "event") return applyEvent(state, frame.event);
-  const confirmed = new Set(frame.messageIds);
+  const confirmed = new Set([...state.confirmedMessageIds, ...frame.messageIds]);
   return {
     ...state,
+    confirmedMessageIds: [...confirmed].slice(-256),
     requests: state.requests.map((request) =>
       request.confirmed || request.messageId === null || !confirmed.has(request.messageId)
         ? request
