@@ -127,10 +127,19 @@ const LIVE_TURN_ITEM_STATUSES: ReadonlySet<OrchestrationV2TurnItem["status"]> = 
  * again when it finishes, not on every update.
  */
 export function turnItemDetailRevision(item: OrchestrationV2TurnItem): string {
-  return LIVE_TURN_ITEM_STATUSES.has(item.status) ? "live" : DateTime.formatIso(item.updatedAt);
+  return LIVE_TURN_ITEM_STATUSES.has(item.status)
+    ? `live:${item.toolPhase ?? "running"}`
+    : DateTime.formatIso(item.updatedAt);
+}
+
+export function toolPreparationDetail(item: OrchestrationV2TurnItem): string | null {
+  if (item.toolPhase !== "preparing") return null;
+  const text = item.inputText || "Waiting for arguments.";
+  return item.inputTextIncomplete ? `Some argument text is unavailable.\n\n${text}` : text;
 }
 
 export function turnItemNeedsDetailFetch(item: OrchestrationV2TurnItem): boolean {
+  if (item.toolPhase === "preparing") return false;
   switch (item.type) {
     case "command_execution":
       return item.outputOmitted === true;
@@ -210,6 +219,7 @@ export function turnItemOutputImages(
 }
 
 export function turnItemHasDetail(item: OrchestrationV2TurnItem): boolean {
+  if (item.toolPhase === "preparing") return true;
   switch (item.type) {
     case "reasoning":
       return item.text.trim().length > 0;

@@ -1641,3 +1641,21 @@ describe("streamed feed updates", () => {
     expect(showsDelegation(steps[3]!)).toBe(false);
   });
 });
+
+it("lets mobile expand a read tool before its path arguments have arrived", () => {
+  const item: OrchestrationV2TurnItem = {
+    ...base("preparing-read", "2026-10-29T00:00:00Z", 1),
+    type: "dynamic_tool",
+    toolName: "read",
+    input: {},
+    status: "running",
+    toolPhase: "preparing",
+    inputText: '{"filePath":',
+  };
+  const activity = buildThreadFeed([projected(item, 0)]).flatMap((entry) =>
+    entry.type === "activity-group" ? entry.activities : [],
+  )[0];
+  expect(activity?.canExpand).toBe(true);
+  expect(activity?.fetchesDetail).toBe(false);
+  expect(activity?.getFullDetail()).toBe('{"filePath":');
+});

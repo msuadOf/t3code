@@ -9,6 +9,7 @@ import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subage
 import { isLiveSubagentTurnItem } from "@t3tools/client-runtime/state/subagentRuntime";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
 import {
+  toolPreparationDetail,
   turnItemDetailRevision,
   turnItemHasDetail,
   turnItemNeedsDetailFetch,
@@ -24,6 +25,7 @@ import {
   workEntryDisplayIndicatesToolFailure,
   liveActivityToolStatus,
   toolGroupAction,
+  workEntryPreparationLabel,
   resolveWorkEntryToolPresentation,
   summarizeToolGroup,
   toolGroupSummaryKind,
@@ -273,6 +275,8 @@ function compactWorkEntryText(value: string): string {
 }
 
 export function workEntryRowLabel(entry: WorkLogPresentationEntry, expanded = false): string {
+  const preparation = workEntryPreparationLabel(entry);
+  if (preparation) return preparation;
   if (expanded && entry.itemType === "reasoning")
     return entry.toolLifecycleStatus === "inProgress" ? "Thinking" : "Thought";
   const presentation = resolveWorkEntryToolPresentation(entry);
@@ -802,6 +806,8 @@ export function formatItemFullDetail(
   row: OrchestrationV2ProjectedTurnItem,
   item: OrchestrationV2TurnItem,
 ): string {
+  const preparation = toolPreparationDetail(item);
+  if (preparation !== null) return preparation;
   return JSON.stringify(
     {
       visibility: row.visibility,
@@ -825,7 +831,9 @@ function toFeedActivity(
   const createdAt = DateTime.formatIso(item.startedAt ?? item.updatedAt);
   const workEntry = toWorkLogEntry(item, createdAt, summary, detail);
   const readPaths =
-    item.type === "dynamic_tool" && toolGroupAction(workEntry) === "read"
+    item.toolPhase !== "preparing" &&
+    item.type === "dynamic_tool" &&
+    toolGroupAction(workEntry) === "read"
       ? collectToolFilePaths(item)
       : null;
   const getFullDetail = memoizeValue(() =>
@@ -1816,6 +1824,8 @@ function appendToolGroupRows(
 }
 
 function liveToolActivitySummary(activity: ThreadFeedActivity, presentTense: boolean): string {
+  const preparation = workEntryPreparationLabel(activity.workEntry);
+  if (preparation) return preparation;
   const status = liveActivityToolStatus(activity.lifecycleStatus, presentTense);
   if (activity.workEntry.itemType === "reasoning") {
     return (

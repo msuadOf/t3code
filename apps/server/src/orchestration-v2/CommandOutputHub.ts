@@ -62,7 +62,12 @@ export type CommandOutputTarget = OrchestrationV2SubscribeCommandOutputInput;
 
 export interface CommandOutputHubShape {
   /** Add raw output for a running command. Called for every provider chunk. */
-  readonly append: (input: CommandOutputTarget & { readonly chunk: string }) => Effect.Effect<void>;
+  readonly append: (
+    input: CommandOutputTarget & {
+      readonly chunk: string;
+      readonly truncated?: boolean | undefined;
+    },
+  ) => Effect.Effect<void>;
   /**
    * The command settled. Its tail is kept briefly for a settle that carries no
    * output (an interrupt); otherwise the persisted output is what rows show.
@@ -161,11 +166,15 @@ export const make = Effect.gen(function* () {
       { discard: true },
     );
 
-  const append: CommandOutputHubShape["append"] = ({ chunk, ...target }) =>
+  const append: CommandOutputHubShape["append"] = ({ chunk, truncated, ...target }) =>
     Effect.suspend(() => {
-      if (chunk.length === 0) return Effect.void;
+      if (chunk.length === 0 && !truncated) return Effect.void;
       const key = commandKey(target);
-      const tail = appendTerminalOutput(tails.get(key) ?? EMPTY_TERMINAL_OUTPUT, chunk);
+      const previous = tails.get(key) ?? EMPTY_TERMINAL_OUTPUT;
+      const tail = appendTerminalOutput(
+        truncated ? { ...previous, truncated: true } : previous,
+        chunk,
+      );
       setBounded(tails, key, tail, MAX_LIVE_COMMANDS, (oldest) => {
         // Its viewers no longer share the hub's state; resync them on the next frame.
         for (const subscriber of subscribers.get(oldest) ?? []) {

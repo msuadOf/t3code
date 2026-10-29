@@ -33,6 +33,7 @@ import {
   resolveAssistantMessageCopyState,
   type MessagesTimelineRow,
   workEntryDisplayLabel,
+  liveWorkEntryLabel,
 } from "./MessagesTimeline.logic";
 
 describe("computeMessageDurationStart", () => {
@@ -3925,4 +3926,36 @@ describe("shouldCollapseUserMessage", () => {
     expect(shouldCollapseUserMessage(`${citation} Can you expand on this?`)).toBe(false);
     expect(shouldCollapseUserMessage(`${citation} ${"More text. ".repeat(60)}`)).toBe(true);
   });
+});
+
+it("does not call a command running while its arguments are being prepared", () => {
+  const item: OrchestrationV2TurnItem = {
+    id: TurnItemId.make("preparing"),
+    threadId: ThreadId.make("thread"),
+    runId: null,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: 0,
+    status: "running",
+    title: null,
+    startedAt: null,
+    completedAt: null,
+    updatedAt: DateTime.makeUnsafe("2026-10-29T00:00:00Z"),
+    type: "command_execution",
+    input: "{}",
+    toolPhase: "preparing",
+  };
+  const entry = {
+    id: "preparing",
+    createdAt: "now",
+    label: "{}",
+    tone: "tool" as const,
+    command: "{}",
+    structuredPayload: item,
+    itemType: "command_execution" as const,
+  };
+  expect(liveWorkEntryLabel(entry, undefined, true)).toBe("Preparing command");
 });

@@ -2,7 +2,14 @@ import { describe, expect, it } from "vite-plus/test";
 import { ThreadId, TurnItemId, type OrchestrationV2TurnItem } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-import { turnItemOutputImages, turnItemOutputText } from "./itemDetail.ts";
+import {
+  toolPreparationDetail,
+  turnItemHasDetail,
+  turnItemNeedsDetailFetch,
+  turnItemDetailRevision,
+  turnItemOutputImages,
+  turnItemOutputText,
+} from "./itemDetail.ts";
 
 function toolItem(output: unknown): OrchestrationV2TurnItem {
   return {
@@ -51,4 +58,25 @@ describe("tool image output parsing", () => {
       expect(turnItemOutputText(overflow)).toBe("Two additional screenshots:\n[image]\n[image]");
     },
   );
+});
+
+it("keeps live raw preparation readable without fetching stale execution detail", () => {
+  const item = {
+    ...toolItem(undefined),
+    status: "running" as const,
+    toolPhase: "preparing" as const,
+    inputText: '{"path":',
+    inputTextIncomplete: true,
+    outputOmitted: true,
+  };
+  expect(turnItemHasDetail(item)).toBe(true);
+  expect(turnItemNeedsDetailFetch(item)).toBe(false);
+  expect(toolPreparationDetail(item)).toBe('Some argument text is unavailable.\n\n{"path":');
+  expect(toolPreparationDetail({ ...item, inputText: "", inputTextIncomplete: false })).toBe(
+    "Waiting for arguments.",
+  );
+  expect(turnItemDetailRevision(item)).not.toBe(
+    turnItemDetailRevision({ ...item, toolPhase: "running" }),
+  );
+  expect(toolPreparationDetail({ ...item, toolPhase: "running" })).toBeNull();
 });

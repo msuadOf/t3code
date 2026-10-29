@@ -50,6 +50,22 @@ const base = {
 };
 
 describe("orchestration V2 wire projection", () => {
+  it("preserves unparsed tool preparation across live and JSON contracts", () => {
+    const item = decodeTurnItem({
+      ...base,
+      status: "running",
+      toolPhase: "preparing",
+      inputText: '{"command":"echo',
+      inputTextIncomplete: true,
+    });
+    const decoded = decodeTurnItemJson(encodeTurnItemJson(projectTurnItemForWire(item)));
+    expect(decoded).toMatchObject({
+      toolPhase: "preparing",
+      inputText: '{"command":"echo',
+      inputTextIncomplete: true,
+    });
+  });
+
   it("keeps copied handoff transcripts out of activity items and live events", () => {
     const item = {
       ...base,

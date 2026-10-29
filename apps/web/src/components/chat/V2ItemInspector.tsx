@@ -6,6 +6,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   toolCallLines,
+  toolPreparationDetail,
   turnItemDetailRevision,
   turnItemNeedsDetailFetch,
   turnItemOutputImages,
@@ -238,15 +239,25 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
   // Command rows stream their output, including the final output, from the server.
   const streamsOutput =
     useCommandOutputStreaming(props.environmentId) &&
-    props.projectedItem.item.type === "command_execution";
+    props.projectedItem.item.type === "command_execution" &&
+    props.projectedItem.item.toolPhase !== "preparing";
   const fetched = useFetchedTurnItem(props.projectedItem, props.environmentId, streamsOutput);
-  const item = fetched.item;
+  const item =
+    props.projectedItem.item.toolPhase === "preparing" ? props.projectedItem.item : fetched.item;
   const outputState = fetched.output;
   const support = useV2ItemSupport({
     environmentId: props.environmentId,
     sourceThreadId: props.projectedItem.sourceThreadId,
     sourceItemId: props.projectedItem.sourceItemId,
   });
+  const preparation = toolPreparationDetail(item);
+  if (preparation !== null) {
+    return (
+      <pre className={cn("max-h-80 overflow-auto text-muted-foreground", monoClassName)}>
+        {preparation}
+      </pre>
+    );
+  }
   return (
     <div className="space-y-2 text-xs" data-v2-item-inspector={item.type}>
       {item.type === "reasoning" && item.text ? (

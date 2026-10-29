@@ -76,7 +76,14 @@ const event = (
   type: "emit_inbound",
   frame: {
     type: "sdk.event",
-    event: { id: `evt_${type.replaceAll(".", "")}0000`, created: 1, type, data, ...durable },
+    event: {
+      id: `evt_${type.replaceAll(".", "")}0000`,
+      created: 1,
+      type,
+      data,
+      ...durable,
+      ...(type === "session.tool.success" ? { durable: { ...durable.durable, version: 2 } } : {}),
+    },
   },
   ...(label === undefined ? {} : { label }),
 });
@@ -2715,6 +2722,406 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       );
       assert.deepEqual(statuses, ["pending", "cancelled"]);
       assert.deepInclude(collected.at(-1), { type: "turn.terminal", status: "completed" });
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("streams native tool input until execution and ignores late or foreign fragments", () =>
+    Effect.gen(function* () {
+      const tool = { sessionID: SESSION, assistantMessageID: "msg_assistant", id: "call-stream" };
+      const foreign = { ...tool, assistantMessageID: "msg_other" };
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+        promptAccepted,
+        event("session.tool.input.started", { ...tool, name: "custom" }),
+        event("session.tool.input.delta", { ...tool, delta: '{"a":' }),
+        event("session.tool.input.delta", { ...foreign, delta: "BAD" }),
+        event("session.tool.input.delta", { ...tool, delta: "1}" }),
+        event("session.tool.input.ended", { ...tool, text: '{"a":2}' }),
+        event("session.tool.input.delta", { ...tool, delta: "TOO LATE" }),
+        event("session.tool.called", { ...tool, name: "custom", input: { a: 2 }, executed: true }),
+        event("session.tool.input.delta", { ...tool, delta: "LATE" }),
+        event("session.tool.success", {
+          ...tool,
+          content: [{ type: "text", text: "done" }],
+          metadata: {},
+          executed: true,
+        }),
+        event("session.tool.input.ended", { ...tool, text: "LATE" }),
+        event("session.tool.input.started", { ...tool, name: "custom" }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const events = yield* runtime.events.pipe(
+        Stream.takeUntil((e) => e.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(turnInput(thread));
+      const items = (yield* Fiber.join(events)).flatMap((e) =>
+        e.type === "turn_item.updated" && e.turnItem.nativeItemRef?.nativeId?.endsWith(tool.id)
+          ? [e.turnItem]
+          : [],
+      );
+      assert.deepEqual(
+        items.map((item) => [item.status, item.toolPhase, item.inputText]),
+        [
+          ["running", "preparing", ""],
+          ["running", "preparing", '{"a":'],
+          ["running", "preparing", '{"a":1}'],
+          ["running", "preparing", '{"a":2}'],
+          ["running", "running", '{"a":2}'],
+          ["completed", undefined, undefined],
+        ],
+      );
+      const called = items.at(-2);
+      assert.deepEqual(called?.type === "dynamic_tool" ? called.input : null, { a: 2 });
+      assert.equal(new Set(items.map((item) => item.id)).size, 1);
+      assert.equal(new Set(items.map((item) => item.ordinal)).size, 1);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps interleaved tool input separate and ignores unknown or question calls", () =>
+    Effect.gen(function* () {
+      const a = { sessionID: SESSION, assistantMessageID: "msg_assistant", id: "call-a" };
+      const b = { ...a, id: "call-b" };
+      const unknown = { ...a, id: "call-unknown" };
+      const question = { ...a, id: "call-question" };
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+        promptAccepted,
+        event("session.tool.input.delta", { ...unknown, delta: "unknown" }),
+        event("session.tool.input.started", { ...question, name: "question" }),
+        event("session.tool.input.delta", { ...question, delta: "question" }),
+        event("session.tool.input.started", { ...a, name: "custom" }),
+        event("session.tool.input.started", { ...b, name: "custom" }),
+        event("session.tool.input.delta", { ...a, delta: "A" }),
+        event("session.tool.input.delta", { ...b, delta: "B" }),
+        event("session.tool.input.delta", { ...a, delta: "1" }),
+        event("session.tool.input.ended", { ...a, text: "A1" }),
+        event("session.tool.input.ended", { ...b, text: "B" }),
+        event("session.tool.called", { ...a, name: "custom", input: {}, executed: true }),
+        event("session.tool.called", { ...b, name: "custom", input: {}, executed: true }),
+        event("session.tool.success", {
+          ...a,
+          content: [{ type: "text", text: "done" }],
+          metadata: {},
+          executed: true,
+        }),
+        event("session.tool.success", {
+          ...b,
+          content: [{ type: "text", text: "done" }],
+          metadata: {},
+          executed: true,
+        }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const events = yield* runtime.events.pipe(
+        Stream.takeUntil((e) => e.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(turnInput(thread));
+      const items = (yield* Fiber.join(events)).flatMap((e) =>
+        e.type === "turn_item.updated" ? [e.turnItem] : [],
+      );
+      const forCall = (id: string) =>
+        items.filter((item) => item.nativeItemRef?.nativeId?.endsWith(id));
+      assert.deepEqual(
+        forCall(a.id).map((item) => item.inputText),
+        ["", "A", "A1", "A1", "A1", undefined],
+      );
+      assert.deepEqual(
+        forCall(b.id).map((item) => item.inputText),
+        ["", "B", "B", "B", undefined],
+      );
+      assert.lengthOf(forCall(unknown.id), 0);
+      assert.lengthOf(forCall(question.id), 0);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "marks tool input incomplete after reconnect until the native complete input arrives",
+    () =>
+      Effect.gen(function* () {
+        const tool = {
+          sessionID: SESSION,
+          assistantMessageID: "msg_assistant",
+          id: "call-reconnect-input",
+        };
+        const { runtime, thread } = yield* resumed([
+          out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+          promptAccepted,
+          event("session.tool.input.started", { ...tool, name: "custom" }),
+          event("session.tool.input.delta", { ...tool, delta: "prefix" }),
+          ...reconnected({ [SESSION]: { type: "running" } }),
+          ...openRequests([]),
+          event("session.tool.input.delta", { ...tool, delta: "suffix" }),
+          event("session.tool.input.ended", { ...tool, text: "prefix-missing-suffix" }),
+          event("session.tool.called", { ...tool, name: "custom", input: {}, executed: true }),
+          event("session.tool.success", {
+            ...tool,
+            content: [{ type: "text", text: "done" }],
+            metadata: {},
+            executed: true,
+          }),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ]);
+        const events = yield* runtime.events.pipe(
+          Stream.takeUntil((e) => e.type === "turn.terminal"),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* runtime.startTurn(turnInput(thread));
+        const items = (yield* Fiber.join(events)).flatMap((e) =>
+          e.type === "turn_item.updated" && e.turnItem.nativeItemRef?.nativeId?.endsWith(tool.id)
+            ? [e.turnItem]
+            : [],
+        );
+        assert.isTrue(
+          items.some((item) => item.inputText === "suffix" && item.inputTextIncomplete === true),
+        );
+        assert.isTrue(
+          items.some(
+            (item) =>
+              item.inputText === "prefix-missing-suffix" && item.inputTextIncomplete !== true,
+          ),
+        );
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("streams native shell output before the authoritative tool result", () =>
+    Effect.gen(function* () {
+      const tool = { sessionID: SESSION, assistantMessageID: "msg_assistant", id: "call-shell" };
+      const gate = makeProviderReplayGate(["shell-success"]);
+      yield* Effect.addFinalizer(() => Effect.sync(() => gate.releaseAll()));
+      const { runtime, thread } = yield* resumed(
+        [
+          out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+          promptAccepted,
+          event("session.tool.input.started", { ...tool, name: "shell" }),
+          event("session.tool.called", {
+            ...tool,
+            name: "shell",
+            input: { command: "echo hi" },
+            executed: true,
+          }),
+          event("session.tool.progress", { ...tool, metadata: { shellID: "sh_test" } }),
+          out("shell.output", {
+            id: "sh_test",
+            "location[directory]": WORK,
+            cursor: "9007199254740991",
+            limit: "65536",
+          }),
+          reply("shell.output", {
+            location: { directory: WORK },
+            data: { output: "", cursor: 3, size: 3, truncated: false },
+          }),
+          out("shell.output", {
+            id: "sh_test",
+            "location[directory]": WORK,
+            cursor: "0",
+            limit: "65536",
+          }),
+          reply("shell.output", {
+            location: { directory: WORK },
+            data: { output: "hi\n", cursor: 3, size: 3, truncated: false },
+          }),
+          {
+            type: "emit_inbound",
+            label: "shell-success",
+            frame: {
+              type: "sdk.event",
+              event: {
+                id: "evt_sessiontoolsuccess0000",
+                created: 1,
+                type: "session.tool.success",
+                data: {
+                  ...tool,
+                  content: [{ type: "text", text: "final" }],
+                  metadata: {},
+                  executed: true,
+                },
+                durable: { ...durable.durable, version: 2 },
+              },
+            },
+          },
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ],
+        { replayGate: gate },
+      );
+      const seen = yield* Deferred.make<void>();
+      const events = yield* runtime.events.pipe(
+        Stream.tap((e) =>
+          e.type === "command_output.delta" ? Deferred.succeed(seen, undefined) : Effect.void,
+        ),
+        Stream.takeUntil((e) => e.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(turnInput(thread));
+      yield* Deferred.await(seen);
+      gate.release("shell-success");
+      const collected = yield* Fiber.join(events);
+      const chunks = collected.filter((e) => e.type === "command_output.delta");
+      assert.lengthOf(chunks, 1);
+      assert.equal(chunks[0]?.chunk, "hi\n");
+      const items = collected.flatMap((e) =>
+        e.type === "turn_item.updated" && e.turnItem.type === "command_execution"
+          ? [e.turnItem]
+          : [],
+      );
+      assert.equal(items.at(-1)?.output, "final");
+      assert.equal(chunks[0]?.itemId, items.at(-1)?.id);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps the final tool result when native shell output is unavailable", () =>
+    Effect.gen(function* () {
+      const tool = {
+        sessionID: SESSION,
+        assistantMessageID: "msg_assistant",
+        id: "call-shell-missing",
+      };
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+        promptAccepted,
+        event("session.tool.input.started", { ...tool, name: "shell" }),
+        event("session.tool.called", {
+          ...tool,
+          name: "shell",
+          input: { command: "echo hi" },
+          executed: true,
+        }),
+        event("session.tool.progress", { ...tool, metadata: { shellID: "sh_missing" } }),
+        out("shell.output", {
+          id: "sh_missing",
+          "location[directory]": WORK,
+          cursor: "9007199254740991",
+          limit: "65536",
+        }),
+        reply("shell.output", { status: 404, body: {} }),
+        {
+          type: "emit_inbound",
+          frame: {
+            type: "sdk.event",
+            event: {
+              id: "evt_sessiontoolsuccess0000",
+              created: 1,
+              type: "session.tool.success",
+              data: {
+                ...tool,
+                content: [{ type: "text", text: "authoritative" }],
+                metadata: {},
+                executed: true,
+              },
+              durable: { ...durable.durable, version: 2 },
+            },
+          },
+        },
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const events = yield* runtime.events.pipe(
+        Stream.takeUntil((e) => e.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(turnInput(thread));
+      const collected = yield* Fiber.join(events);
+      const items = collected.flatMap((e) =>
+        e.type === "turn_item.updated" && e.turnItem.type === "command_execution"
+          ? [e.turnItem]
+          : [],
+      );
+      assert.equal(items.at(-1)?.output, "authoritative");
+      assert.equal(collected.at(-1)?.type, "turn.terminal");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("restarts a failed shell reader on reconnect without losing the native turn", () =>
+    Effect.gen(function* () {
+      const tool = {
+        sessionID: SESSION,
+        assistantMessageID: "msg_assistant",
+        id: "call-shell-reconnect",
+      };
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+        promptAccepted,
+        event("session.tool.input.started", { ...tool, name: "shell" }),
+        event("session.tool.called", {
+          ...tool,
+          name: "shell",
+          input: { command: "echo hi" },
+          executed: true,
+        }),
+        event("session.tool.progress", { ...tool, metadata: { shellID: "sh_reconnect" } }),
+        out("shell.output", {
+          id: "sh_reconnect",
+          "location[directory]": WORK,
+          cursor: "9007199254740991",
+          limit: "65536",
+        }),
+        reply("shell.output", { status: 404, body: {} }),
+        { type: "runtime_exit", status: "success" },
+        out("event.subscribe"),
+        out("session.active"),
+        replyData("session.active", { [SESSION]: { type: "running" } }),
+        out("message.list", { sessionID: SESSION, order: "desc", limit: "50" }),
+        reply("message.list", { data: [], cursor: {} }),
+        ...openRequests([]),
+        out("shell.output", {
+          id: "sh_reconnect",
+          "location[directory]": WORK,
+          cursor: "9007199254740991",
+          limit: "65536",
+        }),
+        reply("shell.output", {
+          location: { directory: WORK },
+          data: { output: "", cursor: 3, size: 3, truncated: false },
+        }),
+        out("shell.output", {
+          id: "sh_reconnect",
+          "location[directory]": WORK,
+          cursor: "0",
+          limit: "65536",
+        }),
+        reply("shell.output", {
+          location: { directory: WORK },
+          data: { output: "hi\n", cursor: 3, size: 3, truncated: false },
+        }),
+        {
+          type: "emit_inbound",
+          frame: {
+            type: "sdk.event",
+            event: {
+              id: "evt_sessiontoolsuccess0000",
+              created: 1,
+              type: "session.tool.success",
+              data: {
+                ...tool,
+                content: [{ type: "text", text: "final" }],
+                metadata: {},
+                executed: true,
+              },
+              durable: { ...durable.durable, version: 2 },
+            },
+          },
+        },
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const events = yield* runtime.events.pipe(
+        Stream.takeUntil((e) => e.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(turnInput(thread));
+      const collected = yield* Fiber.join(events);
+      const items = collected.flatMap((e) =>
+        e.type === "turn_item.updated" && e.turnItem.type === "command_execution"
+          ? [e.turnItem]
+          : [],
+      );
+      assert.equal(items.at(-1)?.output, "final");
+      assert.equal(collected.at(-1)?.type, "turn.terminal");
     }).pipe(Effect.scoped),
   );
 

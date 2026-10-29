@@ -173,6 +173,22 @@ const takeFrame = (frames: Queue.Queue<OrchestrationV2CommandOutputFrame | "ende
 const layer = it.layer(layerTest);
 
 layer("CommandOutputHub", (it) => {
+  it.effect("preserves a native source gap even when its first chunk is empty", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const hub = yield* CommandOutputHub.CommandOutputHub;
+        const threadId = yield* seedThread;
+        yield* writeCommandItem(threadId, { status: "running" });
+        yield* hub.append({ threadId, itemId: ITEM_ID, chunk: "", truncated: true });
+        yield* hub.append({ threadId, itemId: ITEM_ID, chunk: "tail" });
+        const frames = yield* subscribeFrames(threadId);
+        const snapshot = yield* takeFrame(frames);
+        assert.equal(snapshot.text, "tail");
+        assert.isTrue(snapshot.truncated);
+      }),
+    ),
+  );
+
   it.effect(
     "a late subscriber gets the running tail, then live appends, then the final output",
     () =>

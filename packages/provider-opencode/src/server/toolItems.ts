@@ -10,7 +10,7 @@ type ToolItemBase = Omit<
   "type" | "toolName" | "input" | "output"
 >;
 
-function openCodeToolProjectionKind(
+export function openCodeToolProjectionKind(
   toolName: string,
 ): "command_execution" | "file_change" | "file_search" | "web_search" | "dynamic_tool" {
   if (resolveT3McpToolId(toolName) !== null) return "dynamic_tool";

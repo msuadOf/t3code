@@ -4,6 +4,7 @@ import { ThreadId, TurnItemId, type OrchestrationV2TurnItem } from "@t3tools/con
 import * as DateTime from "effect/DateTime";
 
 import {
+  workEntryPreparationLabel,
   commandDetailRepeatsCommand,
   extractCommandOutputText,
   resolveWorkEntryToolPresentation,
@@ -243,4 +244,22 @@ describe("command work-log details", () => {
       }),
     ).toBe(false);
   });
+});
+
+it("labels raw arguments as preparation rather than an executable command", () => {
+  const entry: WorkLogPresentationEntry = {
+    id: "prep",
+    createdAt: "now",
+    label: "{}",
+    tone: "tool",
+    itemType: "command_execution",
+    structuredPayload: commandItem({ status: "running", toolPhase: "preparing", input: "{}" }),
+  };
+  expect(workEntryPreparationLabel(entry)).toBe("Preparing command");
+  expect(
+    workEntryPreparationLabel({
+      ...entry,
+      structuredPayload: commandItem({ toolPhase: "running" }),
+    }),
+  ).toBeNull();
 });

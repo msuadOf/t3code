@@ -132,6 +132,7 @@ export const ProviderAdapterV2Event = Schema.Union([
     threadId: ThreadId,
     itemId: TurnItemId,
     chunk: Schema.String,
+    truncated: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("runtime_request.updated"),

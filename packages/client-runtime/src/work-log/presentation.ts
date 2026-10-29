@@ -100,6 +100,25 @@ export interface WorkLogPresentationEntry {
   readonly toolIcon?: ToolActivityIcon;
 }
 
+export function workEntryPreparationLabel(entry: WorkLogPresentationEntry): string | null {
+  const item = entry.structuredPayload;
+  if (item?.toolPhase !== "preparing") return null;
+  switch (item.type) {
+    case "command_execution":
+      return "Preparing command";
+    case "file_change":
+      return "Preparing file change";
+    case "file_search":
+      return "Preparing file search";
+    case "web_search":
+      return "Preparing web search";
+    case "dynamic_tool":
+      return `Preparing ${resolveWorkEntryToolPresentation(entry)?.displayName ?? item.toolName?.slice(0, 256) ?? "tool"}`;
+    default:
+      return "Preparing tool";
+  }
+}
+
 export type ToolGroupAction =
   | "link-pr"
   | "unlink-pr"

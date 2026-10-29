@@ -891,7 +891,8 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
   // Command rows stream their output, including the final output, from the server.
   const streamsOutput =
     useCommandOutputStreaming(props.environmentId) &&
-    row.projectedItem.item.type === "command_execution";
+    row.projectedItem.item.type === "command_execution" &&
+    row.projectedItem.item.toolPhase !== "preparing";
   const fetchedDetail = useTurnItemDetail(
     expanded && row.fetchesDetail && !streamsOutput
       ? { environmentId: props.environmentId, row: row.projectedItem }
@@ -977,11 +978,13 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
       : undefined;
   const canExpand = row.canExpand && notifiedSubagentThreadId === undefined;
   const reasoning = row.projectedItem.item.type === "reasoning" ? row.projectedItem.item : null;
-  const fetchedItem = fetchedDetail.data?.item ?? null;
+  const preparing = row.projectedItem.item.toolPhase === "preparing";
+  const fetchedItem = preparing ? null : (fetchedDetail.data?.item ?? null);
   const isRead = toolGroupAction(row.workEntry) === "read";
   const shownItem = fetchedItem ?? row.projectedItem.item;
-  const call =
-    expanded && !isRead && shownItem.type === "command_execution"
+  const call = preparing
+    ? null
+    : expanded && !isRead && shownItem.type === "command_execution"
       ? toolCallLines({ command: shownItem.input })
       : expanded && !isRead && shownItem.type === "dynamic_tool"
         ? toolCallLines({ args: shownItem.input })
@@ -1003,7 +1006,7 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
   const outputImages = expanded && fetchedItem ? turnItemOutputImages(fetchedItem) : [];
   const viewedImagePath = workEntryViewedImagePath(row.workEntry);
   const fetchedOutput =
-    !expanded || streamsOutput
+    !expanded || streamsOutput || preparing
       ? null
       : shownItem.type === "file_search" || shownItem.type === "web_search"
         ? turnItemOutputText(shownItem)

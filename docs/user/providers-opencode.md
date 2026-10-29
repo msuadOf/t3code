@@ -48,6 +48,12 @@ environment. The session ID belongs to OpenCode; the server password is separate
 from T3's pairing token. If connection checks fail, check the URL, credentials,
 and OpenCode version, then refresh status.
 
+Replies and reasoning appear as OpenCode publishes them. Tools show their argument
+preparation before execution. Argument fragments appear only when the connected
+OpenCode version publishes them; otherwise the complete arguments arrive together.
+Running shell commands show a live output tail, then their final saved output.
+Joining a long-running command may omit its earlier output from the live tail.
+
 CLI work can continue while T3 is disconnected. On reconnect, T3 reads the native
 history, current execution, and pending questions or approvals so work that began
 during the disconnect can reappear without submitting its prompt again. If T3 Code

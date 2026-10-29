@@ -1299,6 +1299,10 @@ export type OrchestrationV2UserMessageInputIntent =
   typeof OrchestrationV2UserMessageInputIntent.Type;
 
 const OrchestrationV2TurnItemBaseFields = {
+  toolPhase: Schema.optional(Schema.Literals(["preparing", "running"])),
+  // Raw argument observations may be incomplete JSON and must never be executed.
+  inputText: Schema.optional(Schema.String),
+  inputTextIncomplete: Schema.optional(Schema.Boolean),
   toolNonExecutionKind: Schema.optional(Schema.String),
   toolSurface: Schema.optional(ToolActivitySurface),
   toolIcon: Schema.optional(ToolActivityIcon),

@@ -17,6 +17,7 @@ import {
 import {
   liveActivityToolStatus,
   normalizeCompactToolLabel,
+  workEntryPreparationLabel,
   resolveWorkEntryToolPresentation,
   summarizeToolGroup,
   toolGroupAction,
@@ -127,6 +128,8 @@ function workEntryReadPaths(entry: WorkLogEntry, workspaceRoot: string | undefin
 }
 
 export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot: string | undefined) {
+  const preparation = workEntryPreparationLabel(entry);
+  if (preparation) return preparation;
   if (entry.itemType === "system_notice") return entry.label;
   if (entry.itemType === "reasoning" || entry.tone === "thinking") {
     const thought = entry.detail?.trim().replace(/\s+/g, " ");
@@ -231,6 +234,8 @@ export function liveWorkEntryLabel(
   workspaceRoot: string | undefined,
   active: boolean,
 ) {
+  const preparation = workEntryPreparationLabel(entry);
+  if (preparation) return preparation;
   const status = liveActivityToolStatus(entry.toolLifecycleStatus, active);
   if (entry.itemType === "reasoning") {
     return (

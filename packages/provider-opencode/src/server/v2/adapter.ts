@@ -14,6 +14,7 @@ import {
   type OpenCodeEvent,
 } from "@opencode/client/effect";
 import { Mcp } from "@opencode/schema/mcp";
+import { Shell } from "@opencode/schema/shell";
 import {
   isOrchestrationV2WorkActive,
   type ChatAttachment,
@@ -46,6 +47,7 @@ import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schedule from "effect/Schedule";
@@ -88,7 +90,15 @@ import {
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
 import { OPENCODE_PROVIDER, openCodePermissionRequestKind } from "../adapter.ts";
-import { openCodeToolTurnItem } from "../toolItems.ts";
+import { openCodeToolProjectionKind, openCodeToolTurnItem } from "../toolItems.ts";
+import { tailShellOutput, type ShellOutputCursor } from "./shellOutput.ts";
+import {
+  appendToolInput,
+  endToolInput,
+  interruptToolInput,
+  newToolInput,
+  type ToolInputObservation,
+} from "./toolInput.ts";
 
 const OpenCode2ProviderCapabilities = {
   sessions: {
@@ -200,7 +210,18 @@ interface ActiveTurn {
   readonly input: TurnOwner;
   providerTurn: OrchestrationV2ProviderTurn;
   readonly texts: Map<string, OpenBlock>;
-  readonly tools: Map<string, { readonly name: string; input: Record<string, unknown> }>;
+  readonly tools: Map<
+    string,
+    {
+      readonly name: string;
+      readonly assistantMessageID: string;
+      input: Record<string, unknown>;
+      observation?: ToolInputObservation;
+      shell?: { id: string; cursor: ShellOutputCursor; fiber?: Fiber.Fiber<void> };
+      phase?: "preparing" | "running";
+    }
+  >;
+  readonly finishedTools: Set<string>;
   readonly startedAt: Map<string, DateTime.Utc>;
   readonly ordinals: Map<string, number>;
   nextOrdinal: number;
@@ -1026,7 +1047,20 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         type: "turn_item.updated",
         driver,
         turnItem: openCodeToolTurnItem(
-          itemBase(state, turn, nativeId, status, startedAt, completedAt, updatedAt),
+          {
+            ...itemBase(state, turn, nativeId, status, startedAt, completedAt, updatedAt),
+            ...(status === "running" && tool.phase !== undefined
+              ? {
+                  toolPhase: tool.phase,
+                  ...(tool.observation === undefined
+                    ? {}
+                    : {
+                        inputText: tool.observation.text,
+                        ...(tool.observation.incomplete ? { inputTextIncomplete: true } : {}),
+                      }),
+                }
+              : {}),
+          },
           {
             name: tool.name,
             input: tool.input,
@@ -1035,6 +1069,60 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           },
         ),
       });
+    });
+
+    // These helpers run for every native tool event; avoid a span per polling lifecycle.
+    const stopShell = Effect.fnUntraced(function* (
+      tool: ActiveTurn["tools"] extends Map<string, infer T> ? T : never,
+    ) {
+      const fiber = tool.shell?.fiber;
+      if (tool.shell !== undefined) delete tool.shell.fiber;
+      if (fiber !== undefined) yield* Fiber.interrupt(fiber);
+    });
+    const startShell = Effect.fnUntraced(function* (
+      state: ThreadState,
+      turn: ActiveTurn,
+      id: string,
+      shellId: string,
+    ) {
+      const tool = turn.tools.get(id);
+      if (tool === undefined || openCodeToolProjectionKind(tool.name) !== "command_execution")
+        return;
+      if (tool.shell?.id === shellId && tool.shell.fiber !== undefined) return;
+      if (tool.shell !== undefined && tool.shell.id !== shellId) yield* stopShell(tool);
+      const shell =
+        tool.shell?.id === shellId ? tool.shell : { id: shellId, cursor: { cursor: undefined } };
+      tool.shell = shell;
+      const nativeId = `${turn.scope}${id}`;
+      const fiber = yield* tailShellOutput({
+        state: shell.cursor,
+        read: (cursor) =>
+          client.shell
+            .output({
+              id: Shell.ID.make(shellId),
+              location: { directory: AbsolutePath.make(state.directory) },
+              cursor,
+              limit: 65536,
+            })
+            .pipe(Effect.map((response) => response.data)),
+        onChunk: (chunk, truncated) =>
+          Effect.suspend(() =>
+            state.active !== turn || turn.tools.get(id) !== tool || tool.shell !== shell
+              ? Effect.void
+              : emit({
+                  type: "command_output.delta",
+                  driver,
+                  threadId: turn.input.threadId,
+                  itemId: idAllocator.derive.turnItemFromProviderItem({
+                    driver,
+                    nativeItemId: nativeId,
+                  }),
+                  chunk,
+                  ...(truncated ? { truncated: true } : {}),
+                }),
+          ),
+      }).pipe(Effect.forkIn(sessionScope));
+      shell.fiber = fiber;
     });
 
     const emitCompaction = Effect.fnUntraced(function* (
@@ -1152,6 +1240,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       providerTurn,
       texts: new Map(),
       tools: new Map(),
+      finishedTools: new Set(),
       startedAt: new Map(),
       ordinals: new Map(),
       nextOrdinal: providerTurn.ordinal * 100 + 1,
@@ -1564,6 +1653,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       const turn = state.active;
       if (turn === undefined) return;
       state.active = undefined;
+      for (const tool of turn.tools.values()) yield* stopShell(tool);
       for (const inboxID of turn.steers) state.strandedSteers.add(inboxID);
       for (const entry of pending.values()) {
         const background = callsAbove(entry.sessionId).some((call) => call.background);
@@ -2114,9 +2204,32 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         case "session.tool.input.started":
           if (event.data.name === "question") return;
           if (event.data.name === "subagent") return yield* startCall(state, turn, event.data.id);
-          turn.tools.set(event.data.id, { name: event.data.name, input: {} });
+          if (turn.tools.has(event.data.id) || turn.finishedTools.has(event.data.id)) return;
+          turn.tools.set(event.data.id, {
+            name: event.data.name,
+            assistantMessageID: event.data.assistantMessageID,
+            input: {},
+            observation: newToolInput(),
+            phase: "preparing",
+          });
           turn.startedAt.set(event.data.id, yield* DateTime.now);
           return yield* emitTool(state, turn, event.data.id, "running");
+        case "session.tool.input.delta":
+        case "session.tool.input.ended": {
+          const tool = turn.tools.get(event.data.id);
+          if (
+            tool?.phase !== "preparing" ||
+            tool.assistantMessageID !== event.data.assistantMessageID
+          )
+            return;
+          if (tool.observation === undefined || tool.observation.ended) return;
+          if (event.type === "session.tool.input.delta") {
+            if (!appendToolInput(tool.observation, event.data.delta)) return;
+          } else {
+            endToolInput(tool.observation, event.data.text);
+          }
+          return yield* emitTool(state, turn, event.data.id, "running");
+        }
         case "session.tool.called": {
           const call = state.calls.get(event.data.id);
           if (call !== undefined) {
@@ -2129,13 +2242,20 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             return yield* emitSubagent(call);
           }
           const tool = turn.tools.get(event.data.id);
-          if (tool !== undefined) tool.input = event.data.input;
+          if (tool === undefined || tool.assistantMessageID !== event.data.assistantMessageID)
+            return;
+          tool.input = event.data.input;
+          tool.phase = "running";
           return yield* emitTool(state, turn, event.data.id, "running");
         }
         case "session.tool.progress": {
           const call = state.calls.get(event.data.id);
           const childId = stringField(event.data.metadata, "sessionID");
           if (call !== undefined && childId !== undefined) yield* attachChild(call, childId);
+          const shellId = stringField(event.data.metadata, "shellID");
+          const tool = turn.tools.get(event.data.id);
+          if (shellId !== undefined && tool?.assistantMessageID === event.data.assistantMessageID)
+            yield* startShell(state, turn, event.data.id, shellId);
           return;
         }
         case "session.tool.success": {
@@ -2152,12 +2272,16 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             }
             return yield* settleCall(call, "completed", subagentOutput(textOf(event.data.content)));
           }
+          if (turn.tools.get(event.data.id)?.assistantMessageID !== event.data.assistantMessageID)
+            return;
+          yield* stopShell(turn.tools.get(event.data.id)!);
           const output = textOf(event.data.content);
           yield* emitTool(state, turn, event.data.id, "completed", {
             output,
             metadata: event.data.metadata,
           });
           turn.tools.delete(event.data.id);
+          turn.finishedTools.add(event.data.id);
           return;
         }
         case "session.tool.failed": {
@@ -2170,11 +2294,15 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
               event.data.error.message,
             );
           }
+          if (turn.tools.get(event.data.id)?.assistantMessageID !== event.data.assistantMessageID)
+            return;
+          yield* stopShell(turn.tools.get(event.data.id)!);
           yield* emitTool(state, turn, event.data.id, aborted ? "interrupted" : "failed", {
             output: event.data.error.message,
             metadata: event.data.metadata,
           });
           turn.tools.delete(event.data.id);
+          turn.finishedTools.add(event.data.id);
           return;
         }
         case "session.compaction.started":
@@ -2710,27 +2838,38 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             );
             continue;
           }
-          if (part.type !== "tool") continue;
+          if (part.type !== "tool" || turn.finishedTools.has(part.id)) continue;
           if (!turn.tools.has(part.id)) {
-            turn.tools.set(part.id, { name: part.name, input: {} });
+            turn.tools.set(part.id, { name: part.name, assistantMessageID: message.id, input: {} });
             turn.startedAt.set(part.id, yield* DateTime.now);
           }
           const tool = turn.tools.get(part.id)!;
+          if (part.state.status === "running") {
+            tool.phase = "running";
+            const shellId = stringField(part.state.metadata, "shellID");
+            if (shellId !== undefined) yield* startShell(state, turn, part.id, shellId);
+          } else if (part.state.status === "streaming" && tool.phase === undefined) {
+            tool.phase = "preparing";
+          }
           if (typeof part.state.input === "object" && part.state.input !== null) {
             tool.input = part.state.input as Record<string, unknown>;
           }
           if (part.state.status === "completed") {
+            yield* stopShell(tool);
             yield* emitTool(state, turn, part.id, "completed", {
               output: textOf(part.state.content),
               metadata: part.state.metadata,
             });
             turn.tools.delete(part.id);
+            turn.finishedTools.add(part.id);
           } else if (part.state.status === "error") {
+            yield* stopShell(tool);
             yield* emitTool(state, turn, part.id, "failed", {
               output: part.state.error.message,
               metadata: part.state.metadata,
             });
             turn.tools.delete(part.id);
+            turn.finishedTools.add(part.id);
           } else {
             yield* emitTool(state, turn, part.id, "running");
           }
@@ -2947,6 +3086,13 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       client = next.client;
       currentScope = scope;
       yield* Scope.close(previous, Exit.void);
+      for (const state of threads.values()) {
+        const turn = state.active;
+        if (turn === undefined) continue;
+        for (const [id, tool] of turn.tools) {
+          if (tool.shell !== undefined) yield* startShell(state, turn, id, tool.shell.id);
+        }
+      }
       // A restarted server forgot runtime MCP registrations. Restore them before
       // native-only turns can continue, using the current guarded credential.
       for (const state of threads.values()) {
@@ -2991,6 +3137,24 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             yield* Deferred.succeed(observerReady, false);
             observedText.clear();
             streamFailure = "The OpenCode event stream was lost. Reconnecting.";
+            yield* lock.withPermit(
+              Effect.gen(function* () {
+                for (const state of threads.values()) {
+                  const turn = state.active;
+                  if (turn === undefined) continue;
+                  for (const [id, tool] of turn.tools) {
+                    yield* stopShell(tool);
+                    if (
+                      tool.phase === "preparing" &&
+                      tool.observation !== undefined &&
+                      interruptToolInput(tool.observation)
+                    ) {
+                      yield* emitTool(state, turn, id, "running");
+                    }
+                  }
+                }
+              }),
+            );
             yield* Effect.logWarning("Lost the OpenCode event stream; reconnecting.");
             // The last failure is kept for the log: it can carry the server's
             // URL or response text, so only its tag is annotated and the full
