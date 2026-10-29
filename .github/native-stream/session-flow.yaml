@@ -22,7 +22,7 @@ appId: com.t3tools.t3code.dev
     when:
       platform: iOS
     commands:
-      - tapOn: Settings
+      - tapOn: "^(Back|Settings)$"
       - tapOn: Close settings
 - extendedWaitUntil:
     visible: "(?s).*Native stream smoke.*"
