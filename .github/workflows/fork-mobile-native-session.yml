@@ -106,7 +106,7 @@ jobs:
         id: native-app
         uses: actions/cache/restore@v4
         with:
-          key: native-session-app-v1-${{ matrix.platform }}-${{ steps.native-source.outputs.digest }}
+          key: native-session-app-${{ matrix.platform == 'ios' && 'v2' || 'v1' }}-${{ matrix.platform }}-${{ steps.native-source.outputs.digest }}
           path: |
             apps/mobile/android/app/build/outputs/apk/release/app-release.apk
             ${{ runner.temp }}/native-stream-ios/Build/Products/Release-iphonesimulator/T3CodeDev.app
@@ -128,7 +128,7 @@ jobs:
         if: matrix.platform == 'ios' && steps.native-app.outputs.cache-hit != 'true'
         working-directory: apps/mobile
         run: |
-          xcodebuild -workspace ios/T3CodeDev.xcworkspace -scheme T3CodeDev -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/native-stream-ios" CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build > ../../artifacts/native-session/build.log 2>&1
+          xcodebuild -workspace ios/T3CodeDev.xcworkspace -scheme T3CodeDev -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/native-stream-ios" CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="-" CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="" PROVISIONING_PROFILE_SPECIFIER="" ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build > ../../artifacts/native-session/build.log 2>&1
 
       - name: Save compiled native app before UI checks
         if: steps.native-app.outputs.cache-hit != 'true'
@@ -197,15 +197,6 @@ jobs:
           xcrun simctl bootstatus "$device_id" -b
           xcrun simctl ui "$device_id" appearance light
           app_path="$RUNNER_TEMP/native-stream-ios/Build/Products/Release-iphonesimulator/T3CodeDev.app"
-          python3 - <<'PYENT'
-          import os, pathlib, plistlib
-          app = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-stream-ios/Build/Products/Release-iphonesimulator/T3CodeDev.app'
-          with (app / 'Info.plist').open('rb') as source:
-              identifier = plistlib.load(source)['CFBundleIdentifier']
-          with (pathlib.Path(os.environ['RUNNER_TEMP']) / 'simulator-entitlements.plist').open('wb') as output:
-              plistlib.dump({'application-identifier': identifier, 'keychain-access-groups': [identifier], 'get-task-allow': True}, output)
-          PYENT
-          codesign --force --sign - --generate-entitlement-der --entitlements "$RUNNER_TEMP/simulator-entitlements.plist" "$app_path"
           codesign --verify --deep --strict --verbose=2 "$app_path"
           codesign --display --entitlements :- "$app_path" > artifacts/native-session/simulator-entitlements.plist
           xcrun simctl install "$device_id" "$app_path"
