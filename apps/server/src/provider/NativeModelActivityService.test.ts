@@ -61,6 +61,56 @@ const instanceId = ProviderInstanceId.make("claude");
 const threadId = ThreadId.make("thread");
 const providerThreadId = ProviderThreadId.make("provider-thread");
 const nativeId = "01234567-89ab-cdef-0123-456789abcdef";
+it.effect("fails an overflowing model backlog explicitly instead of silently dropping deltas", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const closed = yield* Deferred.make<void>();
+      const pull = yield* Stream.toPull(
+        NativeModelActivityService.bufferModelActivity(
+          Stream.fromArray(
+            Array.from({ length: 1001 }, () => ({
+              kind: "disconnected" as const,
+              epoch: "fixture",
+            })),
+          ).pipe(Stream.ensuring(Deferred.succeed(closed, undefined))),
+        ),
+      );
+      yield* pull.pipe(Effect.result);
+      // Hold the first batch as though its RPC ACK has not arrived.
+      yield* Deferred.await(closed);
+      const result = yield* pull.pipe(Effect.result);
+      assert.strictEqual(result._tag, "Failure");
+      if (result._tag === "Failure" && result.failure._tag === "ModelActivityError") {
+        assert.strictEqual(result.failure._tag, "ModelActivityError");
+        assert.strictEqual(result.failure.reason, "read-failed");
+      }
+    }),
+  ),
+);
+it.effect("batches queued model deltas instead of requiring one network ACK for each delta", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const frames = Array.from({ length: 8 }, (_, index) => ({
+        kind: "event" as const,
+        epoch: "fixture",
+        event: {
+          seq: index + 1,
+          sessionId: nativeId,
+          requestId: "active",
+          messageId: "model",
+          type: "content_block_delta",
+          data: { index: 0, delta: { type: "text_delta", text: String(index) } },
+        },
+      }));
+      const pull = yield* Stream.toPull(
+        NativeModelActivityService.bufferModelActivity(
+          Stream.fromArray(frames).pipe(Stream.rechunk(1)),
+        ),
+      );
+      assert.deepStrictEqual([...(yield* pull)], frames);
+    }),
+  ),
+);
 const testLayer = (
   cwd: string,
   visible: boolean,

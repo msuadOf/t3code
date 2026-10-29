@@ -26,6 +26,7 @@ import {
   isClaudeModelObserverBindingCurrent,
 } from "./ClaudeModelObserverBindings.ts";
 import { isWithinSharedRoot } from "./NativeCodexSessionSync.ts";
+import { bufferLiveStream } from "../orchestration-v2/LiveStreamBudget.ts";
 
 export class NativeModelActivityService extends Context.Service<
   NativeModelActivityService,
@@ -48,6 +49,13 @@ const unavailable: ModelActivityFrame = {
 };
 const isModelActivityError = Schema.is(ModelActivityError);
 const readError = () => new ModelActivityError({ reason: "read-failed" });
+export const bufferModelActivity = <R>(
+  stream: Stream.Stream<ModelActivityFrame, ModelActivityError, R>,
+) =>
+  // Accumulate while RPC waits for an ACK; otherwise WAN latency limits every individual delta.
+  bufferLiveStream(stream, { maxSerializedBytes: 32 * 1024 * 1024 }).pipe(
+    Stream.mapError((error) => (isModelActivityError(error) ? error : readError())),
+  );
 const make = Effect.gen(function* () {
   const events = yield* EventSink.EventSinkV2;
   const registry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
@@ -352,7 +360,7 @@ const make = Effect.gen(function* () {
             Stream.switchMap(() => followThread),
           );
         }),
-      ),
+      ).pipe(bufferModelActivity),
   });
 });
 export const layer = Layer.effect(NativeModelActivityService, make);
