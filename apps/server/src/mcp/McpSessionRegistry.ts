@@ -131,29 +131,31 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           providerSessionId,
           providerInstanceId: scope.thread.providerInstanceId,
           endpoint,
-          bindNativeSession: (constraint) =>
-            SynchronizedRef.modify(state, ({ records }) => {
-              const record = records.get(tokenHash);
-              if (
-                !record ||
-                constraint.metadataKey.length === 0 ||
-                constraint.sessionId.length === 0
-              )
-                return [false, { records }] as const;
-              const existing = record.scope.nativeSessionConstraint;
-              if (existing)
-                return [
-                  existing.metadataKey === constraint.metadataKey &&
-                    existing.sessionId === constraint.sessionId,
-                  { records },
-                ] as const;
-              const next = new Map(records);
-              next.set(tokenHash, {
-                ...record,
-                scope: { ...record.scope, nativeSessionConstraint: { ...constraint } },
-              });
-              return [true, { records: next }] as const;
-            }),
+          bindNativeSession: Effect.fn("McpSessionRegistry.bindNativeSession")(
+            (constraint: McpProviderSession.McpNativeSessionConstraint) =>
+              SynchronizedRef.modify(state, ({ records }) => {
+                const record = records.get(tokenHash);
+                if (
+                  !record ||
+                  constraint.metadataKey.length === 0 ||
+                  constraint.sessionId.length === 0
+                )
+                  return [false, { records }] as const;
+                const existing = record.scope.nativeSessionConstraint;
+                if (existing)
+                  return [
+                    existing.metadataKey === constraint.metadataKey &&
+                      existing.sessionId === constraint.sessionId,
+                    { records },
+                  ] as const;
+                const next = new Map(records);
+                next.set(tokenHash, {
+                  ...record,
+                  scope: { ...record.scope, nativeSessionConstraint: { ...constraint } },
+                });
+                return [true, { records: next }] as const;
+              }),
+          ),
           authorizationHeader: `Bearer ${rawToken}`,
           browserToolsAvailable: scope.capabilities.has("preview"),
           capabilities: scope.capabilities,

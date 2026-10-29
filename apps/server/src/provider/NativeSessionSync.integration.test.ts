@@ -2,6 +2,10 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   ProjectId,
+  EnvironmentId,
+  RunId,
+  MessageId,
+  type OrchestrationV2Run,
   EventId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -15,11 +19,22 @@ import type {
   NativeSession,
   NativeSessionSource,
 } from "@t3tools/provider-core/server/nativeSessions";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import {
+  NativeClaudeMcpBindings,
+  readClaudeMcpRelayCredential,
+} from "./NativeClaudeMcpBindings.ts";
+import { openNativeClaudeMcpHistory } from "./NativeClaudeMcpSharing.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
@@ -29,6 +44,7 @@ import * as Sqlite from "../persistence/Sqlite.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ExternalNativeRuns from "../orchestration-v2/ExternalNativeRuns.ts";
+import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -78,10 +94,16 @@ const provider = (
   },
 });
 
-const fixture = (instances: ReadonlyArray<ProviderInstance>) => {
+const fixture = (
+  instances: ReadonlyArray<ProviderInstance>,
+  mintMcp = false,
+  mcpStore?: McpProviderSessions.McpProviderSessions["Service"],
+) => {
   const opened: Array<{ instanceId: ProviderInstanceId; nativeId: string }> = [];
   const resumed: Array<{ instanceId: ProviderInstanceId; nativeId: string }> = [];
   const resumedStatuses: string[] = [];
+  const revoked: string[] = [];
+  const nativeMcpBindings: Array<{ threadId: ThreadId; sessionId: string }> = [];
   const detached: Array<{ threadId: ThreadId; preserveNativeWork: boolean | undefined }> = [];
   const reconciled: Array<
     Parameters<ExternalNativeRuns.ExternalNativeRuns["Service"]["reconcileSnapshot"]>[0]
@@ -97,6 +119,9 @@ const fixture = (instances: ReadonlyArray<ProviderInstance>) => {
   const dependencies = Layer.mergeAll(
     EventSink.layer.pipe(Layer.provideMerge(persistence)),
     NodeServices.layer,
+    mcpStore
+      ? Layer.succeed(McpProviderSessions.McpProviderSessions, mcpStore)
+      : McpProviderSessions.layer,
     Layer.succeed(HostProcess.HomeDirectory, "/host"),
     IdAllocator.layer,
     ServerSettings.layerTest({
@@ -141,19 +166,46 @@ const fixture = (instances: ReadonlyArray<ProviderInstance>) => {
           reconciled.push(input);
         }),
     }),
+    Layer.mock(McpSessionRegistry.McpSessionRegistry)({
+      revokeProviderSession: (id) =>
+        Effect.sync(() => {
+          revoked.push(id);
+        }),
+    }),
     Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
       detach: (input) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           detached.push({ threadId: input.threadId, preserveNativeWork: input.preserveNativeWork });
+          if (input.revokeMcpCredential) {
+            revoked.push(`detached:${input.threadId}`);
+            if (mcpStore) yield* mcpStore.clear(input.threadId);
+          }
         }),
       open: (input) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
+          if (mintMcp && mcpStore) {
+            yield* mcpStore.set({
+              environmentId: EnvironmentId.make("sharing-test"),
+              threadId: input.threadId,
+              providerInstanceId: input.modelSelection.instanceId,
+              providerSessionId: `credential:${input.threadId}:${opened.length}`,
+              endpoint: "http://127.0.0.1:1234/mcp",
+              authorizationHeader: "Bearer history-credential",
+              browserToolsAvailable: false,
+              bindNativeSession: ({ sessionId }) =>
+                Effect.sync(() => {
+                  nativeMcpBindings.push({ threadId: input.threadId, sessionId });
+                  return true;
+                }),
+            });
+          }
           const identity = {
             instanceId: input.modelSelection.instanceId,
             nativeId: input.initialNativeThreadId ?? "missing",
           };
           opened.push(identity);
           return {
+            providerSessionId: input.providerSessionId,
             resumeThread: ({
               providerThread,
             }: Parameters<ProviderAdapter.ProviderAdapterV2SessionRuntime["resumeThread"]>[0]) =>
@@ -171,6 +223,8 @@ const fixture = (instances: ReadonlyArray<ProviderInstance>) => {
     opened,
     resumed,
     resumedStatuses,
+    revoked,
+    nativeMcpBindings,
     detached,
     reconciled,
     bootstrapped,
@@ -967,4 +1021,406 @@ it.effect(
         assert.equal(reads.length, before);
       }).pipe(Effect.provide(context));
     }).pipe(Effect.scoped),
+);
+
+it.effect.each(["history", "copy", "existing", "missing"] as const)(
+  "UI Claude sharing %s prepares the actual T3 owner's MCP before the native launch without upgrading old workers",
+  (mode) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const mcpStore = yield* McpProviderSessions.McpProviderSessions;
+      const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped());
+      const bindings = new NativeClaudeMcpBindings(path.join(root, "bindings"));
+      const nativeId = "aaaaaaaa-1234-1234-1234-123456789abc";
+      const candidate = {
+        ...native(nativeId),
+        sharingState: mode === "existing" ? ("shared" as const) : ("history" as const),
+      };
+      let shared: NativeSession[] = mode === "existing" ? [candidate] : [];
+      let owner: ThreadId | undefined;
+      let nativeOptions:
+        | { readonly observeModelActivity?: boolean; readonly mcpConfigPath?: string }
+        | undefined;
+      const context = fixture(
+        [
+          provider(claude, claudeDriver, {
+            list: Effect.sync(() => shared),
+            history: () => Effect.succeed([]),
+            sharing: {
+              list: Effect.succeed([candidate]),
+              open: (sessionId, options) => {
+                owner = options?.threadId;
+                return openNativeClaudeMcpHistory({
+                  sessionId,
+                  instanceId: claude,
+                  ...(options ? { options } : {}),
+                  bindings,
+                  readConfig: mcpStore.read,
+                  launcher: (directory) => ({ command: "node", args: ["relay", directory] }),
+                  sessions: {
+                    available: async () => [candidate],
+                    open: async (id, openOptions) => {
+                      nativeOptions = openOptions;
+                      if (mode !== "existing") {
+                        assert.isDefined(owner);
+                        assert.isDefined(openOptions?.mcpConfigPath);
+                      }
+                      const result = native(
+                        mode === "copy" ? "bbbbbbbb-1234-1234-1234-123456789abc" : id,
+                      );
+                      if (mode !== "copy") shared = [result];
+                      return result;
+                    },
+                  },
+                }).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderDriverError({
+                        driver: claudeDriver,
+                        instanceId: claude,
+                        detail: cause.message,
+                        cause,
+                      }),
+                  ),
+                );
+              },
+            },
+          }),
+        ],
+        mode !== "missing",
+        mcpStore,
+      );
+      yield* Effect.gen(function* () {
+        const sync = yield* NativeSessionSync.NativeSessionSync;
+        const result = yield* Effect.exit(
+          sync.open({
+            instanceId: claude,
+            sessionId: nativeId,
+            ...(mode === "existing" ? {} : { observeModelActivity: true }),
+          }),
+        );
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        if (mode === "copy" || mode === "missing") {
+          assert.isTrue(Exit.isFailure(result));
+          const shell = yield* store.getShellSnapshot();
+          assert.lengthOf(shell.threads, 0);
+          assert.lengthOf(shell.archivedThreads, 1);
+          assert.deepEqual(context.revoked, mode === "copy" ? [`credential:${owner}:0`] : []);
+          assert.isTrue(context.detached.every((entry) => entry.preserveNativeWork === true));
+          if (mode === "missing") assert.isUndefined(nativeOptions);
+          assert.isUndefined(yield* mcpStore.read(owner!));
+          assert.isFalse(yield* Effect.promise(() => bindings.hasBinding(nativeId)));
+        } else {
+          assert.isTrue(Exit.isSuccess(result));
+          if (Exit.isFailure(result)) return;
+          const thread = yield* store.getThread(result.value.threadId);
+          if (mode === "existing") {
+            assert.isUndefined(owner);
+            assert.isUndefined(nativeOptions?.mcpConfigPath);
+            assert.lengthOf(context.opened, 0);
+          } else {
+            assert.equal(owner, thread.id);
+            assert.equal(nativeOptions?.observeModelActivity, true);
+            const prepared = path.dirname(nativeOptions!.mcpConfigPath!);
+            const credential = yield* Effect.promise(() =>
+              readClaudeMcpRelayCredential({
+                launchDirectory: prepared,
+                nativeSessionId: nativeId,
+                discovery: false,
+              }),
+            );
+            assert.equal(credential.threadId, thread.id);
+            assert.equal(credential.providerInstanceId, claude);
+            assert.deepEqual(context.nativeMcpBindings, [
+              { threadId: thread.id, sessionId: nativeId },
+            ]);
+          }
+        }
+      }).pipe(Effect.provide(context.layer));
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(Layer.mergeAll(NodeServices.layer, McpProviderSessions.layer)),
+    ),
+);
+
+it.effect(
+  "failed history reopening revokes only its fresh credential and leaves an existing shell unchanged",
+  () =>
+    Effect.gen(function* () {
+      const mcpStore = yield* McpProviderSessions.McpProviderSessions;
+      const candidate = { ...native("existing-history"), sharingState: "history" as const };
+      let fail = false;
+      let shared: NativeSession[] = [];
+      const context = fixture(
+        [
+          provider(claude, claudeDriver, {
+            list: Effect.sync(() => shared),
+            history: () => Effect.succeed([]),
+            sharing: {
+              list: Effect.succeed([candidate]),
+              open: () =>
+                fail
+                  ? Effect.fail(
+                      new ProviderDriverError({
+                        driver: claudeDriver,
+                        instanceId: claude,
+                        detail: "native claim failed",
+                      }),
+                    )
+                  : Effect.sync(() => {
+                      shared = [candidate];
+                      return candidate;
+                    }),
+            },
+          }),
+        ],
+        true,
+        mcpStore,
+      );
+      yield* Effect.gen(function* () {
+        const sync = yield* NativeSessionSync.NativeSessionSync;
+        const first = yield* sync.open({ instanceId: claude, sessionId: candidate.id });
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const before = yield* store.getThread(first.threadId);
+        const archivedAt = DateTime.makeUnsafe(30000);
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("switch-existing-history-owner-provider"),
+              type: "thread.provider-switched",
+              threadId: before.id,
+              occurredAt: archivedAt,
+              payload: {
+                ...before,
+                providerInstanceId: opencode,
+                modelSelection: { instanceId: opencode, model: "other-provider-model" },
+                updatedAt: archivedAt,
+              },
+            },
+            {
+              id: EventId.make("archive-existing-history-failure"),
+              type: "thread.archived",
+              threadId: before.id,
+              occurredAt: archivedAt,
+              payload: {
+                ...before,
+                archivedAt,
+                updatedAt: archivedAt,
+                providerInstanceId: opencode,
+                modelSelection: { instanceId: opencode, model: "other-provider-model" },
+              },
+            },
+          ],
+        });
+        const originalCredential = (yield* mcpStore.read(first.threadId))!.providerSessionId;
+        yield* mcpStore.clear(first.threadId);
+        shared = [];
+        fail = true;
+        assert.isTrue(
+          Exit.isFailure(
+            yield* Effect.exit(sync.open({ instanceId: claude, sessionId: candidate.id })),
+          ),
+        );
+        const after = yield* store.getThread(first.threadId);
+        assert.equal(after.title, before.title);
+        assert.equal(after.modelSelection.instanceId, opencode);
+        assert.isTrue(context.opened.every((request) => request.instanceId === claude));
+        assert.equal(DateTime.toEpochMillis(after.archivedAt!), 30000);
+        assert.deepEqual(context.revoked, [`credential:${first.threadId}:1`]);
+        assert.isFalse(context.revoked.includes(originalCredential));
+        assert.deepEqual(context.detached, [
+          { threadId: first.threadId, preserveNativeWork: true },
+        ]);
+        assert.isUndefined(yield* mcpStore.read(first.threadId));
+      }).pipe(Effect.provide(context.layer));
+    }).pipe(Effect.scoped, Effect.provide(McpProviderSessions.layer)),
+);
+
+const sharingActiveRun = (
+  threadId: ThreadId,
+  status: "starting" | "running",
+  at: DateTime.Utc,
+): OrchestrationV2Run => ({
+  id: RunId.make(`shared-conversion-${status}`),
+  threadId,
+  ordinal: 1,
+  providerInstanceId: claude,
+  modelSelection: { instanceId: claude, model: "native-model" },
+  providerThreadId: null,
+  userMessageId: MessageId.make("concurrent-shared-input"),
+  rootNodeId: null,
+  activeAttemptId: null,
+  status,
+  requestedAt: at,
+  startedAt: status === "running" ? at : null,
+  completedAt: null,
+  checkpointId: null,
+  contextHandoffId: null,
+});
+
+it.effect.each(["starting", "running"] as const)(
+  "failed history conversion preserves a concurrent %s caller's same-generation token and shell",
+  (status) =>
+    Effect.gen(function* () {
+      const mcpStore = yield* McpProviderSessions.McpProviderSessions;
+      const entered = yield* Deferred.make<ThreadId>();
+      const release = yield* Deferred.make<void>();
+      const candidate = { ...native(`deferred-${status}`), sharingState: "history" as const };
+      const context = fixture(
+        [
+          provider(claude, claudeDriver, {
+            list: Effect.succeed([]),
+            history: () => Effect.succeed([]),
+            sharing: {
+              list: Effect.succeed([candidate]),
+              open: (_id, options) =>
+                Effect.gen(function* () {
+                  yield* Deferred.succeed(entered, options!.threadId!);
+                  yield* Deferred.await(release);
+                  return yield* Effect.fail(
+                    new ProviderDriverError({
+                      driver: claudeDriver,
+                      instanceId: claude,
+                      detail: "claim failed after caller attached",
+                    }),
+                  );
+                }),
+            },
+          }),
+        ],
+        true,
+        mcpStore,
+      );
+      yield* Effect.gen(function* () {
+        const sync = yield* NativeSessionSync.NativeSessionSync;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const opening = yield* sync
+          .open({ instanceId: claude, sessionId: candidate.id })
+          .pipe(Effect.exit, Effect.forkScoped);
+        const owner = yield* Deferred.await(entered);
+        const credential = (yield* mcpStore.read(owner))!;
+        const now = yield* DateTime.now;
+        const run = sharingActiveRun(owner, status, now);
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`concurrent-${status}`),
+              type: "run.updated",
+              threadId: owner,
+              runId: run.id,
+              occurredAt: now,
+              payload: run,
+            },
+          ],
+        });
+        yield* Deferred.succeed(release, undefined);
+        assert.isTrue(Exit.isFailure(yield* Fiber.join(opening)));
+        assert.equal(
+          (yield* mcpStore.read(owner))?.providerSessionId,
+          credential.providerSessionId,
+        );
+        assert.deepEqual(context.revoked, []);
+        assert.deepEqual(context.detached, []);
+        assert.isNull((yield* store.getThread(owner)).archivedAt);
+      }).pipe(Effect.provide(context.layer));
+    }).pipe(Effect.scoped, Effect.provide(McpProviderSessions.layer)),
+);
+
+it.effect.each(["foreign-credential", "active-run"] as const)(
+  "history preopen rejects %s before touching another provider's caller",
+  (mode) =>
+    Effect.gen(function* () {
+      const mcpStore = yield* McpProviderSessions.McpProviderSessions;
+      const candidate = { ...native(`protected-${mode}`), sharingState: "history" as const };
+      let sourceCalls = 0;
+      let shared: NativeSession[] = [];
+      const context = fixture(
+        [
+          provider(claude, claudeDriver, {
+            list: Effect.sync(() => shared),
+            history: () => Effect.succeed([]),
+            sharing: {
+              list: Effect.succeed([candidate]),
+              open: () =>
+                Effect.sync(() => {
+                  sourceCalls++;
+                  shared = [candidate];
+                  return candidate;
+                }),
+            },
+          }),
+        ],
+        true,
+        mcpStore,
+      );
+      yield* Effect.gen(function* () {
+        const sync = yield* NativeSessionSync.NativeSessionSync;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const first = yield* sync.open({ instanceId: claude, sessionId: candidate.id });
+        const thread = yield* store.getThread(first.threadId);
+        const now = yield* DateTime.now;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`foreign-selection-${mode}`),
+              type: "thread.provider-switched",
+              threadId: thread.id,
+              occurredAt: now,
+              payload: {
+                ...thread,
+                providerInstanceId: opencode,
+                modelSelection: { instanceId: opencode, model: "other-model" },
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+        const previous = (yield* mcpStore.read(thread.id))!;
+        const credential = {
+          ...previous,
+          ...(mode === "foreign-credential"
+            ? {
+                providerInstanceId: opencode,
+                providerSessionId: "foreign-live-credential",
+                authorizationHeader: "Bearer foreign-live-credential",
+              }
+            : {}),
+        };
+        yield* mcpStore.set(credential);
+        if (mode === "active-run") {
+          const run = sharingActiveRun(thread.id, "running", now);
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("existing-active-sharing-run"),
+                type: "run.updated",
+                threadId: thread.id,
+                runId: run.id,
+                occurredAt: now,
+                payload: run,
+              },
+            ],
+          });
+        }
+        shared = [];
+        assert.isTrue(
+          Exit.isFailure(
+            yield* Effect.exit(sync.open({ instanceId: claude, sessionId: candidate.id })),
+          ),
+        );
+        assert.equal(context.opened.length, 1);
+        assert.equal(sourceCalls, 1);
+        assert.deepEqual(context.revoked, []);
+        assert.deepEqual(context.detached, []);
+        assert.equal(
+          (yield* mcpStore.read(thread.id))?.providerSessionId,
+          credential.providerSessionId,
+        );
+        assert.equal((yield* store.getThread(thread.id)).modelSelection.instanceId, opencode);
+      }).pipe(Effect.provide(context.layer));
+    }).pipe(Effect.scoped, Effect.provide(McpProviderSessions.layer)),
 );

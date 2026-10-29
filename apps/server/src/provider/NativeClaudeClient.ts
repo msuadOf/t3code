@@ -284,6 +284,45 @@ export class NativeClaudeClient {
     await this.request({ op: "reply", short: requireNativeClaudeBackgroundId(session), text });
   }
 
+  /**
+   * Queue human input through the native worker's rendezvous, without terminal keystrokes.
+   * Native consumes it at a tool boundary, or as the next prompt if the turn finishes first.
+   * The acknowledgement proves delivery only: there is no native receipt or atomic turn/PID guard.
+   */
+  async enqueueInput(session: NativeClaudeSession, text: string): Promise<void> {
+    const short = requireNativeClaudeBackgroundId(session);
+    if (
+      !session.sessionId ||
+      !Number.isSafeInteger(session.pid) ||
+      session.pid! <= 0 ||
+      session.status !== "busy" ||
+      text.trim().length === 0
+    )
+      throw new NativeClaudeError(
+        "EQUEUESTATE",
+        "Native Claude queued input requires a busy worker identity and nonempty text.",
+      );
+    const owners = (await this.listSessions()).filter(
+      (candidate) => candidate.sessionId === session.sessionId,
+    );
+    const current = owners[0];
+    if (
+      owners.length !== 1 ||
+      current?.kind !== "background" ||
+      current.id !== short ||
+      current.pid !== session.pid ||
+      current.startedAt !== session.startedAt ||
+      current.status !== "busy" ||
+      current.state === "stopped" ||
+      current.state === "failed"
+    )
+      throw new NativeClaudeError(
+        "EQUEUESTATE",
+        "Claude's active worker changed; no queued input was sent.",
+      );
+    await this.request({ op: "reply", short, text, nextTurn: true });
+  }
+
   /** Events contain terminal output and daemon state; callers must not treat them as SDK messages. */
   subscribe(session: NativeClaudeSession, signal?: AbortSignal): AsyncGenerator<JsonObject> {
     return this.frames(
@@ -556,6 +595,39 @@ export class NativeClaudeClient {
     return ready;
   }
 
+  /** A binding ledger alone cannot prove a recreated worker retained its private MCP launcher. */
+  async hasMcpConfig(session: NativeClaudeSession, expectedPath: string): Promise<boolean> {
+    const short = requireNativeClaudeBackgroundId(session);
+    const config = this.options.configDirectory ?? this.options.environment?.CLAUDE_CONFIG_DIR;
+    if (!config || !session.sessionId) return false;
+    let saved: unknown;
+    try {
+      saved = JSON.parse(
+        await NodeFSP.readFile(NodePath.join(config, "jobs", short, "state.json"), "utf8"),
+      );
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw cause;
+    }
+    if (
+      !isObject(saved) ||
+      saved.sessionId !== session.sessionId ||
+      saved.daemonShort !== short ||
+      !Array.isArray(saved.respawnFlags) ||
+      !saved.respawnFlags.every((flag: unknown) => typeof flag === "string")
+    )
+      return false;
+    const flags = saved.respawnFlags as string[];
+    const indices = flags.flatMap((flag, index) =>
+      flag === "--mcp-config" || flag.startsWith("--mcp-config=") ? [index] : [],
+    );
+    return (
+      indices.length === 1 &&
+      flags[indices[0]!] === "--mcp-config" &&
+      flags[indices[0]! + 1] === expectedPath
+    );
+  }
+
   /** Launch one daemon-owned native session; never creates a second writer for a live session. */
   async startBackground(input: {
     readonly sessionId?: string;
@@ -564,6 +636,7 @@ export class NativeClaudeClient {
     readonly permissionMode?: string;
     readonly resume?: boolean;
     readonly observeModelActivity?: boolean;
+    readonly mcpConfigPath?: string;
   }): Promise<NativeClaudeSession> {
     if (this.options.platform === "win32")
       throw new NativeClaudeError(
@@ -588,6 +661,11 @@ export class NativeClaudeClient {
         : false;
     if (existing) {
       requireNativeClaudeBackgroundId(existing);
+      if (input.mcpConfigPath)
+        throw new NativeClaudeError(
+          "EMCPUPGRADE",
+          "MCP cannot be installed into an existing native Claude worker. Its launch was not changed.",
+        );
       const stopped = existing.state === "failed" || existing.state === "stopped";
       if (input.observeModelActivity && !bound && !stopped)
         throw new NativeClaudeError(
@@ -616,6 +694,7 @@ export class NativeClaudeClient {
     const prepared = input.observeModelActivity ? await activity!.prepare() : undefined;
     const args = [
       "--bg",
+      ...(input.mcpConfigPath ? ["--mcp-config", input.mcpConfigPath] : []),
       ...(prepared ? ["--settings", prepared.settingsPath] : []),
       // Saved sessions retain their own options; overrides make the CLI fork a copy.
       ...(input.resume && input.sessionId
@@ -660,6 +739,8 @@ export class NativeClaudeClient {
     readonly targetThreadId: string;
     readonly cwd: string;
     readonly observeModelActivity?: boolean;
+    readonly mcpConfigPath?: string;
+    readonly expectedSourceMcpConfigPath?: string;
   }): Promise<NativeClaudeSession> {
     if (this.options.platform === "win32")
       throw new NativeClaudeError(
@@ -711,6 +792,26 @@ export class NativeClaudeClient {
         "Claude source launch settings could not be verified; no fork was launched.",
       );
     const flags = saved.respawnFlags as string[];
+    const mcpIndices = flags.flatMap((flag, index) =>
+      flag === "--mcp-config" || flag.startsWith("--mcp-config=") ? [index] : [],
+    );
+    if (
+      mcpIndices.length > 0 &&
+      (mcpIndices.length !== 1 ||
+        !input.mcpConfigPath ||
+        !input.expectedSourceMcpConfigPath ||
+        flags[mcpIndices[0]!] !== "--mcp-config" ||
+        flags[mcpIndices[0]! + 1] !== input.expectedSourceMcpConfigPath)
+    )
+      throw new NativeClaudeError(
+        "EFORKCONFIG",
+        "Claude source MCP configuration is not an owned T3 launcher. No fork was launched.",
+      );
+    if (input.expectedSourceMcpConfigPath && mcpIndices.length === 0)
+      throw new NativeClaudeError(
+        "EFORKCONFIG",
+        "Claude source no longer has its verified MCP launcher. No fork was launched.",
+      );
     const sourceObserver = (await activity?.hasBinding?.(input.sessionId)) ?? false;
     if (sourceObserver && !input.observeModelActivity)
       throw new NativeClaudeError(
@@ -729,7 +830,11 @@ export class NativeClaudeClient {
         "This Claude source uses custom launch settings. Fork it in the native CLI to preserve its configuration.",
       );
     const retainedFlags = flags.filter(
-      (flag, index) => flag !== "--settings" && flags[index - 1] !== "--settings",
+      (flag, index) =>
+        flag !== "--settings" &&
+        flags[index - 1] !== "--settings" &&
+        flag !== "--mcp-config" &&
+        flags[index - 1] !== "--mcp-config",
     );
     // Explicit settings belong only to this fork; source model/permission flags remain native launch flags.
     const prepared = input.observeModelActivity ? await activity!.prepare() : undefined;
@@ -745,6 +850,7 @@ export class NativeClaudeClient {
         input.sessionId,
         "--fork-session",
         ...retainedFlags,
+        ...(input.mcpConfigPath ? ["--mcp-config", input.mcpConfigPath] : []),
         "--settings",
         settingsPath,
       ],

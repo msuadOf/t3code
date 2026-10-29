@@ -17,7 +17,13 @@ if (
   // Guard sockets before either dispatch path can load outbound-capable modules.
   const { ignoreMacosTypeOfServiceEinval } = await import("./outboundHttp.ts");
   ignoreMacosTypeOfServiceEinval();
-  if (command === "__claude-model-observer") {
+  if (command === "__claude-mcp-relay") {
+    const launchDirectory = process.argv[3];
+    if (!launchDirectory) throw new Error("Native Claude MCP relay requires a launch directory.");
+    const Effect = await import("effect/Effect");
+    const { runNativeClaudeMcpRelay } = await import("./provider/NativeClaudeMcpRelay.ts");
+    await Effect.runPromise(Effect.scoped(runNativeClaudeMcpRelay({ launchDirectory })));
+  } else if (command === "__claude-model-observer") {
     const { runClaudeModelObserverWorker } =
       await import("./provider/ClaudeModelObserverWorker.ts");
     await runClaudeModelObserverWorker();

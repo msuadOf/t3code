@@ -303,7 +303,7 @@ export const mapHistory = (
                 messageId,
                 text,
                 attachments: [],
-                inputIntent: "turn_start",
+                inputIntent: item.inputIntent ?? "turn_start",
                 createdBy: "user",
                 creationSource: "provider",
               }

@@ -304,4 +304,45 @@ it.layer(IdAllocator.layer)("Claude native fork identity isolation", (it) => {
         );
       }),
   );
+  it.effect(
+    "projects native absorbed input as an additional user message in its original turn",
+    () =>
+      Effect.gen(function* () {
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const input = fixture(ProviderDriverKind.make("claudeAgent"));
+        const turn = input.turns[0]!;
+        const output = recordsOf(
+          mapHistory(
+            {
+              ...input,
+              turns: [
+                {
+                  ...turn,
+                  items: [
+                    ...turn.items,
+                    {
+                      id: "queued-input:delivery",
+                      type: "user",
+                      inputIntent: "steer",
+                      title: "Additional CLI input",
+                      text: "Also run tests",
+                      status: "completed",
+                    },
+                  ],
+                },
+              ],
+            },
+            ids,
+          ),
+        );
+        assert.equal(output.runs.length, 1);
+        assert.equal(output.messages.filter((message) => message.role === "user").length, 2);
+        assert.deepInclude(output.turnItems.at(-1), {
+          type: "user_message",
+          inputIntent: "steer",
+          title: "Additional CLI input",
+          text: "Also run tests",
+        });
+      }),
+  );
 });

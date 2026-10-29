@@ -565,3 +565,67 @@ it.effect(
       }
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it("keeps absorbed human CLI input on its original turn without exposing queued or abandoned work", () => {
+  const prompt = { type: "user", uuid: "prompt", parentUuid: null, message: { content: "start" } };
+  const queued = {
+    type: "attachment",
+    uuid: "queued",
+    parentUuid: "prompt",
+    attachment: {
+      type: "queued_command",
+      prompt: "Please also check tests",
+      commandMode: "prompt",
+      humanTurn: true,
+      origin: { kind: "human" },
+      delivery_id: "delivery-1",
+    },
+  };
+  const duplicate = { ...queued, uuid: "duplicate", parentUuid: "queued" };
+  const automated = {
+    ...queued,
+    uuid: "automated",
+    parentUuid: "duplicate",
+    attachment: { ...queued.attachment, delivery_id: "delivery-2", origin: { kind: "agent" } },
+  };
+  const unknown = {
+    ...queued,
+    uuid: "unknown",
+    parentUuid: "automated",
+    attachment: { ...queued.attachment, delivery_id: "delivery-3", commandMode: "command" },
+  };
+  const abandoned = {
+    ...queued,
+    uuid: "abandoned",
+    parentUuid: "prompt",
+    attachment: { ...queued.attachment, delivery_id: "delivery-abandoned", prompt: "discarded" },
+  };
+  const done = {
+    type: "assistant",
+    uuid: "done",
+    parentUuid: "unknown",
+    message: { content: [{ type: "text", text: "done" }], stop_reason: "end_turn" },
+  };
+  const history = nativeClaudeHistory([
+    prompt,
+    abandoned,
+    queued,
+    duplicate,
+    automated,
+    unknown,
+    done,
+  ]);
+  expect(history).toHaveLength(1);
+  expect(history[0]?.items).toEqual([
+    { id: "prompt:0", type: "user", text: "start", status: "completed" },
+    {
+      id: "queued-input:delivery-1",
+      type: "user",
+      inputIntent: "steer",
+      title: "Additional CLI input",
+      text: "Please also check tests",
+      status: "completed",
+    },
+    { id: "done:0", type: "assistant", text: "done", status: "completed" },
+  ]);
+});

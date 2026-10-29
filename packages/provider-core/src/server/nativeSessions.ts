@@ -1,7 +1,7 @@
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 import type { ProviderDriverError } from "./errors.ts";
-import type { OrchestrationV2ProviderThread } from "@t3tools/contracts";
+import type { OrchestrationV2ProviderThread, ThreadId } from "@t3tools/contracts";
 
 /** Native Claude forks preserve message/tool UUIDs; only explicit fork targets change T3 identity. */
 export const nativeSessionProjectionId = (
@@ -34,6 +34,8 @@ export interface NativeSession {
 export interface NativeHistoryItem {
   readonly id: string;
   readonly type: "user" | "assistant" | "reasoning" | "tool";
+  /** Human input the native runtime consumed inside an existing turn. */
+  readonly inputIntent?: "steer";
   readonly text: string;
   readonly status: "running" | "completed" | "failed" | "cancelled";
   readonly title?: string;
@@ -75,7 +77,7 @@ export interface NativeSessionSource {
     readonly list: Effect.Effect<ReadonlyArray<NativeSessionCandidate>, ProviderDriverError>;
     readonly open: (
       sessionId: string,
-      options?: { readonly observeModelActivity?: boolean },
+      options?: { readonly observeModelActivity?: boolean; readonly threadId?: ThreadId },
     ) => Effect.Effect<NativeSession, ProviderDriverError>;
   };
   readonly list: Effect.Effect<ReadonlyArray<NativeSession>, ProviderDriverError>;

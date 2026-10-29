@@ -14,6 +14,7 @@ import {
   type OrchestrationV2PlanArtifact,
   type ProviderUserInputAnswers,
   type ChatAttachment,
+  type ThreadId,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -44,7 +45,17 @@ import {
 import type { NativeClaudeSubagentObservation } from "./NativeClaudeSubagents.ts";
 import { nativeClaudePlan } from "./NativeClaudePlanning.ts";
 import { nativeClaudeAttachmentPrompt } from "./NativeClaudeAttachments.ts";
+import type { McpProviderSessionConfig } from "@t3tools/provider-core/server/mcpSession";
+import {
+  NativeClaudeMcpBindings,
+  CLAUDE_MCP_SESSION_METADATA_KEY,
+  type PreparedClaudeMcp,
+} from "./NativeClaudeMcpBindings.ts";
 import { NativeClaudeSessions } from "./NativeClaudeSessions.ts";
+import {
+  nativeClaudeWaitingNotice,
+  type NativeClaudeWaitingNotice,
+} from "./NativeClaudeWaiting.ts";
 
 const encodeNativeInput = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -147,6 +158,13 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
   readonly modelActivity?: NativeClaudeModelActivity;
   readonly observeNewSessions?: boolean;
   readonly resolveAttachmentPath?: (attachment: ChatAttachment) => string | null;
+  readonly mcp?: {
+    readonly bindings: NativeClaudeMcpBindings;
+    readonly readConfig: (
+      threadId: ThreadId,
+    ) => Effect.Effect<McpProviderSessionConfig | undefined>;
+    readonly launcher: Parameters<NativeClaudeMcpBindings["prepare"]>[0]["launcher"];
+  };
 }) {
   const allocator = yield* IdAllocator.IdAllocatorV2;
   const platform = yield* HostProcess.Platform;
@@ -160,7 +178,12 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
       ...(options.modelActivity ? { modelActivity: options.modelActivity } : {}),
     });
   const source = new NativeClaudeSessions(options.configDirectory, client);
-  const capabilities = nativeClaudeCapabilities;
+  const capabilities = options.mcp
+    ? {
+        ...nativeClaudeCapabilities,
+        tools: { ...nativeClaudeCapabilities.tools, supportsMcpTools: true },
+      }
+    : nativeClaudeCapabilities;
   const error = (cause: unknown) =>
     new ProviderAdapter.ProviderAdapterProtocolError({
       driver,
@@ -209,6 +232,84 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
       const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event, Cause.Done>();
       const threads = new Map<string, OrchestrationV2ProviderThread>();
       const newlyCreated = new Set<string>();
+      const mcpGenerations = new Map<string, string>();
+      const prepareMcp = Effect.fn("NativeClaudeAdapter.prepareMcp")(function* (
+        threadId: ThreadId,
+      ) {
+        if (!options.mcp) return;
+        const config = yield* options.mcp.readConfig(threadId);
+        if (!config) return;
+        if (
+          config.threadId !== threadId ||
+          config.providerInstanceId !== options.instanceId ||
+          !config.bindNativeSession
+        )
+          return yield* unsupported(
+            "Claude MCP requires a matching, native-session-bound T3 credential.",
+          );
+        const prepared = yield* attempt(() =>
+          options.mcp!.bindings.prepare({ config, launcher: options.mcp!.launcher }),
+        );
+        return { config, prepared };
+      });
+      const bindMcp = Effect.fn("NativeClaudeAdapter.bindMcp")(function* (
+        id: string,
+        config: McpProviderSessionConfig,
+        prepared?: PreparedClaudeMcp,
+      ) {
+        if (
+          !options.mcp ||
+          !config.bindNativeSession ||
+          !(yield* config.bindNativeSession({
+            metadataKey: CLAUDE_MCP_SESSION_METADATA_KEY,
+            sessionId: id,
+          }))
+        )
+          return yield* unsupported(
+            "Claude MCP credential could not be bound to this native session.",
+          );
+        yield* attempt(() =>
+          prepared
+            ? options.mcp!.bindings.bind({ prepared, nativeSessionId: id, config })
+            : options.mcp!.bindings.recover({ nativeSessionId: id, config }),
+        );
+      });
+      const refreshMcp = Effect.fn("NativeClaudeAdapter.refreshMcp")(function* (
+        thread: OrchestrationV2ProviderThread,
+        job: NativeClaudeSession,
+      ) {
+        if (!options.mcp || !job.sessionId || !thread.appThreadId) return;
+        const config = yield* options.mcp.readConfig(thread.appThreadId);
+        if (!config) return;
+        if (
+          config.threadId !== thread.appThreadId ||
+          config.providerInstanceId !== options.instanceId
+        )
+          return yield* unsupported(
+            "Claude MCP credential belongs to another T3 thread or provider instance.",
+          );
+        const generation = `${config.providerSessionId}:${config.authorizationHeader}:${job.pid ?? ""}:${job.startedAt}`;
+        if (mcpGenerations.get(job.sessionId) === generation) return;
+        const owner = yield* attempt(() => options.mcp!.bindings.ownership(job.sessionId!));
+        // Existing workers without this private launch remain usable, but never claim a hot installation.
+        if (
+          !owner ||
+          owner.revoked ||
+          !(yield* attempt(() => client.hasMcpConfig(job, owner.prepared.mcpConfigPath)))
+        )
+          return;
+        if (
+          owner.threadId !== thread.appThreadId ||
+          owner.providerInstanceId !== options.instanceId ||
+          config.threadId !== thread.appThreadId ||
+          config.providerInstanceId !== options.instanceId
+        )
+          return yield* unsupported(
+            "Claude MCP launch belongs to another T3 thread or provider instance.",
+          );
+        yield* bindMcp(job.sessionId, config);
+        mcpGenerations.set(job.sessionId, generation);
+      });
       const observed = new Map<string, Set<string>>();
       const active = new Map<
         string,
@@ -219,6 +320,10 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
           expectedText?: string;
           baseline?: ReadonlySet<string>;
         }
+      >();
+      const waitingNotices = new Map<
+        string,
+        { notice: NativeClaudeWaitingNotice; startedAt: DateTime.Utc }
       >();
       const questions = new Map<
         string,
@@ -520,7 +625,10 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         }
         for (const [id, thread] of threads) {
           const job = inventory.find((job) => job.sessionId === id);
-          if (job) yield* watch(job);
+          if (job) {
+            yield* refreshMcp(thread, job);
+            yield* watch(job);
+          }
           let historyAvailable = true;
           const history = yield* attempt(() => source.history(id, inventory)).pipe(
             Effect.catch(() =>
@@ -661,6 +769,44 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                 item.title === "AskUserQuestion" &&
                 item.status === "running",
             );
+            const waitingKey = nativeSessionProjectionId(thread, `${turn.id}:waiting-status`);
+            const previousWaiting = waitingNotices.get(waitingKey);
+            const waitingNotice = nativeClaudeWaitingNotice(
+              previousWaiting?.notice,
+              job,
+              pendingQuestions,
+              finished,
+            );
+            if (waitingNotice) {
+              const at = yield* DateTime.now;
+              const noticeStartedAt = previousWaiting?.startedAt ?? at;
+              yield* emit({
+                type: "turn_item.updated",
+                driver,
+                turnItem: {
+                  id: allocator.derive.turnItemFromProviderItem({
+                    driver,
+                    nativeItemId: waitingKey,
+                  }),
+                  threadId: owner.threadId,
+                  runId: owner.runId,
+                  nodeId: owner.rootNodeId,
+                  providerThreadId: thread.id,
+                  providerTurnId,
+                  nativeItemRef: null,
+                  parentItemId: null,
+                  ordinal: itemOrdinal(nativeSessionProjectionId(thread, turn.id), waitingKey),
+                  status: waitingNotice.status,
+                  title: "Claude input status",
+                  startedAt: noticeStartedAt,
+                  completedAt: waitingNotice.status === "completed" ? at : null,
+                  updatedAt: at,
+                  type: "system_notice",
+                  message: waitingNotice.message,
+                },
+              });
+              waitingNotices.set(waitingKey, { notice: waitingNotice, startedAt: noticeStartedAt });
+            }
             // Restore the original request before terminal projection can cancel it.
             for (const item of turn.items) {
               if (item.type !== "tool" || item.title !== "AskUserQuestion") continue;
@@ -805,7 +951,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
             }
             let ordinal = 0;
             for (const item of turn.items) {
-              if (item.type === "user") continue;
+              if (item.type === "user" && item.inputIntent !== "steer") continue;
               const updatedAt = yield* DateTime.now;
               const common = {
                 id: allocator.derive.turnItemFromProviderItem({
@@ -835,7 +981,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                 updatedAt,
               };
               let projected: OrchestrationV2TurnItem;
-              if (item.type === "assistant") {
+              if (item.type === "assistant" || item.type === "user") {
                 const messageId = allocator.derive.messageFromProviderItem({
                   driver,
                   nativeItemId: nativeSessionProjectionId(thread, item.id),
@@ -845,23 +991,35 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                   threadId: owner.threadId,
                   runId: owner.runId,
                   nodeId: owner.rootNodeId,
-                  role: "assistant",
+                  role: item.type === "user" ? "user" : "assistant",
                   text: item.text,
                   attachments: [],
-                  createdBy: "agent",
+                  createdBy: item.type === "user" ? "user" : "agent",
                   creationSource: "provider",
                   streaming: false,
                   createdAt: startedAt,
                   updatedAt,
                 };
                 yield* emit({ type: "message.updated", driver, message });
-                projected = {
-                  ...common,
-                  type: "assistant_message",
-                  messageId,
-                  text: item.text,
-                  streaming: false,
-                };
+                projected =
+                  item.type === "user"
+                    ? {
+                        ...common,
+                        type: "user_message",
+                        messageId,
+                        text: item.text,
+                        attachments: [],
+                        inputIntent: "steer",
+                        createdBy: "user",
+                        creationSource: "provider",
+                      }
+                    : {
+                        ...common,
+                        type: "assistant_message",
+                        messageId,
+                        text: item.text,
+                        streaming: false,
+                      };
               } else if (item.type === "reasoning")
                 projected = { ...common, type: "reasoning", text: item.text, streaming: false };
               else
@@ -1060,6 +1218,12 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         events: Stream.fromQueue(events),
         ensureThread: Effect.fn("NativeClaudeAdapter.ensureThread")(function* (request) {
           const existing = request.existingProviderThread;
+          const nativeOwner = existing?.nativeThreadRef?.nativeId
+            ? (yield* attempt(() => client.listSessions())).some(
+                (job) => job.sessionId === existing.nativeThreadRef!.nativeId,
+              )
+            : false;
+          const mcp = nativeOwner ? undefined : yield* prepareMcp(request.threadId);
           const job = yield* attempt(() =>
             client.startBackground({
               ...(existing?.nativeThreadRef?.nativeId
@@ -1068,6 +1232,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
               cwd: request.runtimePolicy.cwd ?? process.cwd(),
               model: request.modelSelection.model,
               resume: existing !== undefined,
+              ...(mcp ? { mcpConfigPath: mcp.prepared.mcpConfigPath } : {}),
               ...(existing === undefined && options.observeNewSessions
                 ? { observeModelActivity: true }
                 : {}),
@@ -1078,6 +1243,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
             return yield* unsupported(
               "Claude worker did not expose a canonical session identifier.",
             );
+          if (mcp) yield* bindMcp(id, mcp.config, mcp.prepared);
           if (!existing) newlyCreated.add(id);
           const createdAt = yield* DateTime.now;
           return yield* register({
@@ -1120,6 +1286,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
               "Claude already has an observed or pending turn in this session. Wait for it to finish before sending.",
             );
           const job = yield* jobFor(request.providerThread);
+          yield* refreshMcp(request.providerThread, job);
           if (job.status !== "idle")
             return yield* unsupported(
               "Claude native input is idle-only. Finish the current CLI turn or permission prompt before sending from T3.",
@@ -1273,15 +1440,28 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
             return yield* unsupported(
               "Wait for the source Claude turn to finish before forking its complete history.",
             );
+          const sourceMcp = options.mcp
+            ? yield* attempt(() => options.mcp!.bindings.ownership(sourceId))
+            : undefined;
+          const targetMcp = yield* prepareMcp(request.targetThreadId);
+          if (sourceMcp && (!targetMcp || sourceMcp.revoked))
+            return yield* unsupported(
+              "Forking a Claude MCP worker requires an independent target T3 credential.",
+            );
           const job = yield* attempt(() =>
             client.forkBackground({
               sessionId: sourceId,
               targetThreadId: request.targetThreadId,
               cwd: sourceJob.cwd,
+              ...(targetMcp ? { mcpConfigPath: targetMcp.prepared.mcpConfigPath } : {}),
+              ...(sourceMcp
+                ? { expectedSourceMcpConfigPath: sourceMcp.prepared.mcpConfigPath }
+                : {}),
               ...(options.observeNewSessions ? { observeModelActivity: true } : {}),
             }),
           );
           const id = job.sessionId!;
+          if (targetMcp) yield* bindMcp(id, targetMcp.config, targetMcp.prepared);
           const at = yield* DateTime.now;
           newlyCreated.add(id);
           // Copied native entry UUIDs are history, never newly arriving external turns.

@@ -12,9 +12,11 @@ import {
   type OrchestrationV2AppThread,
   type OrchestrationV2ProviderThread,
   type ProviderInstanceId,
+  type ProviderSessionId,
   type ThreadId,
 } from "@t3tools/contracts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import type { NativeSession } from "@t3tools/provider-core/server/nativeSessions";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -30,6 +32,7 @@ import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as ExternalNativeRuns from "../orchestration-v2/ExternalNativeRuns.ts";
+import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
@@ -63,6 +66,8 @@ const make = Effect.gen(function* () {
   const store = yield* ProjectionStore.ProjectionStoreV2;
   const sink = yield* EventSink.EventSinkV2;
   const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+  const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+  const mcpRegistry = yield* McpSessionRegistry.McpSessionRegistry;
   const ids = yield* IdAllocator.IdAllocatorV2;
   const externalRuns = yield* ExternalNativeRuns.ExternalNativeRuns;
   const path = yield* Path.Path;
@@ -87,7 +92,8 @@ const make = Effect.gen(function* () {
           value.driver === driver &&
           value.providerInstanceId === instanceId,
       );
-      if (providerThread !== undefined) return { appThread: context.thread, providerThread };
+      if (providerThread !== undefined)
+        return { appThread: context.thread, providerThread, created: false };
     }
     const threadId = ids.derive.threadFromProviderThread({
       driver,
@@ -103,7 +109,8 @@ const make = Effect.gen(function* () {
           value.driver === driver &&
           value.providerInstanceId === instanceId,
       );
-      if (providerThread !== undefined) return { appThread: context.thread, providerThread };
+      if (providerThread !== undefined)
+        return { appThread: context.thread, providerThread, created: false };
     }
     const project = (yield* projects.bootstrap({
       projectId: yield* ids.allocate.project({ fixtureName: "native-session" }),
@@ -197,7 +204,7 @@ const make = Effect.gen(function* () {
     const committed = yield* sink.write({ unlessNativeThreadOwned: providerThread, events });
     if (committed.length === 0) return undefined;
     owners.set(native.id, threadId);
-    return { appThread, providerThread };
+    return { appThread, providerThread, created: true };
   });
 
   const sync = Effect.gen(function* () {
@@ -545,73 +552,187 @@ const make = Effect.gen(function* () {
             !source.setModelActivityEnabled)
         )
           return yield* new NativeSessionSharingError({ reason: "open-failed" });
-        const shared =
-          input.modelActivityAction && source.setModelActivityEnabled
-            ? yield* source.setModelActivityEnabled(
-                input.sessionId,
-                input.modelActivityAction === "enable",
+        const readOwners = Effect.gen(function* () {
+          const owners = new Map<string, ThreadId>();
+          const shell = yield* store.getShellSnapshot();
+          for (const thread of [...shell.threads, ...shell.archivedThreads]) {
+            const context = yield* store.getThreadProviderContext(thread.id, instance.instanceId);
+            for (const pt of context.providerThreads)
+              if (
+                pt.providerInstanceId === instance.instanceId &&
+                pt.driver === instance.driverKind &&
+                pt.nativeThreadRef?.nativeId
               )
-            : yield* source.open(
-                input.sessionId,
-                input.observeModelActivity === undefined
-                  ? undefined
-                  : { observeModelActivity: input.observeModelActivity },
-              );
-        if (shared.id !== input.sessionId || !isWithinSharedRoot(path, shared.cwd, root))
-          return yield* new NativeSessionSharingError({ reason: "open-failed" });
-        const owners = new Map<string, ThreadId>();
-        const shell = yield* store.getShellSnapshot();
-        for (const thread of [...shell.threads, ...shell.archivedThreads]) {
-          const context = yield* store.getThreadProviderContext(thread.id, instance.instanceId);
-          for (const pt of context.providerThreads)
+                owners.set(pt.nativeThreadRef.nativeId, thread.id);
+          }
+          return owners;
+        });
+        let preparedTarget: Effect.Success<ReturnType<typeof ensureThread>>;
+        let openedProviderSessionId: ProviderSessionId | undefined;
+        let issuedCredentialId: string | undefined;
+        let preserveExistingCaller = false;
+        return yield* Effect.gen(function* () {
+          if (
+            instance.driverKind === "claudeAgent" &&
+            candidate.sharingState === "history" &&
+            !input.modelActivityAction
+          ) {
+            preparedTarget = yield* ensureThread(
+              candidate,
+              instance.driverKind,
+              instance.instanceId,
+              yield* readOwners,
+              false,
+            );
+            if (!preparedTarget || preparedTarget.appThread.deletedAt !== null)
+              return yield* new NativeSessionSharingError({ reason: "open-failed" });
+            const previousCredential = yield* mcpSessions.read(preparedTarget.appThread.id);
+            const existingWork = yield* store.getThreadRecords(preparedTarget.appThread.id, [
+              "runs",
+            ]);
             if (
-              pt.providerInstanceId === instance.instanceId &&
-              pt.driver === instance.driverKind &&
-              pt.nativeThreadRef?.nativeId
-            )
-              owners.set(pt.nativeThreadRef.nativeId, thread.id);
-        }
-        const target = yield* ensureThread(
-          shared,
-          instance.driverKind,
-          instance.instanceId,
-          owners,
-          false,
+              existingWork.runs.some(
+                (run) => run.status === "running" || run.status === "starting",
+              ) ||
+              (previousCredential !== undefined &&
+                previousCredential.providerInstanceId !== instance.instanceId)
+            ) {
+              // Do not let manager.open rotate a different provider's live credential.
+              preserveExistingCaller = true;
+              return yield* new NativeSessionSharingError({ reason: "open-failed" });
+            }
+            const providerSessionId = ids.derive.providerSession({
+              providerInstanceId: instance.instanceId,
+            });
+            const runtime = yield* manager.open({
+              threadId: preparedTarget.appThread.id,
+              providerSessionId,
+              modelSelection: {
+                instanceId: instance.instanceId,
+                model:
+                  candidate.model ||
+                  DEFAULT_MODEL_BY_PROVIDER[instance.driverKind] ||
+                  DEFAULT_MODEL,
+              },
+              runtimePolicy: {
+                cwd: candidate.cwd,
+                runtimeMode: preparedTarget.appThread.runtimeMode,
+                interactionMode: preparedTarget.appThread.interactionMode,
+              },
+              initialNativeThreadId: candidate.id,
+              initialProviderItemIdentityVersion: 2,
+            });
+            openedProviderSessionId = runtime.providerSessionId ?? providerSessionId;
+            const currentCredential = yield* mcpSessions.read(preparedTarget.appThread.id);
+            if (currentCredential?.providerSessionId !== previousCredential?.providerSessionId)
+              issuedCredentialId = currentCredential?.providerSessionId;
+          }
+          const shared =
+            input.modelActivityAction && source.setModelActivityEnabled
+              ? yield* source.setModelActivityEnabled(
+                  input.sessionId,
+                  input.modelActivityAction === "enable",
+                )
+              : yield* source.open(
+                  input.sessionId,
+                  input.observeModelActivity === undefined && !preparedTarget
+                    ? undefined
+                    : {
+                        ...(input.observeModelActivity === undefined
+                          ? {}
+                          : { observeModelActivity: input.observeModelActivity }),
+                        ...(preparedTarget ? { threadId: preparedTarget.appThread.id } : {}),
+                      },
+                );
+          if (shared.id !== input.sessionId || !isWithinSharedRoot(path, shared.cwd, root))
+            return yield* new NativeSessionSharingError({ reason: "open-failed" });
+          const target =
+            preparedTarget ??
+            (yield* ensureThread(
+              shared,
+              instance.driverKind,
+              instance.instanceId,
+              yield* readOwners,
+              false,
+            ));
+          if (!target || target.appThread.deletedAt !== null)
+            return yield* new NativeSessionSharingError({ reason: "open-failed" });
+          if (target.appThread.archivedAt !== null) {
+            const now = yield* DateTime.now;
+            yield* sink.write({
+              events: [
+                {
+                  id: yield* ids.allocate.event({ threadId: target.appThread.id }),
+                  type: "thread.unarchived",
+                  threadId: target.appThread.id,
+                  providerInstanceId: instance.instanceId,
+                  occurredAt: now,
+                  payload: { ...target.appThread, archivedAt: null, updatedAt: now },
+                },
+              ],
+            });
+          }
+          if (input.modelActivityAction) {
+            const current = yield* store.getThread(target.appThread.id);
+            const now = yield* DateTime.now;
+            yield* sink.write({
+              events: [
+                {
+                  id: yield* ids.allocate.event({ threadId: current.id }),
+                  type: "thread.metadata-updated",
+                  threadId: current.id,
+                  providerInstanceId: instance.instanceId,
+                  occurredAt: now,
+                  payload: { ...current, updatedAt: now },
+                },
+              ],
+            });
+          }
+          return { threadId: target.appThread.id };
+        }).pipe(
+          Effect.onError(() =>
+            Effect.gen(function* () {
+              if (!preparedTarget || preserveExistingCaller) return;
+              const threadId = preparedTarget.appThread.id;
+              const records = yield* store.getThreadRecords(threadId, ["runs"]);
+              // A caller can reuse this credential while native open is pending. Protect it
+              // before any revocation, detach or shell update, including the same generation.
+              if (records.runs.some((run) => run.status === "running" || run.status === "starting"))
+                return;
+              if (issuedCredentialId !== undefined) {
+                yield* mcpRegistry.revokeProviderSession(issuedCredentialId);
+                yield* mcpSessions.clear(threadId, issuedCredentialId);
+              }
+              if (
+                openedProviderSessionId !== undefined &&
+                (preparedTarget.created || issuedCredentialId !== undefined)
+              )
+                yield* manager.detach({
+                  providerSessionId: openedProviderSessionId,
+                  threadId,
+                  preserveNativeWork: true,
+                });
+              if (!preparedTarget.created) return;
+              const current = yield* store.getThread(threadId);
+              if (current.deletedAt !== null) return;
+              if (current.archivedAt === null) {
+                const now = yield* DateTime.now;
+                yield* sink.write({
+                  events: [
+                    {
+                      id: yield* ids.allocate.event({ threadId: current.id }),
+                      type: "thread.archived",
+                      threadId: current.id,
+                      providerInstanceId: instance.instanceId,
+                      occurredAt: now,
+                      payload: { ...current, archivedAt: now, updatedAt: now },
+                    },
+                  ],
+                });
+              }
+            }).pipe(Effect.catch(() => Effect.void)),
+          ),
         );
-        if (!target || target.appThread.deletedAt !== null)
-          return yield* new NativeSessionSharingError({ reason: "open-failed" });
-        if (target.appThread.archivedAt !== null) {
-          const now = yield* DateTime.now;
-          yield* sink.write({
-            events: [
-              {
-                id: yield* ids.allocate.event({ threadId: target.appThread.id }),
-                type: "thread.unarchived",
-                threadId: target.appThread.id,
-                providerInstanceId: instance.instanceId,
-                occurredAt: now,
-                payload: { ...target.appThread, archivedAt: null, updatedAt: now },
-              },
-            ],
-          });
-        }
-        if (input.modelActivityAction) {
-          const current = yield* store.getThread(target.appThread.id);
-          const now = yield* DateTime.now;
-          yield* sink.write({
-            events: [
-              {
-                id: yield* ids.allocate.event({ threadId: current.id }),
-                type: "thread.metadata-updated",
-                threadId: current.id,
-                providerInstanceId: instance.instanceId,
-                occurredAt: now,
-                payload: { ...current, updatedAt: now },
-              },
-            ],
-          });
-        }
-        return { threadId: target.appThread.id };
       }).pipe(mutation.withPermits(1));
     },
     Effect.tap(() => safeSync),

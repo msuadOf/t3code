@@ -93,27 +93,29 @@ const make = Effect.gen(function* () {
       yield* Ref.update(sessions, (current) => new Map(current).set(config.threadId, config));
     }),
     read: (threadId) => Ref.get(sessions).pipe(Effect.map((current) => current.get(threadId))),
-    clear: (threadId, expectedProviderSessionId) =>
-      Ref.modify(sessions, (current) => {
-        if (
-          expectedProviderSessionId !== undefined &&
-          current.get(threadId)?.providerSessionId !== expectedProviderSessionId
-        )
-          return [false, current] as const;
-        const next = new Map(current);
-        next.delete(threadId);
-        return [true, next] as const;
-      }).pipe(
-        Effect.flatMap((removed) =>
-          removed
-            ? Ref.update(htmlRenders, (current) => {
-                const next = new Map(current);
-                next.delete(threadId);
-                return next;
-              })
-            : Effect.void,
+    clear: Effect.fn("McpProviderSessions.clear")(
+      (threadId: ThreadId, expectedProviderSessionId?: string) =>
+        Ref.modify(sessions, (current) => {
+          if (
+            expectedProviderSessionId !== undefined &&
+            current.get(threadId)?.providerSessionId !== expectedProviderSessionId
+          )
+            return [false, current] as const;
+          const next = new Map(current);
+          next.delete(threadId);
+          return [true, next] as const;
+        }).pipe(
+          Effect.flatMap((removed) =>
+            removed
+              ? Ref.update(htmlRenders, (current) => {
+                  const next = new Map(current);
+                  next.delete(threadId);
+                  return next;
+                })
+              : Effect.void,
+          ),
         ),
-      ),
+    ),
     recordHtmlRender: (threadId, input, reference) =>
       Ref.update(htmlRenders, (current) =>
         new Map(current).set(

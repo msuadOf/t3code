@@ -80,7 +80,10 @@ function conversationBranch(entries: readonly Entry[]): readonly Entry[] {
   const seen = new Set<string>();
   while (cursor && typeof cursor.uuid === "string" && !seen.has(cursor.uuid)) {
     seen.add(cursor.uuid);
-    if ((cursor.type === "user" || cursor.type === "assistant") && cursor.isSidechain !== true)
+    if (
+      (cursor.type === "user" || cursor.type === "assistant" || cursor.type === "attachment") &&
+      cursor.isSidechain !== true
+    )
       selected.push(cursor);
     cursor = typeof cursor.parentUuid === "string" ? byId.get(cursor.parentUuid) : undefined;
   }
@@ -98,9 +101,40 @@ export function nativeClaudeHistory(entries: readonly Entry[]): readonly NativeH
   const toolItems = new Map<string, { turn: (typeof turns)[number]; index: number }>();
   const assistantTurns = new Map<string, (typeof turns)[number]>();
   const promptTurns = new Map<string, (typeof turns)[number]>();
+  const deliveredInputs = new Set<string>();
   for (const entry of conversationBranch(entries)) {
     // Native child reports belong to the original work, not to a new human prompt.
     if (isNativeClaudeTaskNotification(entry)) continue;
+    const attachment = entry.attachment;
+    // Absorbed input stays inside the current native turn. Its explicit delivery
+    // record proves consumption, unlike a queue ACK or an unsaved prompt snapshot.
+    if (
+      entry.type === "attachment" &&
+      object(attachment) &&
+      attachment.type === "queued_command" &&
+      attachment.commandMode === "prompt" &&
+      attachment.humanTurn === true &&
+      object(attachment.origin) &&
+      attachment.origin.kind === "human" &&
+      typeof attachment.delivery_id === "string" &&
+      attachment.delivery_id.length > 0 &&
+      typeof attachment.prompt === "string" &&
+      attachment.prompt.trim().length > 0
+    ) {
+      const turn = turns.at(-1);
+      if (turn && !deliveredInputs.has(attachment.delivery_id)) {
+        deliveredInputs.add(attachment.delivery_id);
+        turn.items.push({
+          id: `queued-input:${attachment.delivery_id}`,
+          type: "user",
+          inputIntent: "steer",
+          title: "Additional CLI input",
+          text: attachment.prompt,
+          status: "completed",
+        });
+      }
+      continue;
+    }
     if (!object(entry.message)) continue;
     const message = entry.message;
     const content =
@@ -267,7 +301,7 @@ export class NativeClaudeSessions {
 
   async open(
     sessionId: string,
-    options?: { readonly observeModelActivity?: boolean },
+    options?: { readonly observeModelActivity?: boolean; readonly mcpConfigPath?: string },
   ): Promise<NativeSession> {
     const session = (await this.available()).find((session) => session.id === sessionId);
     if (!session)

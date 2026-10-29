@@ -1,3 +1,9 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Native MCP launch identity uses packaged Node execution.
+import * as NodeCrypto from "node:crypto";
+import * as NodeSea from "node:sea";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import { openNativeClaudeMcpHistory } from "../NativeClaudeMcpSharing.ts";
+import { NativeClaudeMcpBindings } from "../NativeClaudeMcpBindings.ts";
 import { makeClaudeScopedLimitNames } from "../claudeUsageLimits.ts";
 import { makeNativeClaudeAdapter } from "../NativeClaudeAdapter.ts";
 import { NativeClaudeClient, type NativeClaudeModelActivity } from "../NativeClaudeClient.ts";
@@ -132,6 +138,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
   }) {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const providerHost = yield* ProviderHost.ProviderHost;
+    const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     // The server cwd is $HOME in packaged desktop builds, and `claude`
@@ -243,6 +250,32 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       },
     };
 
+    const mcpDirectory = yield* Effect.gen(function* () {
+      const mcpRoot = path.join(providerHost.paths.stateDir, "native-claude-mcp");
+      yield* fileSystem.makeDirectory(mcpRoot, { recursive: true, mode: 0o700 });
+      return path.join(
+        yield* fileSystem.realPath(mcpRoot),
+        NodeCrypto.createHash("sha256").update(`${instanceId}\0${configDir}`).digest("hex"),
+      );
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderDriverError({
+            driver: DRIVER_KIND,
+            instanceId,
+            detail: "Could not prepare private Claude MCP metadata.",
+            cause,
+          }),
+      ),
+    );
+    const mcpBindings = new NativeClaudeMcpBindings(mcpDirectory);
+    const mcpLauncher = (launchDirectory: string) => ({
+      command: process.execPath,
+      args: NodeSea.isSea()
+        ? ["__claude-mcp-relay", launchDirectory]
+        : [process.argv[1]!, "__claude-mcp-relay", launchDirectory],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+    });
     const scopedLimitNames = yield* makeClaudeScopedLimitNames;
     const orchestrationAdapter = yield* makeNativeClaudeAdapter({
       instanceId,
@@ -250,6 +283,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       modelActivity,
       observeNewSessions: effectiveConfig.modelActivityForNewSessions === true,
       resolveAttachmentPath: providerHost.resolveAttachmentPath,
+      mcp: {
+        bindings: mcpBindings,
+        readConfig: mcpSessions.read,
+        launcher: mcpLauncher,
+      },
       binaryPath: effectiveConfig.binaryPath,
       environment: { ...processEnv, CLAUDE_CONFIG_DIR: configDir },
     }).pipe(
@@ -542,10 +580,15 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
             catch: nativeSessionError,
           }),
           open: (sessionId, options) =>
-            Effect.tryPromise({
-              try: () => nativeClaudeSessions.open(sessionId, options),
-              catch: nativeSessionError,
-            }),
+            openNativeClaudeMcpHistory({
+              sessionId,
+              instanceId,
+              ...(options ? { options } : {}),
+              sessions: nativeClaudeSessions,
+              bindings: mcpBindings,
+              readConfig: mcpSessions.read,
+              launcher: mcpLauncher,
+            }).pipe(Effect.mapError(nativeSessionError)),
         },
         list: Effect.tryPromise({
           try: () => nativeClaudeSessions.list(),

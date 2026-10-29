@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Isolated native MCP launch metadata fixture.
+import * as NodeFSP from "node:fs/promises";
 import * as Layer from "effect/Layer";
 import {
   makeProviderEventRoutingState,
@@ -12,6 +14,7 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import { describe, expect, it } from "@effect/vitest";
 import {
   ProviderInstanceId,
+  EnvironmentId,
   ProviderSessionId,
   ProviderThreadId,
   ProviderDriverKind,
@@ -36,6 +39,12 @@ import {
   nativeClaudeMatchesPendingTurn,
   nativeClaudeObservedTurnIsTerminal,
 } from "./NativeClaudeAdapter.ts";
+
+import {
+  NativeClaudeMcpBindings,
+  readClaudeMcpRelayCredential,
+} from "./NativeClaudeMcpBindings.ts";
+import type { McpProviderSessionConfig } from "@t3tools/provider-core/server/mcpSession";
 
 const instanceId = ProviderInstanceId.make("claude-native-test");
 const threadId = ThreadId.make("thread-test");
@@ -433,6 +442,179 @@ it.effect.each(["completed", "failed", "interrupted"] as const)(
       expect(client.subscriptions).toBe(1);
       // Closing the observer's scope owns no worker teardown or input operation.
       expect((yield* adapter.getCapabilities()).sessions.runtimeSurvivesHostRestart).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
+);
+
+it.effect.each(["resumed", "ended"] as const)(
+  "updates the same waiting notice when the native worker %s without duplicate hydration notices",
+  (transition) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped();
+      const directory = path.join(root, "projects", "workspace");
+      yield* fs.makeDirectory(directory, { recursive: true });
+      const file = path.join(directory, `${nativeId}.jsonl`);
+      const user = {
+        type: "user",
+        uuid: "waiting-user",
+        parentUuid: null,
+        sessionId: nativeId,
+        cwd: "/work",
+        timestamp: "2026-10-23T00:00:01Z",
+        message: { content: "work" },
+      };
+      yield* fs.writeFileString(file, JSON.stringify(user) + "\n");
+      const client = new FixtureClient("background");
+      Object.assign(client.inventory[0]!, {
+        status: "waiting",
+        state: "blocked",
+        waitingFor: "unknown-native-reason",
+      });
+      const adapter = yield* makeNativeClaudeAdapter({
+        instanceId,
+        configDirectory: root,
+        binaryPath: "never-executed",
+        environment: {},
+        client,
+      });
+      const now = DateTime.makeUnsafe(1);
+      const providerThread: OrchestrationV2ProviderThread = {
+        id: ProviderThreadId.make("waiting-thread"),
+        driver: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: instanceId,
+        providerSessionId: ProviderSessionId.make("waiting-session"),
+        appThreadId: threadId,
+        nativeThreadRef: {
+          driver: ProviderDriverKind.make("claudeAgent"),
+          nativeId,
+          strength: "strong",
+        },
+        nativeConversationHeadRef: null,
+        status: "active",
+        ownerNodeId: null,
+        firstRunOrdinal: null,
+        lastRunOrdinal: null,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("waiting-session"),
+        modelSelection,
+        runtimePolicy,
+        onExternalTurn: () =>
+          Effect.succeed({
+            threadId,
+            providerThread,
+            modelSelection,
+            runtimePolicy,
+            runId: RunId.make("waiting-run"),
+            runOrdinal: 1,
+            providerTurnOrdinal: 1,
+            attemptId: RunAttemptId.make("waiting-attempt"),
+            rootNodeId: NodeId.make("waiting-root"),
+            message: {
+              createdBy: "user",
+              creationSource: "web",
+              messageId: MessageId.make("waiting-message"),
+              text: "work",
+              attachments: [],
+            },
+            appThread: fixtureAppThread(now, providerThread.id),
+          }),
+      });
+      // Pull directly from the runtime queue after each awaited hydration. Every
+      // registration publishes an event, so missing notices fail assertions, not timeouts.
+      const pull = yield* Stream.toPull(runtime.events);
+      const notices = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
+        events.flatMap((event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
+            ? [event.turnItem]
+            : [],
+        );
+      yield* runtime.resumeThread({ threadId, providerThread });
+      const waiting = notices(yield* pull);
+      expect(waiting).toHaveLength(1);
+      expect(waiting[0]).toMatchObject({
+        status: "running",
+        nativeItemRef: null,
+        completedAt: null,
+      });
+      expect(waiting[0]!.message).toContain("claude attach 1234abcd");
+      yield* runtime.resumeThread({ threadId, providerThread });
+      expect(notices(yield* pull)).toEqual([]);
+      if (transition === "ended") {
+        Object.assign(client.inventory[0]!, { status: "idle", state: "done" });
+        yield* fs.writeFileString(
+          file,
+          JSON.stringify(user) +
+            "\n" +
+            JSON.stringify({
+              type: "attachment",
+              uuid: "waiting-extra-input",
+              parentUuid: "waiting-user",
+              attachment: {
+                type: "queued_command",
+                commandMode: "prompt",
+                humanTurn: true,
+                origin: { kind: "human" },
+                delivery_id: "waiting-delivery",
+                prompt: "Also run tests",
+              },
+            }) +
+            "\n" +
+            JSON.stringify({
+              type: "assistant",
+              uuid: "waiting-answer",
+              parentUuid: "waiting-extra-input",
+              sessionId: nativeId,
+              timestamp: "2026-10-23T00:00:02Z",
+              message: { content: "done", stop_reason: "end_turn" },
+            }) +
+            "\n",
+        );
+      } else Object.assign(client.inventory[0]!, { status: "working", state: "running" });
+      yield* runtime.resumeThread({ threadId, providerThread });
+      const resumedEvents = yield* pull;
+      const completed = notices(resumedEvents);
+      if (transition === "ended") {
+        const additionalInput = resumedEvents.flatMap((event) =>
+          event.type === "message.updated" && event.message.role === "user" ? [event.message] : [],
+        );
+        expect(additionalInput).toHaveLength(1);
+        expect(additionalInput[0]).toMatchObject({
+          runId: RunId.make("waiting-run"),
+          text: "Also run tests",
+          createdBy: "user",
+          creationSource: "provider",
+        });
+        expect(resumedEvents).toContainEqual(
+          expect.objectContaining({
+            type: "turn_item.updated",
+            turnItem: expect.objectContaining({
+              type: "user_message",
+              inputIntent: "steer",
+              messageId: additionalInput[0]!.id,
+            }),
+          }),
+        );
+      }
+      expect(completed).toHaveLength(1);
+      expect(completed[0]).toMatchObject({
+        id: waiting[0]!.id,
+        status: "completed",
+        startedAt: waiting[0]!.startedAt,
+      });
+      expect(completed[0]!.completedAt).not.toBeNull();
+      expect(completed[0]!.message).not.toContain("claude attach");
+      expect(completed[0]!.message).toContain(
+        transition === "ended" ? "turn has ended" : "continued",
+      );
+      yield* runtime.resumeThread({ threadId, providerThread });
+      expect(notices(yield* pull)).toEqual([]);
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
 );
 
@@ -1577,5 +1759,201 @@ it.effect(
       });
       expect(client.replies).toEqual(["Independent input"]);
       expect(client.resumes).toEqual([newId]);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
+);
+
+it.effect(
+  "binds a new native MCP worker, rotates its credential on runtime recovery, and gives forks independent launch ownership",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const temporary = yield* fs.makeTempDirectoryScoped();
+      const root = yield* fs.realPath(temporary);
+      yield* fs.makeDirectory(path.join(root, "projects", "workspace"), { recursive: true });
+      yield* fs.writeFileString(path.join(root, "projects", "workspace", `${nativeId}.jsonl`), "");
+      const ledger = new NativeClaudeMcpBindings(path.join(root, "bindings"));
+      const constraints: { metadataKey: string; sessionId: string }[] = [];
+      const targetThreadId = ThreadId.make("mcp-fork-target");
+      const makeConfig = (owner: ThreadId, generation: string): McpProviderSessionConfig => ({
+        environmentId: EnvironmentId.make("mcp-test"),
+        threadId: owner,
+        providerInstanceId: instanceId,
+        providerSessionId: generation,
+        endpoint: "http://127.0.0.1:1234/mcp",
+        authorizationHeader: `Bearer ${generation}`,
+        browserToolsAvailable: false,
+        bindNativeSession: (constraint) =>
+          Effect.sync(() => {
+            constraints.push(constraint);
+            return true;
+          }),
+      });
+      let currentConfig = makeConfig(threadId, "first");
+      const forkConfig = makeConfig(targetThreadId, "target");
+      class Client extends FixtureClient {
+        readonly launches: Parameters<NativeClaudeClient["startBackground"]>[0][] = [];
+        readonly forks: Parameters<NativeClaudeClient["forkBackground"]>[0][] = [];
+        private async save(job: NativeClaudeSession, mcpConfigPath: string) {
+          const directory = path.join(root, "jobs", job.id!);
+          await NodeFSP.mkdir(directory, { recursive: true });
+          await NodeFSP.writeFile(
+            path.join(directory, "state.json"),
+            JSON.stringify({
+              sessionId: job.sessionId,
+              daemonShort: job.id,
+              respawnFlags: ["--mcp-config", mcpConfigPath],
+            }),
+          );
+        }
+        override async startBackground(
+          input: Parameters<NativeClaudeClient["startBackground"]>[0],
+        ) {
+          this.launches.push(input);
+          const job = this.inventory[0]!;
+          if (input.mcpConfigPath) {
+            await expect(
+              readClaudeMcpRelayCredential({
+                launchDirectory: path.dirname(input.mcpConfigPath),
+                nativeSessionId: nativeId,
+                discovery: false,
+              }),
+            ).rejects.toThrow("not bound");
+            await this.save(job, input.mcpConfigPath);
+          }
+          return job;
+        }
+        override async hasMcpConfig(job: NativeClaudeSession, expected: string) {
+          const raw = await NodeFSP.readFile(
+            path.join(root, "jobs", job.id!, "state.json"),
+            "utf8",
+          );
+          return JSON.parse(raw).respawnFlags[1] === expected;
+        }
+        override async forkBackground(input: Parameters<NativeClaudeClient["forkBackground"]>[0]) {
+          this.forks.push(input);
+          const job = {
+            ...this.inventory[0]!,
+            id: "fedcba98",
+            sessionId: "fedcba98-1234-1234-1234-123456789abc",
+            pid: 73,
+          };
+          await this.save(job, input.mcpConfigPath!);
+          Object.assign(this, { inventory: [...this.inventory, job] });
+          return job;
+        }
+      }
+      const client = new Client("background");
+      const options = {
+        instanceId,
+        configDirectory: root,
+        binaryPath: "never-executed",
+        environment: {},
+        client,
+        mcp: {
+          bindings: ledger,
+          readConfig: (id: ThreadId) =>
+            Effect.succeed(id === targetThreadId ? forkConfig : currentConfig),
+          launcher: (directory: string) => ({ command: "node", args: ["relay", directory] }),
+        },
+      };
+      const adapter = yield* makeNativeClaudeAdapter(options);
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("mcp-session"),
+        modelSelection,
+        runtimePolicy,
+      });
+      expect(runtime.providerSession.capabilities.tools.supportsMcpTools).toBe(true);
+      expect(nativeClaudeCapabilities.tools.supportsMcpTools).toBe(false);
+      const nativeThread = yield* runtime.ensureThread({ threadId, modelSelection, runtimePolicy });
+      expect(client.launches).toHaveLength(1);
+      const sourcePath = client.launches[0]!.mcpConfigPath!;
+      const sourceLaunch = path.dirname(sourcePath);
+      expect(constraints).toContainEqual({
+        metadataKey: "t3/claudeSessionID",
+        sessionId: nativeId,
+      });
+      expect(
+        (yield* Effect.promise(() =>
+          readClaudeMcpRelayCredential({
+            launchDirectory: sourceLaunch,
+            nativeSessionId: nativeId,
+            discovery: false,
+          }),
+        )).providerSessionId,
+      ).toBe("first");
+      expect(yield* fs.readFileString(sourcePath)).not.toContain("Bearer");
+      currentConfig = makeConfig(threadId, "second");
+      const recoveredAdapter = yield* makeNativeClaudeAdapter(options);
+      const recoveredRuntime = yield* recoveredAdapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("mcp-restarted-session"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const sourceState = path.join(root, "jobs", "1234abcd", "state.json");
+      yield* fs.writeFileString(
+        sourceState,
+        JSON.stringify({ sessionId: nativeId, daemonShort: "1234abcd", respawnFlags: [] }),
+      );
+      yield* recoveredRuntime.resumeThread({ threadId, providerThread: nativeThread });
+      expect(
+        (yield* Effect.promise(() =>
+          readClaudeMcpRelayCredential({
+            launchDirectory: sourceLaunch,
+            nativeSessionId: nativeId,
+            discovery: false,
+          }),
+        )).providerSessionId,
+      ).toBe("first");
+      yield* fs.writeFileString(
+        sourceState,
+        JSON.stringify({
+          sessionId: nativeId,
+          daemonShort: "1234abcd",
+          respawnFlags: ["--mcp-config", sourcePath],
+        }),
+      );
+      yield* recoveredRuntime.resumeThread({ threadId, providerThread: nativeThread });
+      expect(client.launches).toHaveLength(1);
+      expect(
+        (yield* Effect.promise(() =>
+          readClaudeMcpRelayCredential({
+            launchDirectory: sourceLaunch,
+            nativeSessionId: nativeId,
+            discovery: false,
+          }),
+        )).providerSessionId,
+      ).toBe("second");
+      const forked = yield* recoveredRuntime.forkThread!({
+        sourceProviderThread: nativeThread,
+        targetThreadId,
+      });
+      expect(client.forks[0]?.expectedSourceMcpConfigPath).toBe(sourcePath);
+      const targetPath = client.forks[0]!.mcpConfigPath!;
+      expect(targetPath).not.toBe(sourcePath);
+      expect(
+        (yield* Effect.promise(() =>
+          readClaudeMcpRelayCredential({
+            launchDirectory: path.dirname(targetPath),
+            nativeSessionId: forked.nativeThreadRef!.nativeId!,
+            discovery: false,
+          }),
+        )).threadId,
+      ).toBe(targetThreadId);
+      yield* Effect.promise(() =>
+        ledger.revoke({ nativeSessionId: nativeId, expectedProviderSessionId: "second" }),
+      );
+      yield* recoveredRuntime.resumeThread({ threadId, providerThread: nativeThread });
+      yield* Effect.promise(() =>
+        expect(
+          readClaudeMcpRelayCredential({
+            launchDirectory: sourceLaunch,
+            nativeSessionId: nativeId,
+            discovery: false,
+          }),
+        ).rejects.toThrow("unavailable"),
+      );
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
 );

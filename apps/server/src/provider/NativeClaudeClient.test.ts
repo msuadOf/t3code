@@ -96,6 +96,88 @@ describe("Claude native shared-session transport", () => {
     });
   });
 
+  it("queues native input with nextTurn while preserving the ordinary reply protocol", async () => {
+    const received: Record<string, unknown>[] = [];
+    const busy = { ...session, pid: 42, status: "busy" };
+    await withDaemon(
+      (socket, request) => {
+        received.push(request);
+        socket.end('{"ok":true,"op":"reply"}\n');
+      },
+      async (client) => {
+        client.listSessions = async () => [busy];
+        // This flag bypasses question resolvers and slash commands in stock Claude.
+        await client.enqueueInput(busy, "/literal user text");
+        await client.reply(session, "ordinary reply");
+      },
+    );
+    expect(received).toEqual([
+      {
+        proto: 1,
+        op: "reply",
+        short: session.id,
+        text: "/literal user text",
+        nextTurn: true,
+        auth: "test-control-key",
+      },
+      {
+        proto: 1,
+        op: "reply",
+        short: session.id,
+        text: "ordinary reply",
+        auth: "test-control-key",
+      },
+    ]);
+  });
+
+  it("does not enqueue into a changed PID, turn state, foreground or ambiguous owner", async () => {
+    let requests = 0;
+    const busy = { ...session, pid: 42, status: "busy" };
+    await withDaemon(
+      (socket) => {
+        requests++;
+        socket.end('{"ok":true,"op":"reply"}\n');
+      },
+      async (client) => {
+        for (const owners of [
+          [],
+          [{ ...busy, pid: 43 }],
+          [{ ...busy, status: "idle" }],
+          [{ ...busy, status: "waiting" }],
+          [{ ...busy, kind: "interactive" as const }],
+          [{ ...busy, state: "stopped" }],
+          [busy, busy],
+          [{ ...busy, startedAt: 2 }],
+          [{ ...busy, id: "abcd1234" }],
+        ]) {
+          client.listSessions = async () => owners;
+          await expect(client.enqueueInput(busy, "follow up")).rejects.toMatchObject({
+            code: "EQUEUESTATE",
+          });
+        }
+        client.listSessions = async () => [busy];
+        await expect(client.enqueueInput(session, "follow up")).rejects.toMatchObject({
+          code: "EQUEUESTATE",
+        });
+        await expect(client.enqueueInput(busy, " ")).rejects.toMatchObject({ code: "EQUEUESTATE" });
+      },
+    );
+    expect(requests).toBe(0);
+  });
+
+  it("propagates queued-input native rejection without pretending it was consumed", async () => {
+    const busy = { ...session, pid: 42, status: "busy" };
+    await withDaemon(
+      (socket) => socket.end('{"ok":false,"code":"ERESPAWNING","error":"worker starting"}\n'),
+      async (client) => {
+        client.listSessions = async () => [busy];
+        await expect(client.enqueueInput(busy, "follow up")).rejects.toMatchObject({
+          code: "ERESPAWNING",
+        });
+      },
+    );
+  });
+
   it("propagates native rejection rather than reporting a successful send", async () => {
     await withDaemon(
       (socket) => socket.end('{"ok":false,"code":"ENOJOB","error":"job not found"}\n'),
@@ -948,4 +1030,138 @@ fi
       },
     );
   });
+});
+
+describe("native Claude private MCP launch", () => {
+  it("adds only a private MCP config path to new and canonical historical launches", async () => {
+    for (const resume of [false, true]) {
+      await withLauncher(
+        (directory) => `
+if [ "$1" = "agents" ]; then
+ if [ -f '${directory}/ready' ]; then printf '%s' '${JSON.stringify([{ ...session, status: "idle" }])}'; else printf '[]'; fi
+elif [ "$1" = "--bg" ]; then
+ printf '%s\\n' "$@" > '${directory}/argv'
+ touch '${directory}/ready'; printf 'backgrounded · 1234abcd\\n'
+else exit 41; fi
+`,
+        async (client, directory) => {
+          await client.startBackground({
+            cwd: directory,
+            ...(resume ? { sessionId: session.sessionId!, resume: true } : {}),
+            mcpConfigPath: "/private/t3-mcp.json",
+          });
+          const args = (await NodeFSP.readFile(NodePath.join(directory, "argv"), "utf8"))
+            .trim()
+            .split("\n");
+          expect(args.slice(0, 3)).toEqual(["--bg", "--mcp-config", "/private/t3-mcp.json"]);
+          if (resume) expect(args.slice(3)).toEqual(["--resume", session.sessionId]);
+        },
+      );
+    }
+  });
+
+  it("does not hot-install MCP or restart an existing native worker", async () => {
+    await withLauncher(
+      () =>
+        `if [ "$1" = "agents" ]; then printf '%s' '${JSON.stringify([{ ...session, status: "idle" }])}'; else exit 41; fi`,
+      async (client, directory) => {
+        await expect(
+          client.startBackground({
+            cwd: directory,
+            sessionId: session.sessionId!,
+            resume: true,
+            mcpConfigPath: "/private/new.json",
+          }),
+        ).rejects.toMatchObject({ code: "EMCPUPGRADE" });
+      },
+    );
+  });
+
+  it("verifies the current native MCP launch route rather than trusting a durable UUID alone", async () => {
+    await withLauncher(
+      () => "exit 41",
+      async (client, directory) => {
+        const jobDirectory = NodePath.join(directory, "jobs", session.id!);
+        await NodeFSP.mkdir(jobDirectory, { recursive: true });
+        const saved = {
+          sessionId: session.sessionId,
+          daemonShort: session.id,
+          respawnFlags: ["--mcp-config", "/private/owned.json"],
+        };
+        const file = NodePath.join(jobDirectory, "state.json");
+        await NodeFSP.writeFile(file, JSON.stringify(saved));
+        expect(await client.hasMcpConfig(session, "/private/owned.json")).toBe(true);
+        expect(await client.hasMcpConfig(session, "/private/other.json")).toBe(false);
+        await NodeFSP.writeFile(file, JSON.stringify({ ...saved, respawnFlags: [] }));
+        expect(await client.hasMcpConfig(session, "/private/owned.json")).toBe(false);
+        await NodeFSP.writeFile(file, JSON.stringify({ ...saved, sessionId: "other" }));
+        expect(await client.hasMcpConfig(session, "/private/owned.json")).toBe(false);
+      },
+    );
+  });
+});
+
+it("replaces only the verified source relay with an independent fork MCP launch", async () => {
+  const forked = {
+    ...session,
+    id: "fedcba98",
+    sessionId: "fedcba98-1234-1234-1234-123456789abc",
+    status: "idle",
+    pid: 73,
+  };
+  const source = { ...session, status: "idle", pid: 42 };
+  for (const mode of ["owned", "foreign", "duplicate"] as const) {
+    await withLauncher(
+      (directory) => `
+if [ "$1" = "agents" ]; then
+ if [ -f '${directory}/ready' ]; then printf '%s' '${JSON.stringify([source, { ...forked, cwd: directory }])}'; else printf '%s' '${JSON.stringify([source])}'; fi
+elif [ "$1" = "--bg" ]; then
+ printf '%s\\n' "$@" > '${directory}/argv'; touch '${directory}/ready'; printf 'backgrounded · fedcba98\\n'
+else exit 41; fi
+`,
+      async (client, directory) => {
+        const jobDirectory = NodePath.join(directory, "jobs", session.id!);
+        await NodeFSP.mkdir(jobDirectory, { recursive: true });
+        await NodeFSP.writeFile(
+          NodePath.join(jobDirectory, "state.json"),
+          JSON.stringify({
+            sessionId: session.sessionId,
+            daemonShort: session.id,
+            respawnFlags: [
+              "--permission-mode",
+              "default",
+              "--mcp-config",
+              mode === "foreign" ? "/custom/mcp.json" : "/private/source.json",
+              ...(mode === "duplicate" ? ["--mcp-config", "/custom/other.json"] : []),
+            ],
+          }),
+        );
+        const input = {
+          sessionId: session.sessionId!,
+          targetThreadId: "mcp-fork",
+          cwd: directory,
+          expectedSourceMcpConfigPath: "/private/source.json",
+          mcpConfigPath: "/private/target.json",
+        };
+        if (mode !== "owned") {
+          await expect(client.forkBackground(input)).rejects.toMatchObject({ code: "EFORKCONFIG" });
+          await expect(NodeFSP.readFile(NodePath.join(directory, "argv"))).rejects.toMatchObject({
+            code: "ENOENT",
+          });
+        } else {
+          expect((await client.forkBackground(input)).sessionId).toBe(forked.sessionId);
+          const args = (await NodeFSP.readFile(NodePath.join(directory, "argv"), "utf8"))
+            .trim()
+            .split("\n");
+          expect(args).not.toContain("/private/source.json");
+          expect(args.slice(4, 8)).toEqual([
+            "--permission-mode",
+            "default",
+            "--mcp-config",
+            "/private/target.json",
+          ]);
+        }
+      },
+    );
+  }
 });

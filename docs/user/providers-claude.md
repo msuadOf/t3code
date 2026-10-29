@@ -33,6 +33,15 @@ new conversation in T3 also creates a native background worker. T3 sends text
 when that worker is idle. Both interfaces operate on the same worker, and closing
 T3 leaves native work running.
 
+New workers started by T3 can use T3's MCP tools through a private local bridge.
+This includes inactive history opened with **Continue as shared session**, when
+that history has no existing daemon worker.
+The bridge belongs to the original native session and follows T3's current tool
+permissions when the daemon reconnects. It does not use Anthropic Remote Control.
+Opening an existing worker that was started without this bridge does not install
+it into the running process. Native child sessions do not inherit another
+session's T3 tool authorization.
+
 T3 can send uploaded PNG, JPEG, GIF and WebP images, plus supported text and code
 files, to the same idle worker using Claude's native file-reference processing.
 The files must be available on the environment hosting Claude. Unsupported formats
@@ -56,6 +65,8 @@ The current native daemon integration has these limits:
   `claude attach`. T3 does not install hooks to forward these requests. The native
   reply API cannot atomically target a question, so avoid answering simultaneously
   from T3 and the CLI. The recorded native answer wins if another client answered.
+  When Claude reports that it is waiting, T3 shows a continuation hint for requests
+  it cannot answer. That hint clears when the worker continues or the turn ends.
 - Native daemon state notifications refresh progress promptly, with polling as a
   reconnect fallback. These notifications are separate from body/thinking token
   streams; terminal output is not parsed into chat messages.
@@ -78,6 +89,9 @@ The current native daemon integration has these limits:
   CLI submission. The temporary control attachment may briefly resize the terminal;
   the daemon restores the remaining attachment's dimensions when it disconnects.
   Steering remains available through `claude attach`.
+  Additional human input that Claude absorbs at a tool boundary appears as a user
+  message in the original turn, after Claude saves its delivery record.
+  Queued text that Claude has not consumed does not appear as confirmed input.
 - Send from T3 while the worker is idle. Avoid submitting identical text from T3
   and the CLI simultaneously: the native reply acknowledgement has no request ID
   to distinguish those submissions.
