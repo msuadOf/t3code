@@ -28,13 +28,23 @@ appId: com.t3tools.t3code.dev
     visible: Native stream smoke
     timeout: 60000
 - tapOn: Native stream smoke
-- extendedWaitUntil:
-    visible: "(?s).*NATIVE_TOKEN_05.*"
-    timeout: 60000
-- takeScreenshot: artifacts/native-session/prefix-live
+- assertVisible: Thinking
 - runScript: advance.js
+- extendedWaitUntil:
+    visible: "(?s).*NATIVE_TOKEN_06.*"
+    timeout: 30000
+- takeScreenshot: artifacts/native-session/first-live-delta
 - extendedWaitUntil:
     visible: "(?s).*NATIVE_TOKEN_24.*"
     timeout: 30000
 - takeScreenshot: artifacts/native-session/suffix-live
 - runScript: complete.js
+- extendedWaitUntil:
+    notVisible: Showing the latest text. Earlier text will appear when available.
+    timeout: 30000
+- scrollUntilVisible:
+    element:
+      text: "(?s).*NATIVE_TOKEN_01.*"
+    direction: UP
+    timeout: 30000
+- takeScreenshot: artifacts/native-session/completed-prefix-recovered
