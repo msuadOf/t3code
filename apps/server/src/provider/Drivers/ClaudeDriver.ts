@@ -131,6 +131,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     config,
   }) {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const providerHost = yield* ProviderHost.ProviderHost;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     // The server cwd is $HOME in packaged desktop builds, and `claude`
@@ -248,6 +249,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       configDirectory: configDir,
       modelActivity,
       observeNewSessions: effectiveConfig.modelActivityForNewSessions === true,
+      resolveAttachmentPath: providerHost.resolveAttachmentPath,
       binaryPath: effectiveConfig.binaryPath,
       environment: { ...processEnv, CLAUDE_CONFIG_DIR: configDir },
     }).pipe(

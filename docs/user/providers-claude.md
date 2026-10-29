@@ -33,6 +33,11 @@ new conversation in T3 also creates a native background worker. T3 sends text
 when that worker is idle. Both interfaces operate on the same worker, and closing
 T3 leaves native work running.
 
+T3 can send uploaded PNG, JPEG, GIF and WebP images, plus supported text and code
+files, to the same idle worker using Claude's native file-reference processing.
+The files must be available on the environment hosting Claude. Unsupported formats
+and paths are rejected before sending; PDF attachments are not supported here yet.
+
 To share an ordinary foreground conversation, use `/background` in the CLI first,
 then select the resulting session in T3. The CLI may assign that background session
 a new UUID. T3 can wake a stopped background job through native `attach`; saved

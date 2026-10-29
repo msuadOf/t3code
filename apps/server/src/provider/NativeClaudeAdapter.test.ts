@@ -1309,3 +1309,131 @@ it.effect(
       expect(client.resumes).toEqual([]);
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
 );
+
+it.effect(
+  "sends owned attachments through the same native reply and correlates its exact reference text",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped();
+      const directory = path.join(root, "projects", "workspace");
+      yield* fs.makeDirectory(directory, { recursive: true });
+      yield* fs.writeFileString(
+        path.join(directory, `${nativeId}.jsonl`),
+        JSON.stringify({
+          type: "user",
+          uuid: "baseline",
+          parentUuid: null,
+          cwd: "/work",
+          timestamp: "1970-01-01T00:00:00.001Z",
+          message: { role: "user", content: "Earlier" },
+        }) + "\n",
+      );
+      const stored = path.join(root, "stored notes.txt");
+      yield* fs.writeFileString(stored, "native");
+      class Client extends FixtureClient {
+        readonly replies: string[] = [];
+        override async reply(_job: NativeClaudeSession, text: string) {
+          this.replies.push(text);
+        }
+      }
+      const client = new Client("background");
+      const adapter = yield* makeNativeClaudeAdapter({
+        instanceId,
+        configDirectory: root,
+        binaryPath: "never-executed",
+        environment: {},
+        client,
+        resolveAttachmentPath: (attachment) => (attachment.id === "owned-file" ? stored : null),
+      });
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("attachment-session"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const now = DateTime.makeUnsafe(1);
+      const providerThread: OrchestrationV2ProviderThread = {
+        id: ProviderThreadId.make("attachment-thread"),
+        driver: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: instanceId,
+        providerSessionId: runtime.providerSessionId,
+        appThreadId: threadId,
+        nativeThreadRef: {
+          driver: ProviderDriverKind.make("claudeAgent"),
+          nativeId,
+          strength: "strong",
+        },
+        nativeConversationHeadRef: null,
+        status: "idle",
+        ownerNodeId: null,
+        firstRunOrdinal: null,
+        lastRunOrdinal: null,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const turn: ProviderAdapter.ProviderAdapterV2TurnInput = {
+        threadId,
+        providerThread,
+        modelSelection,
+        runtimePolicy,
+        runId: RunId.make("attachment-run"),
+        runOrdinal: 1,
+        providerTurnOrdinal: 1,
+        attemptId: RunAttemptId.make("attachment-attempt"),
+        rootNodeId: NodeId.make("attachment-root"),
+        appThread: fixtureAppThread(now, providerThread.id),
+        message: {
+          createdBy: "user",
+          creationSource: "web",
+          messageId: MessageId.make("attachment-message"),
+          text: "Inspect",
+          attachments: [
+            {
+              id: "owned-file",
+              type: "file",
+              name: "notes.txt",
+              mimeType: "text/plain",
+              sizeBytes: 6,
+            },
+          ],
+        },
+      };
+      const invalid = yield* Effect.exit(
+        runtime.startTurn({
+          ...turn,
+          message: {
+            ...turn.message,
+            attachments: [{ ...turn.message.attachments[0]!, id: "not-owned" }],
+          },
+        }),
+      );
+      expect(Exit.isFailure(invalid)).toBe(true);
+      expect(client.replies).toEqual([]);
+      yield* runtime.startTurn(turn);
+      const expectedText = `Inspect\n\n@"${stored}"`;
+      expect(client.replies).toEqual([expectedText]);
+      const pending = { baseline: new Set(["baseline"]), expectedText };
+      expect(
+        nativeClaudeMatchesPendingTurn(
+          { id: "native-new", items: [{ type: "user", text: expectedText }] },
+          pending,
+        ),
+      ).toBe(true);
+      expect(
+        nativeClaudeMatchesPendingTurn(
+          { id: "cli-new", items: [{ type: "user", text: "Inspect" }] },
+          pending,
+        ),
+      ).toBe(false);
+      expect(
+        nativeClaudeMatchesPendingTurn(
+          { id: "baseline", items: [{ type: "user", text: expectedText }] },
+          pending,
+        ),
+      ).toBe(false);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
+);

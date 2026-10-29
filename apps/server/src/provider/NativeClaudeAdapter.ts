@@ -12,6 +12,7 @@ import {
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2PlanArtifact,
   type ProviderUserInputAnswers,
+  type ChatAttachment,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -41,6 +42,7 @@ import {
 } from "./NativeClaudeClient.ts";
 import type { NativeClaudeSubagentObservation } from "./NativeClaudeSubagents.ts";
 import { nativeClaudePlan } from "./NativeClaudePlanning.ts";
+import { nativeClaudeAttachmentPrompt } from "./NativeClaudeAttachments.ts";
 import { NativeClaudeSessions } from "./NativeClaudeSessions.ts";
 
 const encodeNativeInput = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -143,6 +145,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
   readonly client?: NativeClaudeClient;
   readonly modelActivity?: NativeClaudeModelActivity;
   readonly observeNewSessions?: boolean;
+  readonly resolveAttachmentPath?: (attachment: ChatAttachment) => string | null;
 }) {
   const allocator = yield* IdAllocator.IdAllocatorV2;
   const platform = yield* HostProcess.Platform;
@@ -1084,10 +1087,18 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         resumeThread: ({ providerThread }) => register(providerThread),
         startTurn: Effect.fn("NativeClaudeAdapter.startTurn")(function* (request) {
           const id = nativeId(request.providerThread);
-          if (request.message.attachments.length)
-            return yield* unsupported(
-              "Claude native daemon text input does not expose a structured attachment API. Send attachments through the attached CLI.",
-            );
+          const prompt = yield* attempt(() =>
+            nativeClaudeAttachmentPrompt({
+              text: request.message.text,
+              attachments: request.message.attachments,
+              resolveAttachmentPath: options.resolveAttachmentPath,
+            }).catch((cause: unknown) => {
+              throw new NativeClaudeError(
+                "EATTACHMENT",
+                cause instanceof Error ? cause.message : "Claude attachment is unavailable.",
+              );
+            }),
+          );
           if (active.has(id))
             return yield* unsupported(
               "Claude already has an observed or pending turn in this session. Wait for it to finish before sending.",
@@ -1107,10 +1118,10 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
           active.set(id, {
             input: request,
             interrupted: false,
-            expectedText: request.message.text,
+            expectedText: prompt,
             baseline,
           });
-          yield* attempt(() => client.reply(job, request.message.text)).pipe(
+          yield* attempt(() => client.reply(job, prompt)).pipe(
             Effect.tapError(() => Effect.sync(() => active.delete(id))),
           );
         }),
