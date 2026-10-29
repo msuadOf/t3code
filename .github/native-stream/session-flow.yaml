@@ -11,6 +11,20 @@ appId: com.t3tools.t3code.dev
 - inputText: ${PAIRING_CODE}
 - pressKey: Enter
 - extendedWaitUntil:
+    notVisible: Code
+    timeout: 60000
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: Chats
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: Settings
+      - tapOn: Close settings
+- extendedWaitUntil:
     visible: Native stream smoke
     timeout: 60000
 - tapOn: Native stream smoke

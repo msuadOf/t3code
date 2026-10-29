@@ -207,7 +207,7 @@ try:
     else:
         raise RuntimeError("T3 daemon did not start")
     issued = subprocess.run(command + ["auth", "pairing", "create", "--base-dir",
-        str(t3_home), "--json"], cwd=repository, env=t3_env,
+        str(t3_home), "--ttl", "30 minutes", "--json"], cwd=repository, env=t3_env,
         capture_output=True, text=True, timeout=30, check=True)
     pairing = json.loads(issued.stdout[issued.stdout.index("{"):])
     write_private(root / "pairing.json", {"host": f"http://127.0.0.1:{t3_port}",
