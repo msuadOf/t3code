@@ -1,0 +1,205 @@
+name: Fork Native Shared Session
+
+on:
+  push:
+    branches: [codex/mobile-native-stream-ci]
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-session-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_VARIANT: development
+  T3CODE_MOBILE_UPDATES_ENABLED: "0"
+  CI: "1"
+  NODE_OPTIONS: --max-old-space-size=4096
+
+jobs:
+  native:
+    name: Native session / ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: android
+            runner: ubuntu-24.04
+          - platform: ios
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Select Xcode 26
+        if: matrix.platform == 'ios'
+        run: sudo xcode-select --switch /Applications/Xcode_26.3.app/Contents/Developer
+
+      - name: Free Android build disk
+        if: matrix.platform == 'android'
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=@t3tools/mobile...
+              - --filter=@t3tools/scripts...
+              - --filter=t3...
+
+      - name: Expose pnpm
+        run: |
+          pnpm_version="$(node --print "require('./package.json').packageManager.split('@').pop()")"
+          echo "$HOME/.vite-plus/package_manager/pnpm/$pnpm_version/pnpm/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install pinned Maestro
+        env:
+          MAESTRO_VERSION: cli-2.12.0
+        run: |
+          curl -fsSL "https://github.com/mobile-dev-inc/Maestro/releases/download/$MAESTRO_VERSION/maestro.zip" -o "$RUNNER_TEMP/maestro.zip"
+          echo 'a6044a84542f522f434c5dc3d609e60c7446d423f3ed1b2ae513f5c48663ec5e  maestro.zip' > "$RUNNER_TEMP/maestro.sha256"
+          (cd "$RUNNER_TEMP" && shasum -a 256 -c maestro.sha256)
+          unzip -q "$RUNNER_TEMP/maestro.zip" -d "$RUNNER_TEMP/maestro-cli"
+          echo "$RUNNER_TEMP/maestro-cli/maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Prepare evidence directory
+        run: mkdir -p artifacts/native-session
+
+      - name: Install stock OpenCode fixture binary
+        env:
+          NATIVE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          if [ "$NATIVE_PLATFORM" = ios ]; then package='@opencode/cli-darwin-arm64'; else package='@opencode/cli-linux-x64'; fi
+          mkdir -p "$RUNNER_TEMP/opencode-native"
+          npm pack "$package@2.2.0" --pack-destination "$RUNNER_TEMP/opencode-native" > "$RUNNER_TEMP/opencode-pack-name"
+          tar -xzf "$RUNNER_TEMP/opencode-native/$(tail -n 1 "$RUNNER_TEMP/opencode-pack-name")" -C "$RUNNER_TEMP/opencode-native"
+          echo "OPENCODE_BINARY=$RUNNER_TEMP/opencode-native/package/bin/opencode" >> "$GITHUB_ENV"
+
+      - name: Generate native project
+        working-directory: apps/mobile
+        run: pnpm exec expo prebuild --clean --platform ${{ matrix.platform }} 2>&1 | tee ../../artifacts/native-session/prebuild.log
+
+      - uses: gradle/actions/setup-gradle@v5
+        if: matrix.platform == 'android'
+
+      - name: Build Android fixture APK
+        if: matrix.platform == 'android'
+        working-directory: apps/mobile/android
+        run: ./gradlew app:assembleRelease -PreactNativeArchitectures=x86_64 --max-workers=2 2>&1 | tee ../../../artifacts/native-session/build.log
+
+      - name: Build iOS fixture app
+        if: matrix.platform == 'ios'
+        working-directory: apps/mobile
+        run: |
+          xcodebuild -workspace ios/T3CodeDev.xcworkspace -scheme T3CodeDev -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/native-stream-ios" CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build > ../../artifacts/native-session/build.log 2>&1
+
+      - name: Start isolated native session and T3 daemon
+        run: |
+          python3 .github/native-stream/opencode-fixture.py > "$RUNNER_TEMP/native-session-ready.jsonl" 2> artifacts/native-session/fixture.log &
+          echo "$!" > "$RUNNER_TEMP/native-session-fixture.pid"
+          python3 - <<'PY'
+          import json, os, pathlib, time
+          ready = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-session-ready.jsonl'
+          for attempt in range(900):
+              if ready.exists() and ready.read_text().strip():
+                  metadata = json.loads(ready.read_text().splitlines()[0])
+                  pairing = json.load(open(metadata['pairingPath']))
+                  with open(os.environ['GITHUB_ENV'], 'a') as output:
+                      for key, value in {'DAEMON_ADDRESS': pairing['host'], 'PAIRING_CODE': pairing['code'], 'CONTROL_URL': metadata['controlUrl'], 'T3_PORT': str(metadata['t3Port'])}.items():
+                          output.write(key + '=' + value + '\n')
+                  print('::add-mask::' + pairing['code'])
+                  break
+              time.sleep(.1)
+          else:
+              raise RuntimeError('Native session fixture failed to start')
+          PY
+
+      - name: Enable KVM
+        if: matrix.platform == 'android'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Test Android native renderer
+        if: matrix.platform == 'android'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7_pro
+          cores: 2
+          ram-size: 2048M
+          disable-animations: true
+          script: |
+            adb install apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+            adb reverse "tcp:$T3_PORT" "tcp:$T3_PORT"
+            maestro test -e DAEMON_ADDRESS="$DAEMON_ADDRESS" -e PAIRING_CODE="$PAIRING_CODE" -e CONTROL_URL="$CONTROL_URL" --format junit --output artifacts/native-session/results.xml --test-output-dir artifacts/native-session/maestro .github/native-stream/session-flow.yaml
+
+      - name: Test iOS native renderer
+        if: matrix.platform == 'ios'
+        run: |
+          device_id="$(xcrun simctl list devices available --json | node --input-type=module -e '
+            let input = "";
+            for await (const chunk of process.stdin) input += chunk;
+            const device = Object.values(JSON.parse(input).devices).flat().find(d => d.isAvailable && d.name.startsWith("iPhone"));
+            if (!device) throw new Error("No available iPhone simulator");
+            console.log(device.udid);
+          ')"
+          xcrun simctl boot "$device_id"
+          xcrun simctl bootstatus "$device_id" -b
+          xcrun simctl ui "$device_id" appearance light
+          xcrun simctl install "$device_id" "$RUNNER_TEMP/native-stream-ios/Build/Products/Release-iphonesimulator/T3CodeDev.app"
+          maestro --device "$device_id" test -e DAEMON_ADDRESS="$DAEMON_ADDRESS" -e PAIRING_CODE="$PAIRING_CODE" -e CONTROL_URL="$CONTROL_URL" --format junit --output artifacts/native-session/results.xml --test-output-dir artifacts/native-session/maestro .github/native-stream/session-flow.yaml
+
+      - name: Stop isolated fixture
+        if: always()
+        run: |
+          if [ -n "${CONTROL_URL:-}" ]; then curl --max-time 5 -fsS "$CONTROL_URL/shutdown" || true; fi
+          if [ -f "$RUNNER_TEMP/native-session-fixture.pid" ]; then kill -TERM "$(cat "$RUNNER_TEMP/native-session-fixture.pid")" 2>/dev/null || true; fi
+          if [ -f "$RUNNER_TEMP/native-session-ready.jsonl" ]; then
+            python3 - <<'PY'
+          import json, os, pathlib, shutil
+          ready = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-session-ready.jsonl'
+          if ready.read_text().strip():
+              root = pathlib.Path(json.loads(ready.read_text().splitlines()[0])['root'])
+              for name in ['t3.log', 'native.log']:
+                  if (root / name).exists(): shutil.copy(root / name, 'artifacts/native-session/' + name)
+          PY
+          fi
+
+      - name: Upload native smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-shared-session-${{ matrix.platform }}
+          path: artifacts/native-session/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Explain verification scope
+        if: always()
+        run: |
+          echo '### Stock OpenCode shared session / ${{ matrix.platform }}' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Normal native app entry, real T3 daemon, stock OpenCode server and CLI sharing one session, localhost model fixture. Verifies prefix and subsequent deltas remain visible before the fixture permits completion. No account or release.' >> "$GITHUB_STEP_SUMMARY"

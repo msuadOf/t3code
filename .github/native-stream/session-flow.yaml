@@ -1,0 +1,24 @@
+appId: com.t3tools.t3code.dev
+---
+- launchApp:
+    clearState: true
+- openLink: t3code-dev:///connections/new
+- tapOn: Address
+- inputText: ${DAEMON_ADDRESS}
+- tapOn: Code
+- inputText: ${PAIRING_CODE}
+- pressKey: Enter
+- extendedWaitUntil:
+    visible: Native stream smoke
+    timeout: 60000
+- tapOn: Native stream smoke
+- extendedWaitUntil:
+    visible: "(?s).*NATIVE_TOKEN_05.*"
+    timeout: 60000
+- takeScreenshot: artifacts/native-session/prefix-live
+- runScript: advance.js
+- extendedWaitUntil:
+    visible: "(?s).*NATIVE_TOKEN_24.*"
+    timeout: 30000
+- takeScreenshot: artifacts/native-session/suffix-live
+- runScript: complete.js

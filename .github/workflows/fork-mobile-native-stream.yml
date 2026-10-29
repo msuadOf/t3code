@@ -3,6 +3,13 @@ name: Fork Native Stream Smoke
 on:
   push:
     branches: [codex/mobile-native-stream-ci]
+    paths:
+      - .github/workflows/fork-mobile-native-stream.yml
+      - .github/native-stream/flow.yaml
+      - apps/mobile/**
+      - packages/client-runtime/**
+      - packages/contracts/**
+      - pnpm-lock.yaml
   workflow_dispatch:
 
 defaults:
