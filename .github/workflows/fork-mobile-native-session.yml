@@ -8,7 +8,7 @@ on:
       stream_kind:
         description: Native semantic stream to verify
         type: choice
-        options: [text, reasoning]
+        options: [text, reasoning, tool]
         default: text
 
 defaults:

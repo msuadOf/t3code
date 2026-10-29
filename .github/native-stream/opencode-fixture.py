@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import pty
 import secrets
+import shlex
 import shutil
 import signal
 import socket
@@ -24,8 +25,18 @@ complete = threading.Event()
 processes = []
 markers = {"prefix": False, "suffix": False, "completed": False}
 stream_kind = os.environ.get("NATIVE_STREAM_KIND", "text")
-if stream_kind not in {"text", "reasoning"}:
+if stream_kind not in {"text", "reasoning", "tool"}:
     raise ValueError("Unsupported native stream kind")
+if stream_kind == "tool":
+    (root / "native-progress.py").write_text(
+        "import pathlib, time\n"
+        "root = pathlib.Path(__file__).parent\n"
+        "for index, gate in [(1, 'advance'), (2, 'complete')]:\n"
+        "    print(f'NATIVE_TOOL_{index:02d}', flush=True)\n"
+        "    (root / f'tool-{index}').touch()\n"
+        "    while not (root / gate).exists(): time.sleep(.05)\n"
+        "print('NATIVE_TOOL_03', flush=True)\n"
+    )
 
 
 def write_private(path, value):
@@ -43,8 +54,13 @@ class Model(http.server.BaseHTTPRequestHandler):
             shutdown(None, None)
         elif self.path == "/advance":
             advance.set()
+            (root / "advance").touch()
         elif self.path == "/complete":
             complete.set()
+            (root / "complete").touch()
+        if stream_kind == "tool":
+            markers["prefix"] = (root / "tool-1").exists()
+            markers["suffix"] = (root / "tool-2").exists()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -70,8 +86,26 @@ class Model(http.server.BaseHTTPRequestHandler):
 
         try:
             emit({"role": "assistant"})
+            tool_result = any(message.get("role") == "tool"
+                              for message in body.get("messages", []))
             if not body.get("tools"):
                 emit({"content": "Native stream smoke"})
+            elif stream_kind == "tool" and tool_result:
+                emit({"content": "NATIVE_TOOL_DONE"})
+            elif stream_kind == "tool":
+                shell = next(tool["function"] for tool in body["tools"]
+                             if tool.get("function", {}).get("name") == "shell")
+                args = {"command": "python3 -u " + shlex.quote(str(root / "native-progress.py")),
+                        "timeout": 0}
+                if "workdir" in shell.get("parameters", {}).get("required", []):
+                    args["workdir"] = str(work)
+                emit({"tool_calls": [{"index": 0, "id": "call_native_progress",
+                    "type": "function", "function": {"name": "shell",
+                    "arguments": json.dumps(args)}}]})
+                emit({}, "tool_calls")
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                return
             else:
                 for index in range(1, 25):
                     if stop.is_set():
@@ -128,6 +162,8 @@ def shutdown(_signal, _frame):
     stop.set()
     advance.set()
     complete.set()
+    (root / "advance").touch()
+    (root / "complete").touch()
 
 
 signal.signal(signal.SIGTERM, shutdown)
