@@ -47,6 +47,12 @@ appId: com.t3tools.t3code.dev
 - extendedWaitUntil:
     notVisible: Showing the latest text. Earlier text will appear when available.
     timeout: 30000
+- runFlow:
+    when:
+      true: ${STREAM_KIND == 'reasoning'}
+    commands:
+      - tapOn: "(?s).*Worked for.*"
+      - tapOn: "(?s).*Thought.*"
 - scrollUntilVisible:
     element:
       text: "(?s).*NATIVE_TOKEN_01.*"
