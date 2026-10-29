@@ -1,4 +1,3 @@
-/* eslint-disable unicorn/no-array-reverse -- Hermes does not provide toReversed; each reverse below owns a fresh array. */
 import type { ModelActivity, ModelActivityFrame } from "@t3tools/contracts";
 
 export interface ModelActivityBlock {
@@ -122,22 +121,21 @@ function applyEvent(state: ModelActivityState, event: ModelActivity): ModelActiv
   requests = requests.slice(-MAX_REQUESTS);
   // Keep recent activity bounded even if a provider emits a single enormous block.
   let remaining = MAX_TEXT;
-  requests = [...requests]
-    .reverse()
-    .map((item) => ({
-      ...item,
-      blocks: [...item.blocks]
-        .reverse()
-        .map((block) => {
-          const text = remaining > 0 ? block.text.slice(-remaining) : "";
-          const kept = remaining > 0 ? text : "";
-          remaining -= kept.length;
-          truncated ||= kept.length !== block.text.length;
-          return kept === block.text ? block : { ...block, text: kept };
-        })
-        .reverse(),
-    }))
-    .reverse();
+  for (let requestIndex = requests.length - 1; requestIndex >= 0; requestIndex--) {
+    const item = requests[requestIndex]!;
+    let trimmedBlocks: ModelActivityBlock[] | undefined;
+    for (let blockIndex = item.blocks.length - 1; blockIndex >= 0; blockIndex--) {
+      const block = item.blocks[blockIndex]!;
+      const kept = remaining > 0 ? block.text.slice(-remaining) : "";
+      remaining -= kept.length;
+      if (kept !== block.text) {
+        truncated = true;
+        trimmedBlocks ??= [...item.blocks];
+        trimmedBlocks[blockIndex] = { ...block, text: kept };
+      }
+    }
+    if (trimmedBlocks) requests[requestIndex] = { ...item, blocks: trimmedBlocks };
+  }
   return {
     ...state,
     seq: event.seq,

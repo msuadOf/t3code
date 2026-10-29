@@ -129,6 +129,32 @@ describe("transient model activity", () => {
     ).toBe(256 * 1024);
     expect(state.truncated).toBe(true);
   });
+  it("retains unchanged requests and blocks while another response streams", () => {
+    const previous = reduceModelActivity(
+      emptyModelActivityState,
+      snapshot([
+        event(1, "content_block_start", {
+          index: 0,
+          content_block: { type: "text", text: "Earlier response" },
+        }),
+        event(2, "message_start", {}, { requestId: "active" }),
+      ]),
+    );
+    const next = reduceModelActivity(previous, {
+      kind: "event",
+      epoch: "epoch",
+      event: event(
+        3,
+        "content_block_delta",
+        { index: 0, delta: { type: "text_delta", text: "Live output" } },
+        { requestId: "active" },
+      ),
+    });
+    expect(next.requests[0]).toBe(previous.requests[0]);
+    expect(next.requests[0]?.blocks).toBe(previous.requests[0]?.blocks);
+    expect(next.requests[1]?.blocks[0]?.text).toBe("Live output");
+    expect(previous.requests[1]?.blocks).toEqual([]);
+  });
   it("exposes capture loss and closes interrupted requests without inventing native records", () => {
     const state = reduceModelActivity(
       emptyModelActivityState,
