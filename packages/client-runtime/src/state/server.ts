@@ -1,3 +1,4 @@
+import { recoverModelActivity } from "./modelActivitySubscription.ts";
 import { emptyModelActivityState, reduceModelActivity } from "./modelActivity.ts";
 export type {
   ModelActivityState,
@@ -1149,6 +1150,7 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:thread:model-activity",
       subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.modelActivitySubscribe>) =>
         subscribe(WS_METHODS.modelActivitySubscribe, input).pipe(
+          recoverModelActivity,
           Stream.scan(() => emptyModelActivityState, reduceModelActivity),
         ),
       idleTtlMs: 0,
