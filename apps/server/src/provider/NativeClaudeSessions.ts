@@ -1,3 +1,7 @@
+import {
+  nativeClaudeBackgroundCommands,
+  type NativeClaudeBackgroundCommand,
+} from "./NativeClaudeBackgroundCommands.ts";
 import { nativeClaudeForkOwner } from "./NativeClaudeForks.ts";
 // @effect-diagnostics nodeBuiltinImport:off -- read-only native JSONL reader interoperates with the socket client without changing global process environment.
 import * as NodeFSP from "node:fs/promises";
@@ -243,6 +247,10 @@ export class NativeClaudeSessions {
   private readonly configDirectory: string;
   private readonly client: NativeClaudeClient;
   private lastInventory: readonly NativeClaudeSession[] | undefined;
+  private readonly commandCache = new WeakMap<
+    readonly Entry[],
+    readonly NativeClaudeBackgroundCommand[]
+  >();
   private readonly cache = new Map<
     string,
     {
@@ -471,6 +479,25 @@ export class NativeClaudeSessions {
     );
     if (job && (await this.localJob(job))) return [];
     throw new Error("Claude session transcript was not found.");
+  }
+
+  async backgroundCommands(sessionId: string) {
+    if (!UUID.test(sessionId)) throw new Error("Invalid Claude session ID.");
+    for (const file of await this.files()) {
+      if (NodePath.basename(file, ".jsonl") !== sessionId) continue;
+      const source = (await this.transcript(file)).entries;
+      const cached = this.commandCache.get(source);
+      if (cached) return cached;
+      const entries = conversationBranch(source);
+      const commands = nativeClaudeBackgroundCommands(
+        sessionId,
+        nativeClaudeHistory(source),
+        entries,
+      );
+      this.commandCache.set(source, commands);
+      return commands;
+    }
+    return [];
   }
 
   /** Read only sidecars named by a canonical parent Agent/Task receipt, never its outputFile path. */

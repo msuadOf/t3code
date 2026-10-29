@@ -51,6 +51,7 @@ import {
   CLAUDE_MCP_SESSION_METADATA_KEY,
   type PreparedClaudeMcp,
 } from "./NativeClaudeMcpBindings.ts";
+import { makeNativeClaudeBackgroundOutput } from "./NativeClaudeBackgroundOutput.ts";
 import { NativeClaudeSessions } from "./NativeClaudeSessions.ts";
 import {
   nativeClaudeWaitingNotice,
@@ -365,6 +366,11 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         }
         return Queue.offer(events, event).pipe(Effect.asVoid);
       };
+      const backgroundOutput = yield* makeNativeClaudeBackgroundOutput({
+        ids: allocator,
+        emit,
+        itemOrdinal,
+      });
       const settleQuestion = Effect.fn("NativeClaudeAdapter.settleQuestion")(function* (
         key: string,
         status: "resolved" | "cancelled",
@@ -508,6 +514,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         }
       >();
       const subagentSignatures = new Map<string, string>();
+      const pendingSubagents = new Set<string>();
       const publishSubagent = Effect.fnUntraced(function* (
         sessionId: string,
         observed: NativeClaudeSubagentObservation,
@@ -515,6 +522,9 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         const key = `${sessionId}:${observed.toolId}`;
         const binding = subagentOwners.get(key);
         if (binding === undefined) return;
+        if (observed.status === "running" || observed.status === "unknown")
+          pendingSubagents.add(key);
+        else pendingSubagents.delete(key);
         const signature = encodeNativeInput(observed);
         if (subagentSignatures.get(key) === signature) return;
         const { owner, providerTurnId } = binding;
@@ -643,6 +653,12 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                 Effect.catch(() => Effect.succeed([])),
               )
             : [];
+          const commands = historyAvailable
+            ? yield* attempt(() => source.backgroundCommands(id)).pipe(
+                Effect.catch(() => Effect.succeed([])),
+              )
+            : [];
+          backgroundOutput.update(id, commands);
           const pending = active.get(id);
           const terminalJob = inventory.find((session) => session.sessionId === id);
           if (
@@ -1124,6 +1140,10 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                 latestPlans.set(latestKey, plan);
               }
             }
+            for (const command of commands) {
+              if (command.turnId === turn.id)
+                yield* backgroundOutput.bind(id, command, owner, providerTurnId);
+            }
             for (const child of subagents) {
               if (child.turnId !== turn.id) continue;
               subagentOwners.set(`${id}:${child.toolId}`, { owner, providerTurnId });
@@ -1267,6 +1287,34 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
           });
         }),
         resumeThread: ({ providerThread }) => register(providerThread),
+        hasPendingBackgroundWorkForThread: (providerThread) =>
+          Effect.sync(() => {
+            const id = nativeId(providerThread);
+            return (
+              active.has(id) ||
+              backgroundOutput.hasPending(id) ||
+              [...pendingSubagents].some((key) => key.startsWith(`${id}:`))
+            );
+          }),
+        unloadThread: Effect.fn("NativeClaudeAdapter.unloadThread")(function ({ providerThread }) {
+          return Effect.sync(() => {
+            const id = nativeId(providerThread);
+            threads.delete(id);
+            active.delete(id);
+            observed.delete(id);
+            backgroundOutput.drop(id);
+            watchers.get(id)?.controller.abort();
+            watchers.delete(id);
+            for (const key of subagentOwners.keys())
+              if (key.startsWith(`${id}:`)) {
+                subagentOwners.delete(key);
+                subagentSignatures.delete(key);
+                pendingSubagents.delete(key);
+              }
+            for (const [key, question] of questions)
+              if (question.nativeSessionId === id) questions.delete(key);
+          });
+        }, observation.withPermit),
         startTurn: Effect.fn("NativeClaudeAdapter.startTurn")(function* (request) {
           const id = nativeId(request.providerThread);
           const prompt = yield* attempt(() =>

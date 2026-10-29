@@ -7,6 +7,7 @@ import {
 } from "../orchestration-v2/RunExecutionService.ts";
 import * as Stream from "effect/Stream";
 import * as Deferred from "effect/Deferred";
+import * as TestClock from "effect/testing/TestClock";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -1955,5 +1956,227 @@ it.effect(
           }),
         ).rejects.toThrow("unavailable"),
       );
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
+);
+
+it.effect.each(["complete", "detach"] as const)(
+  "streams native background Bash after its model turn and handles %s",
+  (mode) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const temporary = yield* fs.makeTempDirectoryScoped();
+      const root = yield* Effect.promise(() => NodeFSP.realpath(temporary));
+      const project = path.join(root, "projects", "workspace");
+      const nativeRoot = path.join(root, `claude-${process.getuid?.() ?? 0}`);
+      const output = path.join(nativeRoot, "workspace", nativeId, "tasks", "bg123.output");
+      yield* Effect.promise(() =>
+        NodeFSP.mkdir(path.dirname(output), { recursive: true, mode: 0o700 }),
+      );
+      yield* fs.makeDirectory(project, { recursive: true });
+      yield* fs.writeFileString(output, "FIRST\n");
+      const records: Array<Record<string, unknown>> = [
+        {
+          type: "user",
+          uuid: "bg-user",
+          parentUuid: null,
+          message: { content: "Run native background command" },
+        },
+        {
+          type: "assistant",
+          uuid: "bg-call",
+          parentUuid: "bg-user",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "bg-tool",
+                name: "Bash",
+                input: { command: "printf markers", run_in_background: true },
+              },
+            ],
+            stop_reason: "tool_use",
+          },
+        },
+        {
+          type: "user",
+          uuid: "bg-result",
+          parentUuid: "bg-call",
+          toolUseResult: { backgroundTaskId: "bg123", stdout: "", stderr: "", interrupted: false },
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "bg-tool",
+                content: `Command running in background with ID: bg123. Output is being written to: ${output}.`,
+              },
+            ],
+          },
+        },
+        {
+          type: "assistant",
+          uuid: "bg-done",
+          parentUuid: "bg-result",
+          message: { content: "Model turn ended", stop_reason: "end_turn" },
+        },
+      ];
+      const file = path.join(project, `${nativeId}.jsonl`);
+      const save = () =>
+        fs.writeFileString(
+          file,
+          records
+            .map((record) =>
+              JSON.stringify({
+                ...record,
+                sessionId: nativeId,
+                cwd: "/work",
+                timestamp: "2026-10-29T00:00:00Z",
+              }),
+            )
+            .join("\n") + "\n",
+        );
+      yield* save();
+      const client = new FixtureClient("background");
+      Object.assign(client.inventory[0]!, { state: "done" });
+      const now = DateTime.makeUnsafe(1);
+      const providerThreadId = ProviderThreadId.make("bg-thread");
+      const providerThread: OrchestrationV2ProviderThread = {
+        id: providerThreadId,
+        driver: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: instanceId,
+        providerSessionId: ProviderSessionId.make("bg-session"),
+        appThreadId: threadId,
+        nativeThreadRef: {
+          driver: ProviderDriverKind.make("claudeAgent"),
+          nativeId,
+          strength: "strong",
+        },
+        nativeConversationHeadRef: null,
+        status: "active",
+        ownerNodeId: null,
+        firstRunOrdinal: null,
+        lastRunOrdinal: null,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      let adoptions = 0;
+      const adapter = yield* makeNativeClaudeAdapter({
+        instanceId,
+        configDirectory: root,
+        binaryPath: "never-executed",
+        environment: {},
+        client,
+      });
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: providerThread.providerSessionId!,
+        modelSelection,
+        runtimePolicy,
+        onExternalTurn: () => {
+          adoptions++;
+          return Effect.succeed({
+            threadId,
+            providerThread,
+            modelSelection,
+            runtimePolicy,
+            runId: RunId.make("bg-run"),
+            runOrdinal: 1,
+            providerTurnOrdinal: 1,
+            attemptId: RunAttemptId.make("bg-attempt"),
+            rootNodeId: NodeId.make("bg-root"),
+            appThread: fixtureAppThread(now, providerThreadId),
+            message: {
+              createdBy: "user",
+              creationSource: "provider",
+              messageId: MessageId.make("bg-message"),
+              text: "Run native background command",
+              attachments: [],
+            },
+          });
+        },
+      });
+      const events: ProviderAdapter.ProviderAdapterV2Event[] = [];
+      const terminal = yield* Deferred.make<void>();
+      const first = yield* Deferred.make<void>();
+      const second = yield* Deferred.make<void>();
+      const completed = yield* Deferred.make<void>();
+      yield* runtime.events.pipe(
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            events.push(event);
+            if (event.type === "turn.terminal") yield* Deferred.succeed(terminal, undefined);
+            if (event.type === "command_output.delta" && event.chunk.includes("FIRST"))
+              yield* Deferred.succeed(first, undefined);
+            if (event.type === "command_output.delta" && event.chunk.includes("SECOND"))
+              yield* Deferred.succeed(second, undefined);
+            if (
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "command_execution" &&
+              event.turnItem.status === "completed"
+            )
+              yield* Deferred.succeed(completed, undefined);
+          }),
+        ),
+        Effect.forkScoped,
+      );
+      yield* runtime.resumeThread({ threadId, providerThread });
+      yield* Deferred.await(terminal);
+      const command = events.find(
+        (event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "command_execution",
+      );
+      expect(command).toMatchObject({
+        type: "turn_item.updated",
+        turnItem: {
+          type: "command_execution",
+          status: "running",
+          runId: "bg-run",
+          input: "printf markers",
+        },
+      });
+      yield* Deferred.await(first);
+      yield* Effect.promise(() => NodeFSP.appendFile(output, "SECOND\n"));
+      yield* TestClock.adjust("100 millis");
+      yield* Deferred.await(second);
+      if (mode === "detach") {
+        expect(typeof runtime.unloadThread).toBe("function");
+        yield* runtime.unloadThread!({ providerThread });
+        const count = events.filter((event) => event.type === "command_output.delta").length;
+        yield* Effect.promise(() => NodeFSP.appendFile(output, "DETACHED\n"));
+        yield* TestClock.adjust("100 millis");
+        expect(events.filter((event) => event.type === "command_output.delta")).toHaveLength(count);
+        expect(yield* runtime.hasPendingBackgroundWorkForThread!(providerThread)).toBe(false);
+        expect(client.resumes).toEqual([]);
+        return;
+      }
+      records.push({
+        type: "user",
+        uuid: "bg-notification",
+        parentUuid: "bg-done",
+        promptSource: "system",
+        turnOrigin: "task_notification",
+        origin: { kind: "task-notification", producer: "session-task" },
+        message: {
+          content: `<task-notification>\n<task-id>bg123</task-id>\n<tool-use-id>bg-tool</tool-use-id>\n<output-file>${output}</output-file>\n<status>completed</status>\n</task-notification>`,
+        },
+      });
+      yield* save();
+      yield* runtime.resumeThread({ threadId, providerThread });
+      yield* TestClock.adjust("100 millis");
+      yield* Deferred.await(completed);
+      const final = events.findLast(
+        (event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "command_execution",
+      );
+      expect(final).toMatchObject({
+        turnItem: { status: "completed", output: "FIRST\nSECOND\n", runId: "bg-run" },
+      });
+      expect(final?.type === "turn_item.updated" && final.turnItem.id).toBe(
+        command?.type === "turn_item.updated" && command.turnItem.id,
+      );
+      expect(adoptions).toBe(1);
+      expect(client.resumes).toEqual([]);
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
 );

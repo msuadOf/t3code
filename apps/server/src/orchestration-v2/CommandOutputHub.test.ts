@@ -109,7 +109,7 @@ const writeCommandItem = (
   threadId: ThreadId,
   fields: Pick<
     Extract<OrchestrationV2TurnItem, { type: "command_execution" }>,
-    "status" | "output" | "exitCode"
+    "status" | "output" | "exitCode" | "outputTruncated"
   >,
 ) =>
   Effect.gen(function* () {
@@ -173,6 +173,24 @@ const takeFrame = (frames: Queue.Queue<OrchestrationV2CommandOutputFrame | "ende
 const layer = it.layer(layerTest);
 
 layer("CommandOutputHub", (it) => {
+  it.effect("preserves native truncation in a saved command for late viewers", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const threadId = yield* seedThread;
+        yield* writeCommandItem(threadId, {
+          status: "completed",
+          output: "bounded native tail",
+          outputTruncated: true,
+        });
+        const frames = yield* subscribeFrames(threadId);
+        const snapshot = yield* takeFrame(frames);
+        assert.equal(snapshot.text, "bounded native tail");
+        assert.isTrue(snapshot.truncated);
+        assert.isFalse(snapshot.running);
+      }),
+    ),
+  );
+
   it.effect("preserves a native source gap even when its first chunk is empty", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -629,3 +629,74 @@ it("keeps absorbed human CLI input on its original turn without exposing queued 
     { id: "done:0", type: "assistant", text: "done", status: "completed" },
   ]);
 });
+
+it.effect("keeps background command ownership through native system bridge records", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped();
+    const sessionId = "11111111-2222-4333-8444-555555555555";
+    const output = `/private/tmp/claude-501/project/${sessionId}/tasks/bg.output`;
+    const directory = path.join(root, "projects", "project");
+    yield* fs.makeDirectory(directory, { recursive: true });
+    const entries = [
+      { type: "user", uuid: "user", parentUuid: null, message: { content: "run" } },
+      {
+        type: "assistant",
+        uuid: "call",
+        parentUuid: "user",
+        message: {
+          content: [
+            { type: "tool_use", id: "bash", name: "Bash", input: { command: "echo progress" } },
+          ],
+          stop_reason: "tool_use",
+        },
+      },
+      {
+        type: "user",
+        uuid: "receipt",
+        parentUuid: "call",
+        toolUseResult: { backgroundTaskId: "bg" },
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "bash",
+              content: `Command running in background with ID: bg. Output is being written to: ${output}.`,
+            },
+          ],
+        },
+      },
+      { type: "system", uuid: "bridge", parentUuid: "receipt" },
+      {
+        type: "assistant",
+        uuid: "model-done",
+        parentUuid: "bridge",
+        message: { content: "done", stop_reason: "end_turn" },
+      },
+      { type: "system", uuid: "second-bridge", parentUuid: "model-done" },
+      {
+        type: "user",
+        uuid: "notification",
+        parentUuid: "second-bridge",
+        promptSource: "system",
+        turnOrigin: "task_notification",
+        origin: { kind: "task-notification", producer: "session-task" },
+        message: {
+          content: `<task-notification>\n<task-id>bg</task-id>\n<tool-use-id>bash</tool-use-id>\n<output-file>${output}</output-file>\n<status>completed</status>\n</task-notification>`,
+        },
+      },
+    ];
+    yield* fs.writeFileString(
+      path.join(directory, `${sessionId}.jsonl`),
+      entries.map((entry) => JSON.stringify({ ...entry, sessionId })).join("\n") + "\n",
+    );
+    const source = new NativeClaudeSessions(
+      root,
+      new NativeClaudeClient({ binaryPath: "never-executed" }),
+    );
+    expect(yield* Effect.promise(() => source.backgroundCommands(sessionId))).toMatchObject([
+      { toolId: "bash", taskId: "bg", status: "completed", command: "echo progress" },
+    ]);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);

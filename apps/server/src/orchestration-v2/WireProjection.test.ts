@@ -50,6 +50,19 @@ const base = {
 };
 
 describe("orchestration V2 wire projection", () => {
+  it("retains native output truncation after redaction and a JSON roundtrip", () => {
+    const item = decodeTurnItem({
+      ...base,
+      type: "command_execution",
+      input: "native command",
+      output: "tail",
+      outputTruncated: true,
+    });
+    const decoded = decodeTurnItemJson(encodeTurnItemJson(projectTurnItemForWire(item)));
+    expect(decoded).toMatchObject({ outputTruncated: true, outputOmitted: true });
+    expect(decoded).not.toHaveProperty("output");
+  });
+
   it("preserves unparsed tool preparation across live and JSON contracts", () => {
     const item = decodeTurnItem({
       ...base,

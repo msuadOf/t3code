@@ -106,11 +106,14 @@ function legacyClaudeBashOutput(output: string): string {
 }
 
 /** The output a row shows from a persisted item, bounded before normalization. */
-function persistedCommandOutput(output: string | undefined): {
+function persistedCommandOutput(
+  output: string | undefined,
+  sourceTruncated = false,
+): {
   readonly text: string;
   readonly truncated: boolean;
 } {
-  if (output === undefined) return { text: "", truncated: false };
+  if (output === undefined) return { text: "", truncated: sourceTruncated };
   let source = output;
   if (output.length > MAX_FINAL_SOURCE_CHARS) {
     // Start on a fresh line, so the cut can't land inside an escape sequence.
@@ -121,7 +124,7 @@ function persistedCommandOutput(output: string | undefined): {
   const normalized = normalizeTerminalOutput(source);
   return {
     text: normalized.text,
-    truncated: normalized.truncated || source.length !== output.length,
+    truncated: sourceTruncated || normalized.truncated || source.length !== output.length,
   };
 }
 
@@ -221,6 +224,7 @@ export const make = Effect.gen(function* () {
         // The persisted item says when the command is done and what it finally printed.
         // Providers that report output only in item snapshots (ACP, Pi) stream through here too.
         let snapshotOutput: string | undefined;
+        let snapshotTruncated = false;
         let lost: Cause.Cause<unknown> | undefined;
         let settled: Extract<OrchestrationV2TurnItem, { type: "command_execution" }> | undefined;
         const observe = (item: OrchestrationV2TurnItem | undefined) =>
@@ -228,8 +232,13 @@ export const make = Effect.gen(function* () {
             if (item === undefined || item.type !== "command_execution") return Effect.void;
             if (!isOrchestrationV2WorkActive(item.status)) {
               settled = item;
-            } else if (item.output !== undefined && item.output !== snapshotOutput) {
+            } else if (
+              item.output !== undefined &&
+              (item.output !== snapshotOutput ||
+                Boolean(item.outputTruncated) !== snapshotTruncated)
+            ) {
               snapshotOutput = item.output;
+              snapshotTruncated = Boolean(item.outputTruncated);
             } else {
               return Effect.void;
             }
@@ -301,7 +310,11 @@ export const make = Effect.gen(function* () {
               };
             }
             const output = settled.output && legacyClaudeBashOutput(settled.output);
-            return { kind: "replace", ...persistedCommandOutput(output), running: false };
+            return {
+              kind: "replace",
+              ...persistedCommandOutput(output, settled.outputTruncated),
+              running: false,
+            };
           }
           if (subscriber.needsReplace || tail === undefined) {
             if (subscriber.overflowed) throttle = COMMAND_OUTPUT_REPLACE_INTERVAL_MS;
@@ -309,7 +322,11 @@ export const make = Effect.gen(function* () {
             subscriber.overflowed = false;
             subscriber.pendingAppend = "";
             if (tail === undefined) {
-              return { kind: "replace", ...persistedCommandOutput(snapshotOutput), running: true };
+              return {
+                kind: "replace",
+                ...persistedCommandOutput(snapshotOutput, snapshotTruncated),
+                running: true,
+              };
             }
             // The cursor, style and any unfinished escape ride along so the client
             // applies later appends exactly as the hub does.

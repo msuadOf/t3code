@@ -70,6 +70,11 @@ The current native daemon integration has these limits:
 - Native daemon state notifications refresh progress promptly, with polling as a
   reconnect fallback. These notifications are separate from body/thinking token
   streams; terminal output is not parsed into chat messages.
+- Native background Bash commands with an identifiable output receipt show a live
+  command output tail. Their task status comes from Claude's matching task
+  notification, independently of the model reply. Earlier output may be omitted
+  when joining a long-running command. Foreground Bash output is shown when Claude
+  saves its result; its internal live progress is not exposed by this connection.
 - Native `TodoWrite` results appear as structured task lists, and explicit
   `ExitPlanMode` plan fields appear as proposed plans. A proposal is not an approval.
 - Native `Agent` and `Task` children appear with their original parent tool and
