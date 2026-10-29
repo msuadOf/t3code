@@ -30,6 +30,11 @@ appId: com.t3tools.t3code.dev
 - tapOn: "(?s).*Native stream smoke.*"
 - assertVisible: Thinking
 - runScript: advance.js
+- runFlow:
+    when:
+      true: ${STREAM_KIND == 'reasoning'}
+    commands:
+      - tapOn: Thinking
 - extendedWaitUntil:
     visible: "(?s).*NATIVE_TOKEN_06.*"
     timeout: 30000

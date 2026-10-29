@@ -4,6 +4,12 @@ on:
   push:
     branches: [codex/mobile-native-stream-ci]
   workflow_dispatch:
+    inputs:
+      stream_kind:
+        description: Native semantic stream to verify
+        type: choice
+        options: [text, reasoning]
+        default: text
 
 defaults:
   run:
@@ -21,6 +27,7 @@ env:
   T3CODE_MOBILE_UPDATES_ENABLED: "0"
   CI: "1"
   NODE_OPTIONS: --max-old-space-size=4096
+  NATIVE_STREAM_KIND: ${{ inputs.stream_kind || 'text' }}
 
 jobs:
   native:
@@ -181,7 +188,7 @@ jobs:
           script: |
             adb install apps/mobile/android/app/build/outputs/apk/release/app-release.apk
             adb reverse "tcp:$T3_PORT" "tcp:$T3_PORT"
-            maestro test -e DAEMON_ADDRESS="$DAEMON_ADDRESS" -e PAIRING_CODE="$PAIRING_CODE" -e CONTROL_URL="$CONTROL_URL" --format junit --output artifacts/native-session/results.xml --test-output-dir artifacts/native-session/maestro .github/native-stream/session-flow.yaml
+            maestro test -e STREAM_KIND="$NATIVE_STREAM_KIND" -e DAEMON_ADDRESS="$DAEMON_ADDRESS" -e PAIRING_CODE="$PAIRING_CODE" -e CONTROL_URL="$CONTROL_URL" --format junit --output artifacts/native-session/results.xml --test-output-dir artifacts/native-session/maestro .github/native-stream/session-flow.yaml
 
       - name: Test iOS native renderer
         if: matrix.platform == 'ios'
@@ -200,7 +207,7 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app_path"
           codesign --display --entitlements :- "$app_path" > artifacts/native-session/simulator-entitlements.plist
           xcrun simctl install "$device_id" "$app_path"
-          maestro --device "$device_id" test -e DAEMON_ADDRESS="$DAEMON_ADDRESS" -e PAIRING_CODE="$PAIRING_CODE" -e CONTROL_URL="$CONTROL_URL" --format junit --output artifacts/native-session/results.xml --test-output-dir artifacts/native-session/maestro .github/native-stream/session-flow.yaml
+          maestro --device "$device_id" test -e STREAM_KIND="$NATIVE_STREAM_KIND" -e DAEMON_ADDRESS="$DAEMON_ADDRESS" -e PAIRING_CODE="$PAIRING_CODE" -e CONTROL_URL="$CONTROL_URL" --format junit --output artifacts/native-session/results.xml --test-output-dir artifacts/native-session/maestro .github/native-stream/session-flow.yaml
 
       - name: Collect iOS crash reports
         if: always() && matrix.platform == 'ios'

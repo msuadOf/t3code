@@ -23,6 +23,9 @@ advance = threading.Event()
 complete = threading.Event()
 processes = []
 markers = {"prefix": False, "suffix": False, "completed": False}
+stream_kind = os.environ.get("NATIVE_STREAM_KIND", "text")
+if stream_kind not in {"text", "reasoning"}:
+    raise ValueError("Unsupported native stream kind")
 
 
 def write_private(path, value):
@@ -73,7 +76,8 @@ class Model(http.server.BaseHTTPRequestHandler):
                 for index in range(1, 25):
                     if stop.is_set():
                         return
-                    emit({"content": f"NATIVE_TOKEN_{index:02d}\n"})
+                    field = "reasoning_content" if stream_kind == "reasoning" else "content"
+                    emit({field: f"NATIVE_TOKEN_{index:02d}\n"})
                     if index == 5:
                         markers["prefix"] = True
                         gate(advance)
@@ -171,7 +175,8 @@ try:
                    "serverPassword": env["OPENCODE_PASSWORD"], "sharedSessionRoot": str(work)}}
     write_private(root / "provider-settings.json", {"providerInstances": {"opencode": instance}})
     metadata = {"fixturePid": os.getpid(), "root": str(root), "project": str(work), "sessionId": sid,
-                "version": version, "controlUrl": f"http://127.0.0.1:{model.server_port}",
+                "version": version, "streamKind": stream_kind,
+                "controlUrl": f"http://127.0.0.1:{model.server_port}",
                 "settingsPath": str(root / "provider-settings.json"),
                 "nativePid": processes[0].pid, "cliPid": processes[1].pid}
     repository = Path(__file__).resolve().parents[2]
