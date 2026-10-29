@@ -45,14 +45,19 @@ const frames = (response: Response) => {
 };
 
 describe("OpenCode observer process", () => {
-  it("delivers an ordered snapshot and live updates after an earlier subscriber disconnects", async () => {
+  it("delivers ordered snapshots and long live updates after subscriber and native stream reconnects", async () => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-observer-test-"));
     const lock = NodePath.join(directory, "observer");
     let nativeResponse: NodeHttp.ServerResponse | undefined;
+    let nativeConnections = 0;
+    let active: Record<string, unknown> = {};
     const native = NodeHttp.createServer((request, response) => {
       if (request.url === "/api/session/active") {
-        response.writeHead(200, { "content-type": "application/json" }).end('{"data":{}}');
+        response
+          .writeHead(200, { "content-type": "application/json" })
+          .end(JSON.stringify({ data: active }));
       } else if (request.url === "/api/event") {
+        nativeConnections += 1;
         nativeResponse = response;
         response.writeHead(200, { "content-type": "text/event-stream" });
         response.flushHeaders();
@@ -112,6 +117,58 @@ describe("OpenCode observer process", () => {
       emit("session.execution.succeeded", { sessionID: "session" });
       expect((await second.next()).type).toBe("session.execution.succeeded");
       await second.close();
+
+      const beforeDisconnect = frames(await fetch(`${endpoint}/events`, { headers }));
+      expect((await beforeDisconnect.next()).type).toBe("t3.observer.ready");
+      emit("session.execution.started", { sessionID: "session" });
+      expect((await beforeDisconnect.next()).type).toBe("session.execution.started");
+      emit("session.text.delta", { ...block, delta: "old prefix" });
+      expect((await beforeDisconnect.next()).data.delta).toBe("old prefix");
+      active = { session: { type: "running" } };
+      // The registration rewrite occurs only after the native stream and active
+      // snapshot have both reconnected. No timers or endpoint polling are needed.
+      const nativeReconnected = new Promise<void>((resolve, reject) => {
+        const watcher = NodeFS.watch(lock, (_event, file) => {
+          if (file === "registration.json" && nativeConnections > 1) {
+            watcher.close();
+            resolve();
+          }
+        });
+        watcher.on("error", reject);
+      });
+      nativeResponse!.destroy();
+      await expect(beforeDisconnect.next()).rejects.toThrow();
+      await nativeReconnected;
+      const resumed = frames(await fetch(`${endpoint}/events`, { headers }));
+      expect((await resumed.next()).type).toBe("t3.observer.gap");
+      expect((await resumed.next()).type).toBe("t3.observer.ready");
+      // Missing old text stays suppressed. A new block has its own complete
+      // native start and must stream before either block or execution ends.
+      emit("session.text.delta", { ...block, delta: "unknown old tail" });
+      const nextBlock = { ...block, ordinal: 1 };
+      emit("session.text.started", nextBlock);
+      expect((await resumed.next()).type).toBe("session.text.started");
+      const chunk = "LONG_STREAM_".repeat(40);
+      for (let index = 0; index < 256; index++)
+        emit("session.text.delta", { ...nextBlock, delta: chunk });
+      for (let index = 0; index < 256; index++)
+        expect((await resumed.next()).data.delta).toBe(chunk);
+      const joined = frames(await fetch(`${endpoint}/events`, { headers }));
+      expect((await joined.next()).type).toBe("t3.observer.gap");
+      expect((await joined.next()).data).toMatchObject({
+        ...nextBlock,
+        kind: "text",
+        text: chunk.repeat(256),
+      });
+      expect((await joined.next()).type).toBe("t3.observer.ready");
+      emit("session.text.delta", { ...nextBlock, delta: " FINAL_LIVE_TOKEN" });
+      expect((await resumed.next()).data.delta).toBe(" FINAL_LIVE_TOKEN");
+      expect((await joined.next()).data.delta).toBe(" FINAL_LIVE_TOKEN");
+      emit("session.execution.succeeded", { sessionID: "session" });
+      expect((await resumed.next()).type).toBe("session.execution.succeeded");
+      expect((await joined.next()).type).toBe("session.execution.succeeded");
+      await resumed.close();
+      await joined.close();
       expect((await fetch(`${endpoint}/shutdown`, { method: "POST", headers })).status).toBe(204);
       await exited;
     } finally {

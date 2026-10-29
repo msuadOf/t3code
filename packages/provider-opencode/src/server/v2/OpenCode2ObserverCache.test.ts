@@ -40,3 +40,32 @@ describe("OpenCode observer cache", () => {
     expect(cache.accept(delta("two", "b"))).toEqual(delta("two", "b"));
   });
 });
+
+describe("OpenCode observer after a native stream gap", () => {
+  it.each(["text", "reasoning"] as const)(
+    "streams a newly started %s block without accepting the missing prefix of an earlier block",
+    (kind) => {
+      const cache = new OpenCode2ObserverCache();
+      cache.markGap(["session"]);
+      const block = { sessionID: "session", assistantMessageID: "new-message", ordinal: 0 };
+      const started = { type: `session.${kind}.started`, data: block };
+      const next = {
+        type: `session.${kind}.delta`,
+        data: { ...block, delta: "NEW_COMPLETE_PREFIX " },
+      };
+      expect(cache.accept(delta("session", "missing-prefix-tail"))).toBeUndefined();
+      expect(cache.accept(started)).toEqual(started);
+      expect(cache.accept(next)).toEqual(next);
+      expect(cache.snapshot()).toEqual([
+        { type: "t3.observer.gap", data: { sessionID: "session" } },
+        { type: "t3.observer.text", data: { ...block, kind, text: "NEW_COMPLETE_PREFIX " } },
+      ]);
+      const tail = { type: `session.${kind}.delta`, data: { ...block, delta: "NEXT_TOKEN" } };
+      expect(cache.accept(tail)).toEqual(tail);
+      expect(cache.snapshot()[1]).toMatchObject({
+        data: { text: "NEW_COMPLETE_PREFIX NEXT_TOKEN" },
+      });
+      expect(cache.accept(delta("session", "still-incomplete-old-tail"))).toBeUndefined();
+    },
+  );
+});

@@ -1,5 +1,5 @@
 // Bump when the worker changes so an older process retires after its active executions.
-export const OBSERVER_REVISION = 1;
+export const OBSERVER_REVISION = 2;
 
 /** Cumulative values let subscribers join without replaying or double-appending deltas. */
 export interface ObserverText {
@@ -84,11 +84,13 @@ export class OpenCode2ObserverCache {
   }
   snapshot(): ReadonlyArray<ObserverText | ObserverGap> {
     return [
-      ...this.blocks.values(),
       ...[...this.gaps].map((sessionID) => ({
         type: "t3.observer.gap" as const,
         data: { sessionID },
       })),
+      // Subscribers clear stale session accumulators on a gap, then restore
+      // blocks whose native start was observed after that gap.
+      ...this.blocks.values(),
     ];
   }
   accept(event: NativeEvent): NativeEvent | ObserverText | ObserverGap | undefined {
@@ -125,7 +127,28 @@ export class OpenCode2ObserverCache {
       this.blocks.delete(key);
       return event;
     }
-    if (this.gaps.has(session)) return undefined;
+    if (this.gaps.has(session) && match[2] === "started") {
+      // A new block has no missing prefix even when an earlier block does.
+      // The bounded empty entry records that block's start independently.
+      const previous = this.blocks.get(key);
+      if (previous === undefined) {
+        const extra = key.length * 2 + 512;
+        if (this.size + extra > this.limit || this.blocks.size >= 4096) return this.gap(session);
+        this.blocks.set(key, {
+          type: "t3.observer.text",
+          data: {
+            sessionID: session,
+            assistantMessageID: data.assistantMessageID,
+            ordinal: data.ordinal,
+            kind,
+            text: "",
+          },
+        });
+        this.size += extra;
+      }
+      return event;
+    }
+    if (this.gaps.has(session) && !this.blocks.has(key)) return undefined;
     if (match[2] !== "delta" || typeof data.delta !== "string") return event;
     const previous = this.blocks.get(key);
     const extra = data.delta.length * 2 + (previous === undefined ? key.length * 2 + 512 : 0);
