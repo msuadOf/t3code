@@ -239,6 +239,10 @@
       "types": "./src/state/usageProgress.ts",
       "default": "./src/state/usageProgress.ts"
     },
+    "./state/model-activity": {
+      "types": "./src/state/modelActivity.ts",
+      "default": "./src/state/modelActivity.ts"
+    },
     "./state/model-activity-follow": {
       "types": "./src/state/modelActivityFollow.ts",
       "default": "./src/state/modelActivityFollow.ts"

@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { modelActivityBlockLabel } from "@t3tools/client-runtime/state/model-activity";
 import type {
   ModelActivityRequest,
   ModelActivityState,
@@ -73,17 +74,24 @@ function ModelRequest({
           {request.blocks.map((block) => (
             <View key={block.index} className="gap-1">
               <Text className="text-xs text-foreground-muted">
-                {block.kind === "thinking"
-                  ? "Thinking"
-                  : block.kind === "tool_use"
-                    ? "Tool input · partial JSON"
-                    : block.kind === "text"
-                      ? "Text"
-                      : `Raw model block · ${block.kind}`}
+                {modelActivityBlockLabel(block, request.status)}
               </Text>
-              <Text selectable className="font-mono text-xs text-foreground">
-                {block.text || "No content received yet."}
-              </Text>
+              {block.initialInput ? (
+                <>
+                  <Text className="text-xs text-foreground-muted">Initial arguments</Text>
+                  <Text selectable className="font-mono text-xs text-foreground">
+                    {block.initialInput}
+                  </Text>
+                  {block.text ? (
+                    <Text className="text-xs text-foreground-muted">Argument stream</Text>
+                  ) : null}
+                </>
+              ) : null}
+              {block.text || !block.initialInput ? (
+                <Text selectable className="font-mono text-xs text-foreground">
+                  {block.text || "No content observed."}
+                </Text>
+              ) : null}
             </View>
           ))}
         </View>

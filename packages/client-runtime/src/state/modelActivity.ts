@@ -5,6 +5,9 @@ export interface ModelActivityBlock {
   readonly kind: string;
   readonly text: string;
   readonly complete: boolean;
+  readonly toolName?: string;
+  readonly toolId?: string;
+  readonly initialInput?: string;
 }
 export interface ModelActivityRequest {
   readonly id: string;
@@ -40,6 +43,28 @@ const record = (value: unknown): Readonly<Record<string, unknown>> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Readonly<Record<string, unknown>>)
     : {};
+
+export function modelActivityBlockLabel(
+  block: ModelActivityBlock,
+  status: ModelActivityRequest["status"],
+): string {
+  if (block.kind === "tool_use") {
+    const progress = block.complete
+      ? "Arguments received"
+      : status === "failed"
+        ? "Argument stream interrupted"
+        : status === "completed"
+          ? "Arguments incomplete"
+          : "Receiving arguments";
+    // Model output describes a proposed call, not whether the worker executed it.
+    return `${block.toolName ?? "Tool input"} · ${progress}`;
+  }
+  return block.kind === "thinking"
+    ? "Thinking"
+    : block.kind === "text"
+      ? "Text"
+      : `Raw model block · ${block.kind}`;
+}
 
 function applyEvent(state: ModelActivityState, event: ModelActivity): ModelActivityState {
   if (event.seq <= state.seq) return state;
@@ -86,6 +111,23 @@ function applyEvent(state: ModelActivityState, event: ModelActivity): ModelActiv
               ? content.thinking
               : "",
         complete: false,
+        ...(content.type === "tool_use"
+          ? {
+              ...(typeof content.name === "string" &&
+              content.name.length > 0 &&
+              content.name.length <= 256
+                ? { toolName: content.name }
+                : {}),
+              ...(typeof content.id === "string" &&
+              content.id.length > 0 &&
+              content.id.length <= 1024
+                ? { toolId: content.id }
+                : {}),
+              ...(Object.keys(record(content.input)).length > 0
+                ? { initialInput: JSON.stringify(content.input) }
+                : {}),
+            }
+          : {}),
       };
     } else if (event.type === "content_block_delta") {
       const text =
@@ -126,12 +168,35 @@ function applyEvent(state: ModelActivityState, event: ModelActivity): ModelActiv
     let trimmedBlocks: ModelActivityBlock[] | undefined;
     for (let blockIndex = item.blocks.length - 1; blockIndex >= 0; blockIndex--) {
       const block = item.blocks[blockIndex]!;
+      const toolName = (block.toolName?.length ?? 0) <= remaining ? block.toolName : undefined;
+      remaining -= toolName?.length ?? 0;
+      const toolId = (block.toolId?.length ?? 0) <= remaining ? block.toolId : undefined;
+      remaining -= toolId?.length ?? 0;
       const kept = remaining > 0 ? block.text.slice(-remaining) : "";
       remaining -= kept.length;
-      if (kept !== block.text) {
+      const initialInput =
+        block.initialInput === undefined
+          ? undefined
+          : remaining > 0
+            ? block.initialInput.slice(-remaining)
+            : "";
+      remaining -= initialInput?.length ?? 0;
+      if (
+        kept !== block.text ||
+        initialInput !== block.initialInput ||
+        toolName !== block.toolName ||
+        toolId !== block.toolId
+      ) {
         truncated = true;
         trimmedBlocks ??= [...item.blocks];
-        trimmedBlocks[blockIndex] = { ...block, text: kept };
+        const { toolName: _name, toolId: _id, initialInput: _input, ...rest } = block;
+        trimmedBlocks[blockIndex] = {
+          ...rest,
+          text: kept,
+          ...(toolName === undefined ? {} : { toolName }),
+          ...(toolId === undefined ? {} : { toolId }),
+          ...(initialInput === undefined ? {} : { initialInput }),
+        };
       }
     }
     if (trimmedBlocks) requests[requestIndex] = { ...item, blocks: trimmedBlocks };

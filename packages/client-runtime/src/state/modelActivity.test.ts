@@ -1,6 +1,10 @@
 import type { ModelActivity, ModelActivityFrame } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
-import { emptyModelActivityState, reduceModelActivity } from "./modelActivity.ts";
+import {
+  emptyModelActivityState,
+  reduceModelActivity,
+  modelActivityBlockLabel,
+} from "./modelActivity.ts";
 
 const event = (
   seq: number,
@@ -243,4 +247,100 @@ it("retains partial responses and confirmations during disconnection until a fre
   expect(recovered.connectionState).toBe("connected");
   expect(recovered.requests[0]?.blocks[0]?.text).toBe("Fresh native baseline");
   expect(recovered.requests[0]?.confirmed).toBe(false);
+});
+
+it("shows native tool identity and arguments before message completion without claiming execution", () => {
+  const start = event(1, "content_block_start", {
+    index: 0,
+    content_block: {
+      type: "tool_use",
+      id: "tool-call",
+      name: "Read",
+      input: { file_path: "/work/a.ts" },
+    },
+  });
+  let state = reduceModelActivity(emptyModelActivityState, snapshot([start]));
+  expect(state.requests[0]?.status).toBe("running");
+  const block = state.requests[0]!.blocks[0]!;
+  expect(block).toMatchObject({
+    toolId: "tool-call",
+    toolName: "Read",
+    initialInput: '{"file_path":"/work/a.ts"}',
+  });
+  expect(modelActivityBlockLabel(block, "running")).toBe("Read · Receiving arguments");
+  state = reduceModelActivity(state, {
+    kind: "event",
+    epoch: "epoch",
+    event: event(2, "content_block_delta", {
+      index: 0,
+      delta: { type: "input_json_delta", partial_json: '{"offset":1}' },
+    }),
+  });
+  expect(state.requests[0]!.blocks[0]).toMatchObject({ ...block, text: '{"offset":1}' });
+  state = reduceModelActivity(state, {
+    kind: "event",
+    epoch: "epoch",
+    event: event(3, "content_block_stop", { index: 0 }),
+  });
+  expect(modelActivityBlockLabel(state.requests[0]!.blocks[0]!, "running")).toBe(
+    "Read · Arguments received",
+  );
+  expect(state.requests[0]?.status).toBe("running");
+  expect(state.requests[0]?.confirmed).toBe(false);
+});
+
+it("keeps incomplete tool argument streams distinct from prepared tools and bounds initial input", () => {
+  const state = reduceModelActivity(
+    emptyModelActivityState,
+    snapshot([
+      event(1, "content_block_start", {
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: "x".repeat(1025),
+          name: 7,
+          input: { command: "x".repeat(300_000) },
+        },
+      }),
+      event(2, "observer.request_end", { complete: false }),
+    ]),
+  );
+  const block = state.requests[0]!.blocks[0]!;
+  expect(block.toolId).toBeUndefined();
+  expect(block.toolName).toBeUndefined();
+  expect(state.truncated).toBe(true);
+  expect(block.initialInput!.length + block.text.length).toBeLessThanOrEqual(256 * 1024);
+  expect(modelActivityBlockLabel(block, "failed")).toBe("Tool input · Argument stream interrupted");
+  expect(modelActivityBlockLabel(block, "completed")).toBe("Tool input · Arguments incomplete");
+});
+
+it("includes retained tool identity in the activity memory budget", () => {
+  const state = reduceModelActivity(
+    emptyModelActivityState,
+    snapshot([
+      event(1, "content_block_start", {
+        index: 0,
+        content_block: { type: "tool_use", id: "i".repeat(1024), name: "n".repeat(256), input: {} },
+      }),
+      event(2, "content_block_delta", {
+        index: 1,
+        delta: { type: "text_delta", text: "x".repeat(256 * 1024) },
+      }),
+    ]),
+  );
+  const blocks = state.requests[0]!.blocks;
+  expect(
+    blocks.reduce(
+      (sum, b) =>
+        sum +
+        b.text.length +
+        (b.initialInput?.length ?? 0) +
+        (b.toolId?.length ?? 0) +
+        (b.toolName?.length ?? 0),
+      0,
+    ),
+  ).toBeLessThanOrEqual(256 * 1024);
+  expect(state.truncated).toBe(true);
+  expect(blocks[0]?.toolId).toBeUndefined();
+  expect(blocks[0]?.toolName).toBeUndefined();
 });

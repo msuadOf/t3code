@@ -72,3 +72,5 @@ message IDs collapse their observed response and say “Saved in conversation”
 unconfirmed blocks say “Not yet saved by Claude”. Preserve partial text, thinking
 and tool JSON as plain text, show gaps, and never classify main versus auxiliary
 requests from their content. API gateway observation is off by default.
+Tool names come from native stream metadata. Receiving or completing an argument
+block describes model preparation; only native execution records establish tool outcomes.
