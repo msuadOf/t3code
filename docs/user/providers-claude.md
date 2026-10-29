@@ -115,6 +115,10 @@ by Claude**. Only a matching message saved by Claude changes the status to **Sav
 in conversation** and collapses that response; provisional activity does not become
 conversation history or future context. Missing or trimmed activity is indicated.
 
+The activity panel follows the newest running response as it grows. Scroll or expand
+a request to pause following while reading; choose **Follow live** to return to the
+current output. This moves only the activity panel, not the saved conversation.
+
 The observer runs on the environment's machine and forwards model traffic to the
 upstream you configured. It does not use Anthropic Remote Control. It keeps a
 bounded response buffer in memory and does not save model request bodies or headers.

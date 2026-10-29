@@ -1,24 +1,45 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import type { ModelActivityRequest } from "@t3tools/client-runtime/state/server";
+import type {
+  ModelActivityRequest,
+  ModelActivityState,
+} from "@t3tools/client-runtime/state/server";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
+import {
+  modelActivityFollowOffset,
+  modelActivityRequestKey,
+  resolveModelActivityFollowTarget,
+} from "@t3tools/client-runtime/state/model-activity-follow";
 
+import { observeResize } from "../../lib/observeResize";
 import { serverEnvironment } from "../../state/server";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Button } from "../ui/button";
 
-function ModelRequest({ request }: { readonly request: ModelActivityRequest }) {
+function ModelRequest({
+  request,
+  onToggle,
+  followActive,
+}: {
+  readonly request: ModelActivityRequest;
+  readonly onToggle: () => void;
+  readonly followActive: boolean;
+}) {
   const [expanded, setExpanded] = useState<{ confirmed: boolean; open: boolean } | null>(null);
   const defaultOpen =
     !request.confirmed &&
     !(request.status === "failed" && !request.blocks.some((block) => block.text.length > 0));
-  const open = expanded?.confirmed === request.confirmed ? expanded.open : defaultOpen;
+  const open =
+    followActive || (expanded?.confirmed === request.confirmed ? expanded.open : defaultOpen);
   return (
     <Collapsible
       open={open}
-      onOpenChange={(open) => setExpanded({ confirmed: request.confirmed, open })}
+      onOpenChange={(open) => {
+        onToggle();
+        setExpanded({ confirmed: request.confirmed, open });
+      }}
     >
       <CollapsibleTrigger render={<Button variant="ghost" size="sm" />}>
         {open ? "▾" : "▸"} Model request {request.id.slice(-8)}
@@ -80,22 +101,107 @@ export function ModelActivityPanel({
     serverEnvironment.modelActivity({ environmentId, input: { threadId } }),
   );
   const activity = Option.getOrNull(AsyncResult.value(result));
-  const [open, setOpen] = useState(true);
   if (!activity?.available) return null;
-  const disconnected = activity.connectionState === "disconnected" || AsyncResult.isFailure(result);
+  return (
+    <ModelActivityView
+      key={`${environmentId}:${threadId}:${activity.epoch}`}
+      activity={activity}
+      failed={AsyncResult.isFailure(result)}
+    />
+  );
+}
+
+function ModelActivityView({
+  activity,
+  failed,
+}: {
+  readonly activity: ModelActivityState;
+  readonly failed: boolean;
+}) {
+  const [open, setOpen] = useState(true);
+  const [following, setFollowing] = useState(true);
+  const followingRef = useRef(true);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const [previousTarget, setPreviousTarget] = useState<string | null>(null);
+  const target = resolveModelActivityFollowTarget(activity.requests, previousTarget);
+  if (target !== null && target !== previousTarget) setPreviousTarget(target);
+  const pause = () => {
+    followingRef.current = false;
+    setFollowing(false);
+  };
+  const follow = () => {
+    const viewport = viewportRef.current;
+    const anchor = anchorRef.current;
+    if (!viewport || !anchor || !target) return;
+    const offset = modelActivityFollowOffset({
+      following: followingRef.current,
+      targetBottom:
+        anchor.getBoundingClientRect().bottom -
+        viewport.getBoundingClientRect().top +
+        viewport.scrollTop -
+        viewport.clientTop,
+      viewportHeight: viewport.clientHeight,
+    });
+    // Set only this viewport: scrollIntoView would also move the main conversation.
+    if (offset !== null) viewport.scrollTop = offset;
+  };
+  useLayoutEffect(() => {
+    if (!open || !target) return;
+    follow();
+    const elements = [anchorRef.current, viewportRef.current].filter((element) => element !== null);
+    return observeResize(elements, follow);
+  });
+  const disconnected = activity.connectionState === "disconnected" || failed;
   const unsaved = activity.requests.filter((request) => !request.confirmed).length;
   return (
     <aside
       aria-label="Model activity"
       className="shrink-0 border-b border-border px-3 py-1 sm:px-5"
     >
-      <Collapsible open={open} onOpenChange={setOpen}>
+      <Collapsible
+        open={open}
+        onOpenChange={(value) => {
+          pause();
+          setOpen(value);
+        }}
+      >
         <CollapsibleTrigger render={<Button variant="ghost" size="sm" />}>
           {open ? "▾" : "▸"} Model activity
           {disconnected ? " · reconnecting" : unsaved > 0 ? ` · ${unsaved} not yet saved` : ""}
         </CollapsibleTrigger>
         <CollapsiblePanel animate={false}>
-          <div className="max-h-60 space-y-2 overflow-y-auto overscroll-contain py-2">
+          {target ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={following}
+              onClick={() => {
+                followingRef.current = true;
+                setFollowing(true);
+                follow();
+              }}
+            >
+              {following ? "Following live" : "Follow live"}
+            </Button>
+          ) : null}
+          <div
+            ref={viewportRef}
+            tabIndex={0}
+            aria-label="Observed model responses"
+            className="max-h-60 space-y-2 overflow-y-auto overscroll-contain py-2 [overflow-anchor:none]"
+            onWheel={pause}
+            onTouchMove={pause}
+            onPointerDown={pause}
+            onKeyDown={(event) => {
+              if (
+                ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(
+                  event.key,
+                )
+              )
+                pause();
+            }}
+          >
             <p className="text-xs text-muted-foreground">
               Observed model responses, separate from the saved conversation. Requests are not
               classified as main or auxiliary.
@@ -116,7 +222,16 @@ export function ModelActivityPanel({
               <p className="text-xs text-muted-foreground">Waiting for model activity.</p>
             ) : null}
             {activity.requests.toReversed().map((request) => (
-              <ModelRequest key={`${request.sessionId}:${request.id}`} request={request} />
+              <div
+                key={modelActivityRequestKey(request)}
+                ref={modelActivityRequestKey(request) === target ? anchorRef : undefined}
+              >
+                <ModelRequest
+                  request={request}
+                  onToggle={pause}
+                  followActive={following && modelActivityRequestKey(request) === target}
+                />
+              </div>
             ))}
           </div>
         </CollapsiblePanel>
