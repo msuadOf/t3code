@@ -37,7 +37,7 @@ appId: com.t3tools.t3code.dev
     when:
       true: ${STREAM_KIND == 'reasoning'}
     commands:
-      - tapOn: Thinking
+      - tapOn: "(?s).*Thinking$"
       - extendedWaitUntil:
           visible: Showing the latest text. Earlier text will appear when available.
           timeout: 30000
