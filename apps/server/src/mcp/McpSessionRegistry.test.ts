@@ -220,3 +220,31 @@ it.effect.each(["provider-session", "thread", "all"] as const)(
       expect(yield* registry.resolve(token)).toBeUndefined();
     }),
 );
+
+it.effect(
+  "binds a credential atomically to one native session and never rebinds a revoked token",
+  () =>
+    Effect.gen(function* () {
+      const registry = yield* makeRegistry(() => 1_000);
+      const issued = yield* registry.issue({
+        threadId: ThreadId.make("native-session-thread"),
+        providerInstanceId: ProviderInstanceId.make("opencode"),
+      });
+      const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+      expect((yield* registry.resolve(token))?.nativeSessionConstraint).toBeUndefined();
+      const bind = issued.config.bindNativeSession!;
+      expect(bind).toBeTypeOf("function");
+      const first = { metadataKey: "nativeSession", sessionId: "native-one" };
+      const other = { ...first, sessionId: "native-two" };
+      const results = yield* Effect.all([bind(first), bind(other)], { concurrency: "unbounded" });
+      expect(results.filter(Boolean)).toHaveLength(1);
+      const winner = results[0] ? first : other;
+      expect((yield* registry.resolve(token))?.nativeSessionConstraint).toEqual(winner);
+      expect(yield* bind(winner)).toBe(true);
+      expect(yield* bind({ ...winner, metadataKey: "differentKey" })).toBe(false);
+      expect(yield* bind({ ...winner, sessionId: "replacement" })).toBe(false);
+      yield* registry.revokeProviderSession(issued.config.providerSessionId);
+      expect(yield* bind(winner)).toBe(false);
+      expect(yield* registry.resolve(token)).toBeUndefined();
+    }),
+);

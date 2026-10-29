@@ -809,3 +809,145 @@ it.effect("admits provider and OAuth client credentials and points only clients 
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
+
+it.effect(
+  "checks native session metadata on every tool call even within an existing MCP HTTP session",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const token = "nativeScopedProviderToken";
+        let constraint: { metadataKey: string; sessionId: string } | undefined;
+        const seen: string[] = [];
+        const ProbeToolkit = Toolkit.make(
+          Tool.make("native_probe", {
+            description: "Records a tool invocation.",
+            success: Schema.Struct({ ok: Schema.Boolean }),
+            failure: OrchestratorMcpFailure,
+            failureMode: "return",
+            dependencies: [McpInvocationContext.McpInvocationContext],
+          }),
+        );
+        const serverLayer = McpHttpServer.toolkitRegistration(
+          ProbeToolkit,
+          McpToolAccess.toLayer(ProbeToolkit, {
+            native_probe: McpToolAccess.reads(() =>
+              Effect.sync(() => {
+                seen.push("called");
+                return { ok: true };
+              }),
+            ),
+          }),
+        ).pipe(
+          Layer.provideMerge(McpHttpServer.layerMcpTransport),
+          Layer.provide(
+            Layer.mock(McpSessionRegistry.McpSessionRegistry)({
+              resolve: (presented) =>
+                Effect.succeed(
+                  presented === token
+                    ? {
+                        ...invocation,
+                        ...(constraint ? { nativeSessionConstraint: constraint } : {}),
+                      }
+                    : undefined,
+                ),
+            }),
+          ),
+        );
+        yield* HttpRouter.serve(serverLayer, { disableListenLog: true, disableLogger: true }).pipe(
+          Layer.build,
+        );
+        const httpClient = yield* HttpClient.HttpClient;
+        const headers = {
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${token}`,
+        };
+        const initialized = yield* httpClient.post("/mcp", {
+          headers,
+          body: HttpBody.text(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              method: "initialize",
+              params: {
+                protocolVersion: "2025-06-18",
+                capabilities: {},
+                clientInfo: { name: "native-test", version: "1.0.0" },
+              },
+            }),
+            "application/json",
+          ),
+        });
+        expect(initialized.status).toBe(200);
+        const post = (payload: unknown) =>
+          httpClient.post("/mcp", {
+            headers: {
+              ...headers,
+              "mcp-session-id": initialized.headers["mcp-session-id"]!,
+              "mcp-protocol-version": "2025-06-18",
+            },
+            body: HttpBody.text(JSON.stringify(payload), "application/json"),
+          });
+        const call = (meta?: unknown) => ({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: {
+            name: "native_probe",
+            arguments: {},
+            ...(meta === undefined ? {} : { _meta: meta }),
+          },
+        });
+        // An unbound provider remains backward compatible. Binding after initialize
+        // must apply to the same HTTP session rather than its cached initial scope.
+        expect((yield* post(call())).status).toBe(200);
+        expect(seen).toHaveLength(1);
+        constraint = { metadataKey: "nativeSession", sessionId: "session-one" };
+        const constrainedInitialize = yield* httpClient.post("/mcp", {
+          headers,
+          body: HttpBody.text(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 5,
+              method: "initialize",
+              params: {
+                protocolVersion: "2025-06-18",
+                capabilities: {},
+                clientInfo: { name: "bound-native-test", version: "1.0.0" },
+              },
+            }),
+            "application/json",
+          ),
+        });
+        expect(constrainedInitialize.status).toBe(200);
+        const malformed = yield* httpClient.post("/mcp", {
+          headers: { ...headers, "mcp-session-id": initialized.headers["mcp-session-id"]! },
+          body: HttpBody.text('{"method":"tools/call",', "application/json"),
+        });
+        expect(malformed.status).toBe(400);
+        expect(seen).toHaveLength(1);
+        expect((yield* post({ jsonrpc: "2.0", id: 3, method: "ping" })).status).toBe(200);
+        expect((yield* post({ jsonrpc: "2.0", id: 4, method: "tools/list" })).status).toBe(200);
+        for (const meta of [
+          undefined,
+          {},
+          { nativeSession: "session-two" },
+          { nativeSession: 42 },
+          null,
+        ]) {
+          expect((yield* post(call(meta))).status).toBe(403);
+          expect(seen).toHaveLength(1);
+        }
+        expect(
+          (yield* post([
+            call({ nativeSession: "session-one" }),
+            call({ nativeSession: "session-two" }),
+          ])).status,
+        ).toBe(403);
+        expect(seen).toHaveLength(1);
+        const accepted = yield* post(call({ nativeSession: "session-one" }));
+        expect(accepted.status).toBe(200);
+        expect(yield* accepted.text).toContain("ok");
+        expect(seen).toHaveLength(2);
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);

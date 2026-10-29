@@ -8,6 +8,7 @@ import {
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
+import type { McpNativeSessionConstraint } from "@t3tools/provider-core/server/mcpSession";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
@@ -49,6 +50,7 @@ export interface McpInvocationScope {
   readonly capabilities: ReadonlySet<McpCapability>;
   readonly issuedAt: number;
   readonly requestNamespace: string;
+  readonly nativeSessionConstraint?: McpNativeSessionConstraint;
   readonly thread: McpThreadCaller | undefined;
   readonly client: McpClientCaller | undefined;
 }

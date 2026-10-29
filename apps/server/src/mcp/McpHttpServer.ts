@@ -178,6 +178,43 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
         offerOAuth: Option.isSome(clients) && !looksLikeProviderToken(token),
       });
     }
+    if (invocation.nativeSessionConstraint && request.method === "POST") {
+      const constraint = invocation.nativeSessionConstraint;
+      // json is cached by HttpServerRequest; the MCP transport reads the same
+      // body afterward. Inspect each call, including calls in an existing HTTP session.
+      const body = yield* request.json.pipe(Effect.option);
+      if (Option.isNone(body))
+        return HttpServerResponse.jsonUnsafe({ error: "invalid_mcp_request" }, { status: 400 });
+      const outsideNativeSession = (message: unknown): boolean => {
+        if (Array.isArray(message)) return message.some(outsideNativeSession);
+        if (
+          typeof message !== "object" ||
+          message === null ||
+          !("method" in message) ||
+          message.method !== "tools/call"
+        )
+          return false;
+        const params = "params" in message ? message.params : undefined;
+        const meta =
+          typeof params === "object" && params !== null && "_meta" in params
+            ? params._meta
+            : undefined;
+        return (
+          typeof meta !== "object" ||
+          meta === null ||
+          !Object.hasOwn(meta, constraint.metadataKey) ||
+          (meta as Record<string, unknown>)[constraint.metadataKey] !== constraint.sessionId
+        );
+      };
+      if (outsideNativeSession(body.value))
+        return HttpServerResponse.jsonUnsafe(
+          {
+            error: "native_session_mismatch",
+            message: "This MCP credential is restricted to its bound native session.",
+          },
+          { status: 403 },
+        );
+    }
     return yield* httpEffect.pipe(
       Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
       Effect.map(normalizeMcpHttpResponse),

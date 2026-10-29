@@ -1,11 +1,20 @@
 import type { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 
+import type * as Effect from "effect/Effect";
+
+export interface McpNativeSessionConstraint {
+  readonly metadataKey: string;
+  readonly sessionId: string;
+}
+
 export interface McpProviderSessionConfig {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;
   readonly endpoint: string;
+  /** Binds this credential once to a native session's per-call MCP metadata. */
+  readonly bindNativeSession?: (constraint: McpNativeSessionConstraint) => Effect.Effect<boolean>;
   readonly authorizationHeader: string;
   /**
    * Adapters read it to keep developer instructions truthful: when the user
