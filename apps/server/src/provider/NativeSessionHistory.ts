@@ -1,3 +1,4 @@
+import { nativeSessionProjectionId } from "@t3tools/provider-core/server/nativeSessions";
 import {
   EventId,
   CheckpointScopeId,
@@ -66,7 +67,7 @@ export const mapHistory = (
     const completedAt = DateTime.makeUnsafe(turn.completedAt ?? input.thread.updatedAt);
     const nativeProviderTurnId = idAllocator.derive.providerTurn({
       driver,
-      nativeTurnId: turn.id,
+      nativeTurnId: nativeSessionProjectionId(input.providerThread, turn.id),
     });
     // T3-started turns can retain an admission ID after learning their native identity.
     const existingTurn = input.existing?.providerTurns.find(
@@ -212,7 +213,10 @@ export const mapHistory = (
         occurredAt: completedAt,
       });
     const base = (item: NativeHistoryItem, identity = item.id) => ({
-      id: idAllocator.derive.turnItemFromProviderItem({ driver, nativeItemId: identity }),
+      id: idAllocator.derive.turnItemFromProviderItem({
+        driver,
+        nativeItemId: nativeSessionProjectionId(input.providerThread, identity),
+      }),
       threadId: input.appThread.id,
       runId,
       nodeId: rootNodeId,
@@ -253,7 +257,10 @@ export const mapHistory = (
         const messageId =
           item === firstUser
             ? rootMessageId
-            : idAllocator.derive.messageFromProviderItem({ driver, nativeItemId: item.id });
+            : idAllocator.derive.messageFromProviderItem({
+                driver,
+                nativeItemId: nativeSessionProjectionId(input.providerThread, item.id),
+              });
         const common = base(item);
         if (item === firstUser && existingRun !== undefined) {
           const existingUserItem = input.existing?.turnItems.find(

@@ -1,3 +1,4 @@
+import { prepareNativeClaudeFork } from "./NativeClaudeForks.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -158,6 +159,11 @@ it.effect(
           return inventory;
         }
       }
+      yield* fs.makeDirectory(path.join(root, "jobs", "11111111"), { recursive: true });
+      yield* fs.writeFileString(
+        path.join(root, "jobs", "11111111", "state.json"),
+        JSON.stringify({ sessionId, daemonShort: "11111111", cwd: "/work", respawnFlags: [] }),
+      );
       const source = new NativeClaudeSessions(root, new Client());
       const sessions = yield* Effect.promise(() => source.list());
       expect(sessions[0]).toMatchObject({ sharingState: "shared" });
@@ -508,3 +514,54 @@ it("keeps machine child notifications on the existing turn without hiding a user
     ),
   ).toHaveLength(3);
 });
+
+it.effect(
+  "recognizes a durable pending fork before its first JSONL and after reopening the session source",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped();
+      const sessionId = "fedcba98-1234-1234-1234-123456789abc";
+      const settings = yield* Effect.promise(() =>
+        prepareNativeClaudeFork(root, {
+          sourceSessionId: "1234abcd-1234-1234-1234-123456789abc",
+          targetThreadId: "intended-target",
+        }),
+      );
+      const job = {
+        kind: "background" as const,
+        id: "fedcba98",
+        sessionId,
+        cwd: "/work",
+        startedAt: 1,
+        status: "idle",
+      };
+      yield* fs.makeDirectory(path.join(root, "jobs", job.id), { recursive: true });
+      yield* fs.writeFileString(
+        path.join(root, "jobs", job.id, "state.json"),
+        JSON.stringify({
+          sessionId,
+          daemonShort: job.id,
+          cwd: job.cwd,
+          respawnFlags: ["--settings", settings],
+        }),
+      );
+      class Client extends NativeClaudeClient {
+        override async listSessions() {
+          return [job];
+        }
+      }
+      for (const source of [
+        new NativeClaudeSessions(root, new Client()),
+        new NativeClaudeSessions(root, new Client()),
+      ]) {
+        const sessions = yield* Effect.promise(() => source.list());
+        expect(sessions[0]).toMatchObject({
+          id: sessionId,
+          historyAvailable: false,
+          requiresExistingOwner: { threadId: "intended-target" },
+        });
+      }
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);

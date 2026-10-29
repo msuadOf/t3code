@@ -247,3 +247,61 @@ for (const provider of ["claudeAgent", "opencode"] as const) {
     );
   });
 }
+
+it.layer(IdAllocator.layer)("Claude native fork identity isolation", (it) => {
+  it.effect(
+    "keeps copied native UUIDs distinct from the source and stable after metadata reload",
+    () =>
+      Effect.gen(function* () {
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const source = fixture(ProviderDriverKind.make("claudeAgent"));
+        const target = {
+          ...source,
+          appThread: { ...source.appThread, id: ThreadId.make("fork-app") },
+          providerThread: {
+            ...source.providerThread,
+            id: ProviderThreadId.make("fork-provider"),
+            appThreadId: ThreadId.make("fork-app"),
+            nativeMetadata: { claudeForkIdentityNamespace: "fork-session-uuid" },
+            forkedFrom: { providerThreadId: source.providerThread.id },
+          },
+        };
+        const original = recordsOf(mapHistory(source, ids));
+        const fork = recordsOf(mapHistory(target, ids));
+        const reloaded = recordsOf(
+          mapHistory(
+            {
+              ...target,
+              providerThread: {
+                ...target.providerThread,
+                nativeMetadata: JSON.parse(JSON.stringify(target.providerThread.nativeMetadata)),
+              },
+            },
+            ids,
+          ),
+        );
+        for (const key of ["messages", "turnItems", "providerTurns", "nodes", "runs"] as const) {
+          assert.isFalse(
+            fork[key].some((value) => original[key].some((entry) => entry.id === value.id)),
+          );
+          assert.deepEqual(
+            fork[key].map((value) => value.id),
+            reloaded[key].map((value) => value.id),
+          );
+        }
+        assert.deepEqual(
+          original.providerTurns[0]?.nativeTurnRef,
+          fork.providerTurns[0]?.nativeTurnRef,
+        );
+        assert.deepEqual(
+          original.turnItems.map((item) => item.nativeItemRef),
+          fork.turnItems.map((item) => item.nativeItemRef),
+        );
+        assert.deepEqual(recordsOf(mapHistory(source, ids)), original);
+        assert.equal(
+          original.providerTurns[0]?.id,
+          ids.derive.providerTurn({ driver: source.driver, nativeTurnId: source.turns[0]!.id }),
+        );
+      }),
+  );
+});

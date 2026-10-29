@@ -1,3 +1,4 @@
+import { nativeSessionProjectionId } from "@t3tools/provider-core/server/nativeSessions";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import {
   ProviderDriverKind,
@@ -84,7 +85,7 @@ export const nativeClaudeCapabilities = {
     ...ClaudeProviderCapabilitiesV2.threads,
     canReadThreadSnapshot: false,
     canRollbackThread: false,
-    canForkThread: false,
+    canForkThread: true,
     canForkFromTurn: false,
   },
   turns: {
@@ -484,9 +485,12 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
             nativeItemRef,
             parentItemId: allocator.derive.turnItemFromProviderItem({
               driver,
-              nativeItemId: observed.toolId,
+              nativeItemId: nativeSessionProjectionId(owner.providerThread, observed.toolId),
             }),
-            ordinal: itemOrdinal(observed.turnId, nativeItemId),
+            ordinal: itemOrdinal(
+              nativeSessionProjectionId(owner.providerThread, observed.turnId),
+              nativeItemId,
+            ),
             status,
             title: observed.title,
             startedAt,
@@ -598,7 +602,10 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
             if (ownership.nativeTurnId !== turn.id) continue;
             seen.add(turn.id);
             const owner = ownership.input;
-            const providerTurnId = allocator.derive.providerTurn({ driver, nativeTurnId: turn.id });
+            const providerTurnId = allocator.derive.providerTurn({
+              driver,
+              nativeTurnId: nativeSessionProjectionId(thread, turn.id),
+            });
             const startedAt = DateTime.makeUnsafe(turn.startedAt);
             const job =
               turn.id === history.at(-1)?.id
@@ -801,7 +808,10 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
               if (item.type === "user") continue;
               const updatedAt = yield* DateTime.now;
               const common = {
-                id: allocator.derive.turnItemFromProviderItem({ driver, nativeItemId: item.id }),
+                id: allocator.derive.turnItemFromProviderItem({
+                  driver,
+                  nativeItemId: nativeSessionProjectionId(thread, item.id),
+                }),
                 threadId: owner.threadId,
                 runId: owner.runId,
                 nodeId: owner.rootNodeId,
@@ -809,7 +819,10 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                 providerTurnId,
                 nativeItemRef: { driver, nativeId: item.id, strength: "strong" as const },
                 parentItemId: null,
-                ordinal: (ordinal = itemOrdinal(turn.id, item.id)),
+                ordinal: (ordinal = itemOrdinal(
+                  nativeSessionProjectionId(thread, turn.id),
+                  nativeSessionProjectionId(thread, item.id),
+                )),
                 status:
                   finished && item.status === "running"
                     ? nativeFailure
@@ -825,7 +838,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
               if (item.type === "assistant") {
                 const messageId = allocator.derive.messageFromProviderItem({
                   driver,
-                  nativeItemId: item.id,
+                  nativeItemId: nativeSessionProjectionId(thread, item.id),
                 });
                 const message: OrchestrationV2ConversationMessage = {
                   id: messageId,
@@ -862,7 +875,10 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
               yield* emit({ type: "turn_item.updated", driver, turnItem: projected });
               const nativePlan = nativeClaudePlan(item);
               if (nativePlan !== undefined) {
-                const nativeItemId = `${nativePlan.kind}:${item.id}`;
+                const nativeItemId = nativeSessionProjectionId(
+                  thread,
+                  `${nativePlan.kind}:${item.id}`,
+                );
                 const key = `${owner.threadId}:${nativeItemId}`;
                 const signature = encodeNativeInput(nativePlan);
                 const previous = plans.get(key);
@@ -928,7 +944,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                   ...common,
                   id: allocator.derive.turnItemFromProviderItem({ driver, nativeItemId }),
                   nodeId,
-                  ordinal: itemOrdinal(turn.id, nativeItemId),
+                  ordinal: itemOrdinal(nativeSessionProjectionId(thread, turn.id), nativeItemId),
                   status: "completed" as const,
                   completedAt: updatedAt,
                   planId,
@@ -1134,8 +1150,13 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
           const ownership = active.get(id);
           if (
             ownership?.nativeTurnId === undefined ||
-            allocator.derive.providerTurn({ driver, nativeTurnId: ownership.nativeTurnId }) !==
-              request.providerTurnId
+            allocator.derive.providerTurn({
+              driver,
+              nativeTurnId: nativeSessionProjectionId(
+                request.providerThread,
+                ownership.nativeTurnId,
+              ),
+            }) !== request.providerTurnId
           ) {
             return yield* unsupported(
               "This Claude turn is no longer active; no interrupt was sent.",
@@ -1219,10 +1240,71 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
           unsupported(
             "Claude native daemon does not expose conversation rollback. Use the attached CLI.",
           ),
-        forkThread: () =>
-          unsupported(
-            "Claude native daemon does not expose structured conversation fork. Use the attached CLI.",
-          ),
+        forkThread: Effect.fn("NativeClaudeAdapter.forkThread")(function* (request) {
+          if (request.providerTurnId !== undefined)
+            return yield* unsupported(
+              "Native Claude supports complete-session forks; selecting a historical turn is unavailable.",
+            );
+          const original = request.sourceProviderThread;
+          const sourceId = nativeId(original);
+          const inventory = yield* attempt(() => client.listSessions());
+          const sourceJob = inventory.find((job) => job.sessionId === sourceId);
+          if (
+            !sourceJob ||
+            (request.runtimePolicy?.cwd != null && request.runtimePolicy.cwd !== sourceJob.cwd)
+          )
+            return yield* unsupported(
+              "Native Claude forks currently retain the source working directory. Fork in the same directory.",
+            );
+          if (request.modelSelection !== undefined) {
+            const candidate = (yield* attempt(() => source.available())).find(
+              (candidate) => candidate.id === sourceId,
+            );
+            if (
+              request.modelSelection.instanceId !== options.instanceId ||
+              candidate?.model !== request.modelSelection.model
+            )
+              return yield* unsupported(
+                "Native Claude forks retain their source model. Select the same native model before forking.",
+              );
+          }
+          const history = yield* attempt(() => source.history(sourceId));
+          if (history.at(-1)?.status === "running")
+            return yield* unsupported(
+              "Wait for the source Claude turn to finish before forking its complete history.",
+            );
+          const job = yield* attempt(() =>
+            client.forkBackground({
+              sessionId: sourceId,
+              targetThreadId: request.targetThreadId,
+              cwd: sourceJob.cwd,
+              ...(options.observeNewSessions ? { observeModelActivity: true } : {}),
+            }),
+          );
+          const id = job.sessionId!;
+          const at = yield* DateTime.now;
+          newlyCreated.add(id);
+          // Copied native entry UUIDs are history, never newly arriving external turns.
+          observed.set(id, new Set(history.map((turn) => turn.id)));
+          return yield* register({
+            id: allocator.derive.providerThread({ driver, nativeThreadId: id }),
+            driver,
+            providerInstanceId: options.instanceId,
+            providerSessionId: input.providerSessionId,
+            appThreadId: request.targetThreadId,
+            ownerNodeId: request.ownerNodeId ?? null,
+            nativeThreadRef: { driver, nativeId: id, strength: "strong" },
+            nativeConversationHeadRef: null,
+            nativeMetadata: { claudeForkIdentityNamespace: id },
+            status: "idle",
+            firstRunOrdinal: null,
+            lastRunOrdinal: null,
+            handoffIds: [],
+            forkedFrom: { providerThreadId: original.id },
+            createdAt: at,
+            updatedAt: at,
+          });
+        }),
       };
       return runtime;
     }),

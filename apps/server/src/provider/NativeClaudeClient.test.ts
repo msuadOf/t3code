@@ -260,7 +260,10 @@ async function withLauncher(
   const binary = NodePath.join(directory, "fake-claude");
   await NodeFSP.writeFile(binary, `#!/bin/sh\n${script(directory)}`, { mode: 0o700 });
   try {
-    await test(new NativeClaudeClient({ binaryPath: binary }), directory);
+    await test(
+      new NativeClaudeClient({ binaryPath: binary, configDirectory: directory }),
+      directory,
+    );
   } finally {
     await NodeFSP.rm(directory, { recursive: true, force: true });
   }
@@ -805,3 +808,144 @@ it.each(["idle", "stopped"] as const)(
     );
   },
 );
+
+describe("Claude native conversation fork", () => {
+  const forked = {
+    ...session,
+    id: "fedcba98",
+    sessionId: "fedcba98-1234-1234-1234-123456789abc",
+    status: "idle",
+    pid: 73,
+  };
+  const source = { ...session, status: "idle", pid: 42 };
+  const withForkLauncher: typeof withLauncher = (script, test) =>
+    withLauncher(script, async (client, directory) => {
+      await NodeFSP.mkdir(NodePath.join(directory, "jobs", session.id!), { recursive: true });
+      await NodeFSP.writeFile(
+        NodePath.join(directory, "jobs", session.id!, "state.json"),
+        JSON.stringify({ sessionId: session.sessionId, daemonShort: session.id, respawnFlags: [] }),
+      );
+      await test(client, directory);
+    });
+
+  it("creates a distinct daemon-owned UUID using native fork without sending a prompt", async () => {
+    await withForkLauncher(
+      (directory) => `
+printf '%s\\n' "$*" >> '${directory}/calls'
+if [ "$1" = "agents" ]; then
+  if [ -f '${directory}/ready' ]; then printf '%s' '${JSON.stringify([source, { ...forked, cwd: directory }])}'; else printf '%s' '${JSON.stringify([source])}'; fi
+elif [ "$1" = "--bg" ]; then
+  [ "$#" = "6" ] && [ "$2" = "--resume" ] && [ "$3" = '${session.sessionId}' ] && [ "$4" = "--fork-session" ] || exit 41
+  read ignored && exit 42
+  touch '${directory}/ready'
+  printf 'backgrounded · fedcba98 (idle — send a prompt to start)\\n'
+else exit 43
+fi
+`,
+      async (client, directory) => {
+        expect(
+          await client.forkBackground({
+            sessionId: session.sessionId!,
+            targetThreadId: "fork-target",
+            cwd: directory,
+          }),
+        ).toEqual({ ...forked, cwd: directory });
+        const calls = await NodeFSP.readFile(NodePath.join(directory, "calls"), "utf8");
+        expect(calls).not.toContain("stop");
+        expect(calls).not.toContain("attach");
+      },
+    );
+  });
+
+  it("rejects invalid or busy source identities before launching a fork", async () => {
+    await withForkLauncher(
+      () => `
+[ "$1" = "agents" ] || exit 41
+printf '%s' '${JSON.stringify([{ ...source, status: "busy" }])}'
+`,
+      async (client, directory) => {
+        await expect(
+          client.forkBackground({
+            sessionId: "1234abcd",
+            targetThreadId: "fork-target",
+            cwd: directory,
+          }),
+        ).rejects.toThrow("canonical full");
+        await expect(
+          client.forkBackground({
+            sessionId: session.sessionId!,
+            targetThreadId: "fork-target",
+            cwd: directory,
+          }),
+        ).rejects.toThrow("idle");
+      },
+    );
+  });
+
+  it("never binds or stops the source when the launcher returns its original identity", async () => {
+    await withForkLauncher(
+      (directory) => `
+printf '%s\\n' "$*" >> '${directory}/calls'
+if [ "$1" = "agents" ]; then printf '%s' '${JSON.stringify([source])}'
+elif [ "$1" = "--bg" ]; then printf 'backgrounded · 1234abcd\\n'
+else exit 41
+fi
+`,
+      async (client, directory) => {
+        await expect(
+          client.forkBackground({
+            sessionId: session.sessionId!,
+            targetThreadId: "fork-target",
+            cwd: directory,
+          }),
+        ).rejects.toThrow("distinct");
+        expect(await NodeFSP.readFile(NodePath.join(directory, "calls"), "utf8")).not.toContain(
+          "stop",
+        );
+      },
+    );
+  });
+
+  it("prepares and binds an independent model observer only to the fork UUID", async () => {
+    await withForkLauncher(
+      (directory) => `
+if [ "$1" = "agents" ]; then
+  if [ -f '${directory}/ready' ]; then printf '%s' '${JSON.stringify([source, { ...forked, cwd: directory }])}'; else printf '%s' '${JSON.stringify([source])}'; fi
+elif [ "$1" = "--bg" ]; then
+  [ "$#" = "6" ] && [ "$5" = "--settings" ] && [ "$6" = '${directory}/independent-settings.json' ] || exit 41
+  touch '${directory}/ready'
+  printf 'backgrounded · fedcba98\\n'
+else exit 42
+fi
+`,
+      async (_client, directory) => {
+        const prepared = {
+          settingsPath: NodePath.join(directory, "independent-settings.json"),
+          observerStateDir: NodePath.join(directory, "observer"),
+          upstreamUrl: "http://localhost:9876",
+        };
+        await NodeFSP.writeFile(prepared.settingsPath, "{}", { mode: 0o600 });
+        const bindings: string[] = [];
+        const client = new NativeClaudeClient({
+          binaryPath: NodePath.join(directory, "fake-claude"),
+          configDirectory: directory,
+          modelActivity: {
+            prepare: async () => prepared,
+            isBound: async () => false,
+            bind: async (id, settings) => {
+              expect(settings).toEqual(prepared);
+              bindings.push(id);
+            },
+          },
+        });
+        await client.forkBackground({
+          sessionId: session.sessionId!,
+          targetThreadId: "fork-target",
+          cwd: directory,
+          observeModelActivity: true,
+        });
+        expect(bindings).toEqual([forked.sessionId]);
+      },
+    );
+  });
+});

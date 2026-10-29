@@ -1437,3 +1437,145 @@ it.effect(
       ).toBe(false);
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
 );
+
+it.effect(
+  "forks a complete idle native session with durable independent identity and rejects unsupported fork changes",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped();
+      const project = path.join(root, "projects", "workspace");
+      yield* fs.makeDirectory(project, { recursive: true });
+      yield* fs.writeFileString(
+        path.join(project, `${nativeId}.jsonl`),
+        [
+          { type: "user", uuid: "fork-seed-user", parentUuid: null, message: { content: "Seed" } },
+          {
+            type: "assistant",
+            uuid: "fork-seed-answer",
+            parentUuid: "fork-seed-user",
+            message: {
+              model: "claude-test",
+              content: [{ type: "text", text: "Native answer" }],
+              stop_reason: "end_turn",
+            },
+          },
+        ]
+          .map((entry) =>
+            JSON.stringify({
+              ...entry,
+              sessionId: nativeId,
+              cwd: "/work",
+              timestamp: "2026-10-29T00:00:00Z",
+            }),
+          )
+          .join("\n") + "\n",
+      );
+      const newId = "fedcba98-1234-1234-1234-123456789abc";
+      class ForkClient extends FixtureClient {
+        calls: Parameters<NativeClaudeClient["forkBackground"]>[0][] = [];
+        replies: string[] = [];
+        override async forkBackground(
+          request: Parameters<NativeClaudeClient["forkBackground"]>[0],
+        ) {
+          this.calls.push(request);
+          return { ...this.inventory[0]!, id: "fedcba98", sessionId: newId, pid: 73 };
+        }
+        override async listSessions() {
+          return this.calls.length
+            ? [
+                ...this.inventory,
+                { ...this.inventory[0]!, id: "fedcba98", sessionId: newId, pid: 73 },
+              ]
+            : this.inventory;
+        }
+        override async reply(_job: NativeClaudeSession, text: string) {
+          this.replies.push(text);
+        }
+      }
+      const client = new ForkClient("background");
+      const adapter = yield* makeNativeClaudeAdapter({
+        instanceId,
+        configDirectory: root,
+        binaryPath: "never-executed",
+        environment: {},
+        client,
+      });
+      const session = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("fork-runtime"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const now = DateTime.makeUnsafe(1);
+      const source: OrchestrationV2ProviderThread = {
+        id: ProviderThreadId.make("fork-source"),
+        driver: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: instanceId,
+        providerSessionId: session.providerSessionId,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        nativeThreadRef: {
+          driver: ProviderDriverKind.make("claudeAgent"),
+          nativeId,
+          strength: "strong",
+        },
+        nativeConversationHeadRef: null,
+        status: "idle",
+        firstRunOrdinal: null,
+        lastRunOrdinal: null,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const targetThreadId = ThreadId.make("fork-target");
+      const request = {
+        sourceProviderThread: source,
+        targetThreadId,
+        modelSelection,
+        runtimePolicy,
+      };
+      const fork = yield* session.forkThread(request);
+      expect(fork.nativeThreadRef?.nativeId).toBe(newId);
+      expect(fork.nativeMetadata).toEqual({ claudeForkIdentityNamespace: newId });
+      expect(fork.forkedFrom).toEqual({ providerThreadId: source.id });
+      expect(fork.appThreadId).toBe(targetThreadId);
+      expect(source.nativeMetadata).toBeUndefined();
+      expect(client.replies).toEqual([]);
+      expect(client.calls).toHaveLength(1);
+      const capabilities = yield* adapter.getCapabilities();
+      expect(capabilities.threads.canForkThread).toBe(true);
+      expect(capabilities.threads.canForkFromTurn).toBe(false);
+      for (const invalid of [
+        { ...request, providerTurnId: "unsupported-turn" as never },
+        { ...request, modelSelection: { ...modelSelection, model: "different-model" } },
+        { ...request, runtimePolicy: { ...runtimePolicy, cwd: "/other-worktree" } },
+      ])
+        expect(Exit.isFailure(yield* Effect.exit(session.forkThread(invalid)))).toBe(true);
+      expect(client.calls).toHaveLength(1);
+      // Native fork writes its copied JSONL lazily; the first explicit target prompt is still admitted.
+      yield* session.startTurn({
+        providerThread: fork,
+        threadId: targetThreadId,
+        modelSelection,
+        runtimePolicy,
+        runId: RunId.make("fork-run"),
+        runOrdinal: 1,
+        providerTurnOrdinal: 1,
+        attemptId: RunAttemptId.make("fork-attempt"),
+        rootNodeId: NodeId.make("fork-root"),
+        appThread: { ...fixtureAppThread(now, fork.id), id: targetThreadId },
+        message: {
+          createdBy: "user",
+          creationSource: "web",
+          messageId: MessageId.make("fork-input"),
+          text: "Independent input",
+          attachments: [],
+        },
+      });
+      expect(client.replies).toEqual(["Independent input"]);
+      expect(client.resumes).toEqual([newId]);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
+);

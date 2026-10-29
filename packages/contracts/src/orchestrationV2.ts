@@ -857,6 +857,8 @@ export const OrchestrationV2ProviderThreadNativeMetadata = Schema.Struct({
   updatedAt: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   itemIdentityVersion: Schema.optional(Schema.Literal(2)),
   forkHeadMessageId: Schema.optional(TrimmedNonEmptyString),
+  /** Explicit native fork identity domain; raw native references remain unchanged. */
+  claudeForkIdentityNamespace: Schema.optional(TrimmedNonEmptyString),
 });
 export type OrchestrationV2ProviderThreadNativeMetadata =
   typeof OrchestrationV2ProviderThreadNativeMetadata.Type;

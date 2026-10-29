@@ -88,6 +88,17 @@ The current native daemon integration has these limits:
 - Local Windows native-daemon hosting has not been implemented. Clients on Windows
   can connect to a supported remote host.
 
+## Fork a shared conversation
+
+An idle Claude conversation can be forked with its complete saved history. The new
+conversation gets its own native UUID and worker; CLI clients can open either one
+independently. T3 keeps copied native message IDs separate from the source thread.
+
+Forking from a selected historical turn, changing the model or workspace during the
+fork, and unverified custom `--settings` overrides are not supported. An observed
+source requires independently configured observation for the new worker. Wait for
+active work to finish before forking.
+
 ## Local model activity
 
 For an API-key connection to the Anthropic Messages API or a compatible gateway,

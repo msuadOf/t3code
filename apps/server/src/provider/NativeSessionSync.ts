@@ -260,6 +260,11 @@ const make = Effect.gen(function* () {
         for (const native of sessions) {
           yield* Effect.gen(function* () {
             const owner = owners.get(native.id);
+            if (
+              native.requiresExistingOwner !== undefined &&
+              owner !== native.requiresExistingOwner.threadId
+            )
+              return;
             const visible = isWithinSharedRoot(path, native.cwd, root);
             if (!visible && owner === undefined) return;
             const target = yield* ensureThread(

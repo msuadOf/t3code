@@ -1,3 +1,4 @@
+import { nativeSessionProjectionId } from "@t3tools/provider-core/server/nativeSessions";
 import {
   CommandId,
   type ThreadId,
@@ -72,7 +73,7 @@ const make = Effect.gen(function* () {
         if (providerThread === undefined) return undefined;
         const derivedTurnId = ids.derive.providerTurn({
           driver: input.session.driver,
-          nativeTurnId: input.nativeTurnId,
+          nativeTurnId: nativeSessionProjectionId(providerThread, input.nativeTurnId),
         });
         const existingTurn = projection.providerTurns.find(
           (turn) =>

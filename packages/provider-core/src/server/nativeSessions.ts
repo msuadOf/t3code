@@ -1,5 +1,18 @@
 import type * as Effect from "effect/Effect";
 import type { ProviderDriverError } from "./errors.ts";
+import type { OrchestrationV2ProviderThread } from "@t3tools/contracts";
+
+/** Native Claude forks preserve message/tool UUIDs; only explicit fork targets change T3 identity. */
+export const nativeSessionProjectionId = (
+  thread: Pick<OrchestrationV2ProviderThread, "driver" | "nativeMetadata">,
+  nativeId: string,
+): string => {
+  const namespace =
+    thread.driver === "claudeAgent"
+      ? thread.nativeMetadata?.claudeForkIdentityNamespace
+      : undefined;
+  return namespace === undefined ? nativeId : `claude-fork:${namespace}:${nativeId}`;
+};
 
 /** Native timestamps are Unix milliseconds throughout this boundary. */
 export interface NativeSession {
@@ -13,6 +26,8 @@ export interface NativeSession {
   readonly active: boolean;
   /** The adapter can observe active work without starting another native writer. */
   readonly canObserveActive?: boolean;
+  /** A durable native fork launch belongs only to this preselected T3 thread. */
+  readonly requiresExistingOwner?: { readonly threadId: string };
 }
 
 export interface NativeHistoryItem {

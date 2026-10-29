@@ -21,9 +21,14 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as EventSink from "./EventSink.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 
-it.effect.each(["codex", "claudeAgent", "opencode"] as const)(
+it.effect.each([
+  { provider: "codex", namespace: undefined },
+  { provider: "claudeAgent", namespace: undefined },
+  { provider: "opencode", namespace: undefined },
+  { provider: "claudeAgent", namespace: "fork-native-uuid" },
+] as const)(
   "%s: persists an external run before observing it and reuses its identity on duplicate notifications",
-  (provider) =>
+  ({ provider, namespace }) =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;
       const threadId = ThreadId.make("thread:external-adoption");
@@ -44,6 +49,8 @@ it.effect.each(["codex", "claudeAgent", "opencode"] as const)(
             driver,
             providerInstanceId: instanceId,
             nativeThreadRef: { nativeId: "native-thread" },
+            nativeMetadata:
+              namespace === undefined ? null : { claudeForkIdentityNamespace: namespace },
           },
         ],
         runs: [],
@@ -138,6 +145,15 @@ it.effect.each(["codex", "claudeAgent", "opencode"] as const)(
         assert.equal(first?.providerThread.id, providerThreadId);
         assert.equal(first?.message.creationSource, "provider");
         assert.equal(observed.length, 1);
+        const ids = yield* IdAllocator.IdAllocatorV2.pipe(Effect.provide(IdAllocator.layer));
+        assert.equal(
+          projection.attempts[0]?.providerTurnId,
+          ids.derive.providerTurn({
+            driver,
+            nativeTurnId:
+              namespace === undefined ? "cli-turn" : `claude-fork:${namespace}:cli-turn`,
+          }),
+        );
         assert.equal(writes.filter((event) => event.type === "run.created").length, 1);
         assert.isUndefined(yield* runs.adopt({ ...input, nativeThreadId: "unrelated-thread" }));
         assert.isUndefined(

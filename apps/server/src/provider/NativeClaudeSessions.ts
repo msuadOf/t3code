@@ -1,3 +1,4 @@
+import { nativeClaudeForkOwner } from "./NativeClaudeForks.ts";
 // @effect-diagnostics nodeBuiltinImport:off -- read-only native JSONL reader interoperates with the socket client without changing global process environment.
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
@@ -375,6 +376,20 @@ export class NativeClaudeSessions {
         historyAvailable: false,
         sharingState: "shared",
       });
+    }
+    for (const [id, candidate] of sessions) {
+      const job = activeById.get(id);
+      const state = job === undefined ? undefined : await this.localJob(job);
+      if (state === undefined && onlyShared) {
+        sessions.delete(id);
+        continue;
+      }
+      const forkOwner = await nativeClaudeForkOwner(this.configDirectory, state?.respawnFlags, id);
+      if (forkOwner)
+        sessions.set(id, {
+          ...candidate,
+          requiresExistingOwner: { threadId: forkOwner.targetThreadId },
+        });
     }
     return [...sessions.values()];
   }

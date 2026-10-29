@@ -7,6 +7,12 @@ import * as NodeNet from "node:net";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
+import {
+  associateNativeClaudeFork,
+  nativeClaudeForkOwner,
+  prepareNativeClaudeFork,
+} from "./NativeClaudeForks.ts";
+
 const execFileAsync = NodeUtil.promisify(NodeChildProcess.execFile);
 const MAX_FRAME_BYTES = 1024 * 1024;
 const SHORT_ID = /^[a-f0-9]{8}$/;
@@ -645,6 +651,133 @@ export class NativeClaudeClient {
     }
     const ready = await this.readyBackground(created);
     if (prepared && ready.sessionId) await activity!.bind(ready.sessionId, prepared);
+    return ready;
+  }
+
+  /** Native fork owns a new UUID; unlike resume it must never reclaim the source worker. */
+  async forkBackground(input: {
+    readonly sessionId: string;
+    readonly targetThreadId: string;
+    readonly cwd: string;
+    readonly observeModelActivity?: boolean;
+  }): Promise<NativeClaudeSession> {
+    if (this.options.platform === "win32")
+      throw new NativeClaudeError(
+        "EPLATFORM",
+        "Native Claude forks require a macOS or Linux host.",
+      );
+    if (!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(input.sessionId))
+      throw new NativeClaudeError(
+        "ESESSION",
+        "A canonical full Claude session UUID is required to fork.",
+      );
+    const inventory = await this.listSessions();
+    const source = inventory.find((job) => job.sessionId === input.sessionId);
+    if (
+      source === undefined ||
+      source.status !== "idle" ||
+      source.state === "stopped" ||
+      source.state === "failed"
+    )
+      throw new NativeClaudeError(
+        "EFORKBUSY",
+        "Open an idle native Claude worker before forking its complete history.",
+      );
+    requireNativeClaudeBackgroundId(source);
+    const activity = this.options.modelActivity;
+    if (input.observeModelActivity && !activity)
+      throw new NativeClaudeError(
+        "EOBSERVERUNAVAILABLE",
+        "Model activity observation is not configured for this Claude provider.",
+      );
+    const config = this.options.configDirectory ?? this.options.environment?.CLAUDE_CONFIG_DIR;
+    if (!config)
+      throw new NativeClaudeError(
+        "ECONFIG",
+        "Claude fork requires an explicit configuration directory.",
+      );
+    const saved: unknown = JSON.parse(
+      await NodeFSP.readFile(NodePath.join(config, "jobs", source.id!, "state.json"), "utf8"),
+    );
+    if (
+      !isObject(saved) ||
+      saved.sessionId !== input.sessionId ||
+      saved.daemonShort !== source.id ||
+      !Array.isArray(saved.respawnFlags) ||
+      !saved.respawnFlags.every((flag: unknown) => typeof flag === "string")
+    )
+      throw new NativeClaudeError(
+        "EFORKCONFIG",
+        "Claude source launch settings could not be verified; no fork was launched.",
+      );
+    const flags = saved.respawnFlags as string[];
+    const sourceObserver = (await activity?.hasBinding?.(input.sessionId)) ?? false;
+    if (sourceObserver && !input.observeModelActivity)
+      throw new NativeClaudeError(
+        "EFORKCONFIG",
+        "Enable independent model activity for the new fork before forking an observed Claude source.",
+      );
+    const settingsCount = flags.filter(
+      (flag) => flag === "--settings" || flag.startsWith("--settings="),
+    ).length;
+    if (
+      settingsCount > 0 &&
+      (settingsCount !== 1 || (!(await nativeClaudeForkOwner(config, flags)) && !sourceObserver))
+    )
+      throw new NativeClaudeError(
+        "EFORKCONFIG",
+        "This Claude source uses custom launch settings. Fork it in the native CLI to preserve its configuration.",
+      );
+    const retainedFlags = flags.filter(
+      (flag, index) => flag !== "--settings" && flags[index - 1] !== "--settings",
+    );
+    // Explicit settings belong only to this fork; source model/permission flags remain native launch flags.
+    const prepared = input.observeModelActivity ? await activity!.prepare() : undefined;
+    const settingsPath = await prepareNativeClaudeFork(
+      config,
+      { sourceSessionId: input.sessionId, targetThreadId: input.targetThreadId },
+      prepared?.settingsPath,
+    );
+    const output = await this.runCLI(
+      [
+        "--bg",
+        "--resume",
+        input.sessionId,
+        "--fork-session",
+        ...retainedFlags,
+        "--settings",
+        settingsPath,
+      ],
+      input.cwd,
+    );
+    const short = /backgrounded\s*·\s*([a-f0-9]{8})\b/.exec(output.stdout)?.[1];
+    const created =
+      short === undefined
+        ? undefined
+        : (await this.listSessions()).find((job) => job.id === short && job.kind === "background");
+    if (
+      !created?.sessionId ||
+      created.sessionId === input.sessionId ||
+      inventory.some((job) => job.id === short || job.sessionId === created.sessionId)
+    )
+      throw new NativeClaudeError(
+        "EFORKIDENTITY",
+        "Claude did not register a distinct new native fork. No prompt or stop was sent.",
+      );
+    requireNativeClaudeBackgroundId(created);
+    await associateNativeClaudeFork(config, settingsPath, created.sessionId);
+    const ready = await this.readyBackground(created);
+    if (
+      ready.status !== "idle" ||
+      ready.state === "failed" ||
+      ready.state === "stopped" ||
+      ready.cwd !== input.cwd
+    )
+      throw new NativeClaudeError(
+        "EFORKSETUP",
+        "Complete the new fork's setup in claude attach before using it.",
+      );
+    if (prepared) await activity!.bind(ready.sessionId!, prepared);
     return ready;
   }
 

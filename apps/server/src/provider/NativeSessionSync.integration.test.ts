@@ -6,7 +6,8 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type Project,
-  type ThreadId,
+  ThreadId,
+  ProviderThreadId,
 } from "@t3tools/contracts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import type {
@@ -870,5 +871,100 @@ it.effect(
         );
         assert.lengthOf(calls, 2);
       }).pipe(Effect.provide(context.layer));
+    }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "waits for a fork's intended durable owner before importing copied native identities",
+  () =>
+    Effect.gen(function* () {
+      const targetId = ThreadId.make("fork-selected-target");
+      const sessions = [
+        native("fork-source"),
+        { ...native("fork-child"), requiresExistingOwner: { threadId: targetId } },
+      ];
+      const reads: string[] = [];
+      const f = fixture([
+        provider(claude, claudeDriver, {
+          list: Effect.succeed(sessions),
+          history: (id) =>
+            Effect.sync(() => {
+              reads.push(id);
+              return history("copied-uuid", "claude");
+            }),
+        }),
+      ]);
+      const context = yield* Layer.build(f.layer);
+      yield* Effect.gen(function* () {
+        const sync = yield* NativeSessionSync.NativeSessionSync;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const sourceId = ids.derive.threadFromProviderThread({
+          driver: claudeDriver,
+          providerInstanceId: claude,
+          nativeThreadId: "fork-source",
+        });
+        yield* sync.sync;
+        yield* sync.sync;
+        assert.deepEqual(reads, ["fork-source"]);
+        assert.isNull(yield* store.getThreadShell(targetId));
+        const source = yield* store.getThreadProjection(sourceId);
+        const providerThreadId = ProviderThreadId.make("fork-target-provider");
+        const at = yield* DateTime.now;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("fork-target-created"),
+              type: "thread.created",
+              threadId: targetId,
+              occurredAt: at,
+              payload: { ...source.thread, id: targetId, activeProviderThreadId: providerThreadId },
+            },
+            {
+              id: EventId.make("fork-provider-created"),
+              type: "provider-thread.updated",
+              threadId: targetId,
+              occurredAt: at,
+              payload: {
+                ...source.providerThreads[0]!,
+                id: providerThreadId,
+                appThreadId: targetId,
+                nativeThreadRef: {
+                  driver: claudeDriver,
+                  nativeId: "fork-child",
+                  strength: "strong",
+                },
+                nativeMetadata: { claudeForkIdentityNamespace: "fork-child" },
+                forkedFrom: { providerThreadId: source.providerThreads[0]!.id },
+              },
+            },
+          ],
+        });
+        yield* sync.sync;
+        const target = yield* store.getThreadProjection(targetId);
+        const unchanged = yield* store.getThreadProjection(sourceId);
+        assert.isTrue(reads.includes("fork-child"));
+        assert.equal(target.messages.length, source.messages.length);
+        assert.isFalse(
+          target.messages.some((message) =>
+            source.messages.some((original) => original.id === message.id),
+          ),
+        );
+        assert.deepEqual(unchanged.messages, source.messages);
+        assert.equal(
+          target.providerThreads[0]?.nativeMetadata?.claudeForkIdentityNamespace,
+          "fork-child",
+        );
+        // A marker for another target cannot be satisfied by an unrelated existing owner.
+        sessions[1] = {
+          ...sessions[1]!,
+          updatedAt: 30000,
+          requiresExistingOwner: { threadId: "wrong-target" },
+        };
+        const before = reads.length;
+        yield* sync.sync;
+        assert.equal(reads.length, before);
+      }).pipe(Effect.provide(context));
     }).pipe(Effect.scoped),
 );
