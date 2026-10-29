@@ -173,6 +173,22 @@ const takeFrame = (frames: Queue.Queue<OrchestrationV2CommandOutputFrame | "ende
 const layer = it.layer(layerTest);
 
 layer("CommandOutputHub", (it) => {
+  it.effect("replaces an old observer tail before appending recovered native output", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const hub = yield* CommandOutputHub.CommandOutputHub;
+        const threadId = yield* seedThread;
+        yield* writeCommandItem(threadId, { status: "running" });
+        yield* hub.append({ threadId, itemId: ITEM_ID, chunk: "FIRST\n" });
+        yield* hub.append({ threadId, itemId: ITEM_ID, chunk: "FIRST\nSECOND\n", replace: true });
+        const frames = yield* subscribeFrames(threadId);
+        const snapshot = yield* takeFrame(frames);
+        assert.equal(snapshot.text, "FIRST\nSECOND\n");
+        assert.isFalse(snapshot.truncated);
+      }),
+    ),
+  );
+
   it.effect("preserves native truncation in a saved command for late viewers", () =>
     Effect.scoped(
       Effect.gen(function* () {

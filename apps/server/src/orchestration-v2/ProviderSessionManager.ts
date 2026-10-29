@@ -2510,6 +2510,18 @@ export const layerWithOptions = (
                   ...(Option.isNone(externalNativeRuns)
                     ? {}
                     : {
+                        recoverNativeBackgroundTurn: Effect.fn(
+                          "ProviderSessionManager.recoverNativeBackgroundTurn",
+                        )(function* (
+                          background: ProviderAdapter.ProviderAdapterV2NativeBackgroundTurnInput,
+                        ) {
+                          const entry = (yield* Ref.get(sessions)).get(key);
+                          if (entry === undefined) return undefined;
+                          return yield* externalNativeRuns.value.recoverBackground({
+                            ...background,
+                            session: entry.exposedRuntime,
+                          });
+                        }),
                         onExternalTurn: Effect.fn(
                           "ProviderSessionManager.attachExternalNativeTurn",
                         )(function* (turn: ProviderAdapter.ProviderAdapterV2ExternalTurnInput) {

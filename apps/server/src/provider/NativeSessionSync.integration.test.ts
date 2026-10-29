@@ -1424,3 +1424,100 @@ it.effect.each(["foreign-credential", "active-run"] as const)(
       }).pipe(Effect.provide(context.layer));
     }).pipe(Effect.scoped, Effect.provide(McpProviderSessions.layer)),
 );
+
+it.effect.each(["native-pending", "saved-pending"] as const)(
+  "reattaches idle Claude background work from %s without reopening the parent run",
+  (mode) =>
+    Effect.gen(function* () {
+      let session: NativeSession = { ...native("background-recovery"), canObserveActive: true };
+      let historyReads = 0;
+      const f = fixture([
+        provider(claude, claudeDriver, {
+          list: Effect.sync(() => [session]),
+          history: () =>
+            Effect.sync(() => {
+              historyReads++;
+              return history(session.id, "claude");
+            }),
+        }),
+      ]);
+      const context = yield* Layer.build(f.layer);
+      yield* Effect.gen(function* () {
+        const sync = yield* NativeSessionSync.NativeSessionSync;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const id = ids.derive.threadFromProviderThread({
+          driver: claudeDriver,
+          providerInstanceId: claude,
+          nativeThreadId: session.id,
+        });
+        yield* sync.sync;
+        assert.deepEqual(f.resumed, []);
+        const initialHistoryReads = historyReads;
+        yield* sync.sync;
+        assert.equal(historyReads, initialHistoryReads);
+        const records = yield* store.getThreadRecords(id, [
+          "runs",
+          "providerThreads",
+          "providerTurns",
+        ]);
+        const run = records.runs[0]!;
+        const thread = records.providerThreads[0]!;
+        assert.equal(run.status, "completed");
+        if (mode === "native-pending")
+          session = {
+            ...session,
+            hasPendingBackgroundWork: true,
+            updatedAt: session.updatedAt + 1,
+          };
+        else {
+          const now = yield* DateTime.now;
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("saved-background-command"),
+                type: "turn-item.updated",
+                threadId: id,
+                occurredAt: now,
+                payload: {
+                  id: ids.derive.turnItemFromProviderItem({
+                    driver: claudeDriver,
+                    nativeItemId: `background-command:${session.id}:bash:task`,
+                  }),
+                  type: "command_execution",
+                  input: "native command",
+                  status: "running",
+                  title: "Background command",
+                  threadId: id,
+                  runId: run.id,
+                  nodeId: run.rootNodeId,
+                  providerThreadId: thread.id,
+                  providerTurnId: records.providerTurns[0]!.id,
+                  nativeItemRef: {
+                    driver: claudeDriver,
+                    nativeId: `background-command:${session.id}:bash:task`,
+                    strength: "strong",
+                  },
+                  parentItemId: ids.derive.turnItemFromProviderItem({
+                    driver: claudeDriver,
+                    nativeItemId: "bash",
+                  }),
+                  ordinal: 5,
+                  startedAt: now,
+                  completedAt: null,
+                  updatedAt: now,
+                },
+              },
+            ],
+          });
+          // Native metadata is unchanged: only the saved child reveals lost observation.
+        }
+        yield* sync.sync;
+        assert.deepEqual(f.resumed, [{ instanceId: claude, nativeId: session.id }]);
+        const restored = yield* store.getThreadRecords(id, ["runs"]);
+        assert.equal(restored.runs[0]!.status, "completed");
+        assert.equal(restored.runs[0]!.id, run.id);
+      }).pipe(Effect.provide(context));
+    }).pipe(Effect.scoped),
+);

@@ -700,3 +700,80 @@ it.effect("keeps background command ownership through native system bridge recor
     ]);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it.effect(
+  "discovers pending native background work without misreporting an idle model as busy",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped();
+      const sessionId = "11111111-2222-4333-8444-555555555555";
+      const output = `/private/tmp/claude-501/project/${sessionId}/tasks/bg.output`;
+      const directory = path.join(root, "projects", "project");
+      yield* fs.makeDirectory(directory, { recursive: true });
+      const entries = [
+        { type: "user", uuid: "user", parentUuid: null, message: { content: "run" } },
+        {
+          type: "assistant",
+          uuid: "call",
+          parentUuid: "user",
+          message: {
+            content: [
+              { type: "tool_use", id: "bash", name: "Bash", input: { command: "echo progress" } },
+            ],
+            stop_reason: "tool_use",
+          },
+        },
+        {
+          type: "user",
+          uuid: "receipt",
+          parentUuid: "call",
+          toolUseResult: { backgroundTaskId: "bg" },
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "bash",
+                content: `Command running in background with ID: bg. Output is being written to: ${output}.`,
+              },
+            ],
+          },
+        },
+        {
+          type: "assistant",
+          uuid: "model-done",
+          parentUuid: "receipt",
+          message: { content: "done", stop_reason: "end_turn" },
+        },
+      ];
+      yield* fs.writeFileString(
+        path.join(directory, `${sessionId}.jsonl`),
+        entries.map((entry) => JSON.stringify({ ...entry, sessionId, cwd: "/work" })).join("\n") +
+          "\n",
+      );
+      class IdleWorker extends NativeClaudeClient {
+        override async listSessions(): Promise<readonly NativeClaudeSession[]> {
+          return [
+            {
+              sessionId,
+              id: "1234abcd",
+              kind: "background",
+              cwd: "/work",
+              status: "idle",
+              state: "done",
+              startedAt: 1,
+            },
+          ];
+        }
+      }
+      const source = new NativeClaudeSessions(root, new IdleWorker());
+      const candidate = (yield* Effect.promise(() => source.available()))[0];
+      expect(candidate).toMatchObject({
+        id: sessionId,
+        active: false,
+        hasPendingBackgroundWork: true,
+        canObserveActive: true,
+      });
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);

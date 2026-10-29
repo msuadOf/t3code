@@ -152,6 +152,7 @@ const layerExternalNativeRunsProvided = ExternalNativeRuns.layer.pipe(
       layerEventSinkProvided,
       IdAllocator.layer,
       layerRunExecutionServiceProvided,
+      layerProviderEventIngestorProvided,
     ),
   ),
 );

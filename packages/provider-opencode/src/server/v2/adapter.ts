@@ -1105,7 +1105,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
               limit: 65536,
             })
             .pipe(Effect.map((response) => response.data)),
-        onChunk: (chunk, truncated) =>
+        onChunk: (chunk, truncated, replace) =>
           Effect.suspend(() =>
             state.active !== turn || turn.tools.get(id) !== tool || tool.shell !== shell
               ? Effect.void
@@ -1119,6 +1119,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                   }),
                   chunk,
                   ...(truncated ? { truncated: true } : {}),
+                  ...(replace ? { replace: true } : {}),
                 }),
           ),
       }).pipe(Effect.forkIn(sessionScope));

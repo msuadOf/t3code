@@ -16,6 +16,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ExternalNativeRuns from "./ExternalNativeRuns.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as EventSink from "./EventSink.ts";
@@ -71,6 +72,9 @@ it.effect.each([
         Layer.provide(
           Layer.mergeAll(
             IdAllocator.layer,
+            Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+              ingestNormalized: () => Effect.succeed([]),
+            }),
             Layer.mock(ProjectionStore.ProjectionStoreV2)({
               getThreadProjection: () => Effect.sync(() => projection),
             }),

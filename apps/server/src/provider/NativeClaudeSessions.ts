@@ -392,6 +392,12 @@ export class NativeClaudeSessions {
             ? "shared"
             : "history",
         canObserveActive: activeById.has(id),
+        ...(activeById.has(id) &&
+        this.parsedBackgroundCommands(id, entries, history).some(
+          (command) => command.status === "running",
+        )
+          ? { hasPendingBackgroundWork: true }
+          : {}),
         active: (() => {
           const live = activeById.get(id);
           return live !== undefined && (live.status === "busy" || live.status === "waiting");
@@ -481,21 +487,27 @@ export class NativeClaudeSessions {
     throw new Error("Claude session transcript was not found.");
   }
 
+  private parsedBackgroundCommands(
+    sessionId: string,
+    source: readonly Entry[],
+    history?: readonly NativeHistoryTurn[],
+  ) {
+    const cached = this.commandCache.get(source);
+    if (cached) return cached;
+    const commands = nativeClaudeBackgroundCommands(
+      sessionId,
+      history ?? nativeClaudeHistory(source),
+      conversationBranch(source),
+    );
+    this.commandCache.set(source, commands);
+    return commands;
+  }
+
   async backgroundCommands(sessionId: string) {
     if (!UUID.test(sessionId)) throw new Error("Invalid Claude session ID.");
     for (const file of await this.files()) {
       if (NodePath.basename(file, ".jsonl") !== sessionId) continue;
-      const source = (await this.transcript(file)).entries;
-      const cached = this.commandCache.get(source);
-      if (cached) return cached;
-      const entries = conversationBranch(source);
-      const commands = nativeClaudeBackgroundCommands(
-        sessionId,
-        nativeClaudeHistory(source),
-        entries,
-      );
-      this.commandCache.set(source, commands);
-      return commands;
+      return this.parsedBackgroundCommands(sessionId, (await this.transcript(file)).entries);
     }
     return [];
   }

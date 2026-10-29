@@ -18,7 +18,10 @@ import {
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import type { NativeSession } from "@t3tools/provider-core/server/nativeSessions";
+import {
+  nativeSessionProjectionId,
+  type NativeSession,
+} from "@t3tools/provider-core/server/nativeSessions";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -210,7 +213,14 @@ const make = Effect.gen(function* () {
   const sync = Effect.gen(function* () {
     scan += 1;
     const settings = yield* settingsService.getSettings;
-    for (const instance of yield* registry.listInstances) {
+    const instances = yield* registry.listInstances;
+    // Lost native observers leave active children even when the native summary is unchanged.
+    const recoveryThreadIds = new Set(
+      instances.some((instance) => instance.enabled && instance.nativeSessions !== undefined)
+        ? yield* store.getRecoveryThreadIds("runtime")
+        : [],
+    );
+    for (const instance of instances) {
       const source = instance.nativeSessions;
       if (!instance.enabled || source === undefined) continue;
       yield* Effect.gen(function* () {
@@ -388,7 +398,13 @@ const make = Effect.gen(function* () {
             // Active sessions need live reconciliation. Periodic full refreshes
             // cover providers whose summary timestamps do not change per item.
             let recoverRunningRun = false;
-            if (native.active || changed || scan % 20 === 0) {
+            if (
+              native.active ||
+              native.hasPendingBackgroundWork ||
+              recoveryThreadIds.has(target.appThread.id) ||
+              changed ||
+              scan % 20 === 0
+            ) {
               const turns = yield* source.history(native.id);
               yield* externalRuns.reconcileSnapshot({
                 driver: instance.driverKind,
@@ -409,10 +425,25 @@ const make = Effect.gen(function* () {
               ]);
               recoverRunningRun =
                 (instance.driverKind === "opencode" || instance.driverKind === "claudeAgent") &&
-                existing.runs.some(
+                (existing.runs.some(
                   (run) =>
                     run.providerThreadId === target.providerThread.id && run.status === "running",
-                );
+                ) ||
+                  existing.turnItems.some(
+                    (item) =>
+                      item.providerThreadId === target.providerThread.id &&
+                      item.type === "command_execution" &&
+                      item.parentItemId !== null &&
+                      item.nativeItemRef?.driver === instance.driverKind &&
+                      item.nativeItemRef.nativeId?.startsWith(
+                        nativeSessionProjectionId(
+                          target.providerThread,
+                          `background-command:${native.id}:`,
+                        ),
+                      ) &&
+                      (item.status === "running" || item.status === "waiting"),
+                  ));
+
               const events = NativeSessionHistory.mapHistory(
                 {
                   driver: instance.driverKind,
@@ -433,7 +464,7 @@ const make = Effect.gen(function* () {
             }
             // Only providers that can attach the existing worker may observe live work.
             if (
-              (native.active || recoverRunningRun) &&
+              (native.active || native.hasPendingBackgroundWork || recoverRunningRun) &&
               (instance.driverKind === "opencode" || native.canObserveActive === true)
             ) {
               const runtime = yield* manager.open({

@@ -31,6 +31,7 @@ export const makeNativeClaudeBackgroundOutput = Effect.fn("NativeClaudeBackgroun
       output: string | undefined;
       truncated: boolean;
       unavailable: boolean;
+      firstSample: boolean;
     };
     const bindings = new Map<string, Binding>();
     const finished = new Set<string>();
@@ -75,7 +76,7 @@ export const makeNativeClaudeBackgroundOutput = Effect.fn("NativeClaudeBackgroun
           const sourceGap = page.truncated && !binding.truncated;
           binding.output = page.output;
           binding.truncated ||= page.truncated;
-          if (page.chunk.length > 0 || sourceGap)
+          if (page.chunk.length > 0 || sourceGap || binding.firstSample)
             yield* input.emit({
               type: "command_output.delta",
               driver,
@@ -83,7 +84,9 @@ export const makeNativeClaudeBackgroundOutput = Effect.fn("NativeClaudeBackgroun
               itemId: binding.item.id,
               chunk: page.chunk,
               ...(sourceGap ? { truncated: true } : {}),
+              ...(binding.firstSample ? { replace: true } : {}),
             });
+          binding.firstSample = false;
           if (page.hasMore) return true;
         } else {
           binding.unavailable = true;
@@ -135,6 +138,10 @@ export const makeNativeClaudeBackgroundOutput = Effect.fn("NativeClaudeBackgroun
           if (binding.sessionId === sessionId) bindings.delete(key);
         for (const key of finished) if (key.startsWith(`${sessionId}:`)) finished.delete(key);
       },
+      hasObserved(sessionId: string, command: NativeClaudeBackgroundCommand) {
+        const key = keyOf(sessionId, command);
+        return bindings.has(key) || finished.has(key);
+      },
       hasPending(sessionId: string) {
         return [...bindings.values()].some((binding) => binding.sessionId === sessionId);
       },
@@ -159,6 +166,7 @@ export const makeNativeClaudeBackgroundOutput = Effect.fn("NativeClaudeBackgroun
           output: undefined,
           truncated: false,
           unavailable: false,
+          firstSample: true,
           lock: yield* Semaphore.make(1),
           reader: new NativeClaudeCommandOutput({
             sessionId,

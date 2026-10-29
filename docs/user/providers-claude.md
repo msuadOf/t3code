@@ -73,7 +73,9 @@ The current native daemon integration has these limits:
 - Native background Bash commands with an identifiable output receipt show a live
   command output tail. Their task status comes from Claude's matching task
   notification, independently of the model reply. Earlier output may be omitted
-  when joining a long-running command. Foreground Bash output is shown when Claude
+  when joining a long-running command. Reconnecting restores pending background
+  work to its original records, including completion that happened while T3 was
+  offline, without reopening the parent reply. Foreground Bash output is shown when Claude
   saves its result; its internal live progress is not exposed by this connection.
 - Native `TodoWrite` results appear as structured task lists, and explicit
   `ExitPlanMode` plan fields appear as proposed plans. A proposal is not an approval.

@@ -25,6 +25,7 @@ export interface NativeSession {
   readonly updatedAt: number;
   readonly archived: boolean;
   readonly active: boolean;
+  readonly hasPendingBackgroundWork?: boolean;
   /** The adapter can observe active work without starting another native writer. */
   readonly canObserveActive?: boolean;
   /** A durable native fork launch belongs only to this preselected T3 thread. */

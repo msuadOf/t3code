@@ -51,6 +51,7 @@ import {
   CLAUDE_MCP_SESSION_METADATA_KEY,
   type PreparedClaudeMcp,
 } from "./NativeClaudeMcpBindings.ts";
+import type { NativeClaudeBackgroundCommand } from "./NativeClaudeBackgroundCommands.ts";
 import { makeNativeClaudeBackgroundOutput } from "./NativeClaudeBackgroundOutput.ts";
 import { NativeClaudeSessions } from "./NativeClaudeSessions.ts";
 import {
@@ -312,6 +313,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         mcpGenerations.set(job.sessionId, generation);
       });
       const observed = new Map<string, Set<string>>();
+      const recoverBackgroundOnRegister = new Set<string>();
       const active = new Map<
         string,
         {
@@ -653,9 +655,15 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                 Effect.catch(() => Effect.succeed([])),
               )
             : [];
+          let commandsAvailable = historyAvailable;
           const commands = historyAvailable
             ? yield* attempt(() => source.backgroundCommands(id)).pipe(
-                Effect.catch(() => Effect.succeed([])),
+                Effect.catch(() =>
+                  Effect.sync(() => {
+                    commandsAvailable = false;
+                    return [];
+                  }),
+                ),
               )
             : [];
           backgroundOutput.update(id, commands);
@@ -1180,6 +1188,51 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
               active.delete(id);
             }
           }
+          if (input.recoverNativeBackgroundTurn && thread.appThreadId && commandsAvailable) {
+            const recoverable = new Map<string, NativeClaudeBackgroundCommand[]>();
+            for (const command of commands) {
+              if (
+                backgroundOutput.hasObserved(id, command) ||
+                (command.status !== "running" && !recoverBackgroundOnRegister.has(id))
+              )
+                continue;
+              const group = recoverable.get(command.turnId) ?? [];
+              group.push(command);
+              recoverable.set(command.turnId, group);
+            }
+            for (const [turnId, tasks] of recoverable) {
+              const restored:
+                | ProviderAdapter.ProviderAdapterV2NativeBackgroundTurnOwner
+                | undefined = yield* input.recoverNativeBackgroundTurn({
+                threadId: thread.appThreadId,
+                nativeThreadId: id,
+                nativeTurnId: turnId,
+                tasks: tasks.map((command) => ({
+                  nativeToolId: command.toolId,
+                  nativeTaskId: command.taskId,
+                  status: command.status,
+                })),
+              });
+              if (
+                !restored ||
+                restored.turn.threadId !== thread.appThreadId ||
+                restored.turn.providerThread.id !== thread.id ||
+                restored.turn.providerThread.nativeThreadRef?.nativeId !== id
+              )
+                continue;
+              const providerTurnId = restored.providerTurnId;
+              for (const command of tasks) {
+                if (
+                  restored.tasks.some(
+                    (task) =>
+                      task.nativeToolId === command.toolId && task.nativeTaskId === command.taskId,
+                  )
+                )
+                  yield* backgroundOutput.bind(id, command, restored.turn, providerTurnId);
+              }
+            }
+            recoverBackgroundOnRegister.delete(id);
+          }
           // Background children can finish after their parent model turn has ended.
           for (const child of subagents) yield* publishSubagent(id, child);
           for (const [key, entry] of questions) {
@@ -1213,6 +1266,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         thread: OrchestrationV2ProviderThread,
       ) {
         const id = nativeId(thread);
+        if (thread.status === "active") recoverBackgroundOnRegister.add(id);
         if (!observed.has(id)) {
           const history = yield* attempt(() => source.history(id)).pipe(
             Effect.orElseSucceed(() => []),
@@ -1302,6 +1356,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
             threads.delete(id);
             active.delete(id);
             observed.delete(id);
+            recoverBackgroundOnRegister.delete(id);
             backgroundOutput.drop(id);
             watchers.get(id)?.controller.abort();
             watchers.delete(id);

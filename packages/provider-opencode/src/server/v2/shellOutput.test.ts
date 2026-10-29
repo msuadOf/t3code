@@ -86,3 +86,28 @@ it.effect("interrupts a blocked read or callback and treats a read error as a st
     });
   }).pipe(Effect.scoped),
 );
+
+it.effect("marks fresh native tails as replacements and retained cursors as appends", () =>
+  Effect.gen(function* () {
+    const flags = yield* Queue.unbounded<boolean | undefined>();
+    const fresh = yield* tailShellOutput({
+      state: { cursor: undefined },
+      read: (cursor) =>
+        Effect.succeed(
+          cursor === Number.MAX_SAFE_INTEGER
+            ? { output: "", cursor: 3, size: 3, truncated: false }
+            : { output: "old", cursor: 3, size: 3, truncated: false },
+        ),
+      onChunk: (_chunk, _truncated, replace) => Queue.offer(flags, replace).pipe(Effect.asVoid),
+    }).pipe(Effect.forkScoped);
+    assert.isTrue(yield* Queue.take(flags));
+    yield* Fiber.interrupt(fresh);
+    const resumed = yield* tailShellOutput({
+      state: { cursor: 3 },
+      read: () => Effect.succeed({ output: "next", cursor: 7, size: 7, truncated: false }),
+      onChunk: (_chunk, _truncated, replace) => Queue.offer(flags, replace).pipe(Effect.asVoid),
+    }).pipe(Effect.forkScoped);
+    assert.isFalse(yield* Queue.take(flags));
+    yield* Fiber.interrupt(resumed);
+  }).pipe(Effect.scoped),
+);

@@ -133,6 +133,8 @@ export const ProviderAdapterV2Event = Schema.Union([
     itemId: TurnItemId,
     chunk: Schema.String,
     truncated: Schema.optional(Schema.Boolean),
+    /** The first tail from a new observer replaces any stale live tail. */
+    replace: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("runtime_request.updated"),
@@ -416,7 +418,32 @@ export interface ProviderAdapterV2ExternalTurnInput {
   readonly text: string;
 }
 
+export interface ProviderAdapterV2NativeBackgroundTurnInput {
+  readonly threadId: ThreadId;
+  readonly nativeThreadId: string;
+  readonly nativeTurnId: string;
+  readonly tasks: readonly {
+    readonly nativeToolId: string;
+    readonly nativeTaskId: string;
+    readonly status: "running" | "completed" | "failed" | "cancelled";
+  }[];
+}
+
+export interface ProviderAdapterV2NativeBackgroundTurnOwner {
+  readonly providerTurnId: ProviderTurnId;
+  readonly turn: ProviderAdapterV2TurnInput;
+  readonly tasks: readonly { readonly nativeToolId: string; readonly nativeTaskId: string }[];
+}
+
 export interface ProviderAdapterV2OpenSessionInput {
+  /** Restore background observation without restarting its already-settled parent run. */
+  readonly recoverNativeBackgroundTurn?: (
+    input: ProviderAdapterV2NativeBackgroundTurnInput,
+  ) => Effect.Effect<
+    ProviderAdapterV2NativeBackgroundTurnOwner | undefined,
+    ProviderAdapterProtocolError
+  >;
+
   /** Recover persisted native request identity and submission state before offering input again. */
   readonly findNativeRuntimeRequest?: (input: {
     readonly threadId: ThreadId;

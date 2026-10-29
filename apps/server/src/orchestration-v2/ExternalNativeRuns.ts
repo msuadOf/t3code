@@ -22,6 +22,8 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { makeNativeBackgroundRecovery } from "./NativeBackgroundRecovery.ts";
+import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 
 export class ExternalNativeRuns extends Context.Service<
@@ -35,6 +37,14 @@ export class ExternalNativeRuns extends Context.Service<
       readonly idle: boolean;
       readonly turns: ReadonlyArray<{ readonly id: string; readonly status: string }>;
     }) => Effect.Effect<void, ProviderAdapter.ProviderAdapterProtocolError>;
+    readonly recoverBackground: (
+      input: ProviderAdapter.ProviderAdapterV2NativeBackgroundTurnInput & {
+        readonly session: ProviderAdapter.ProviderAdapterV2SessionRuntime;
+      },
+    ) => Effect.Effect<
+      ProviderAdapter.ProviderAdapterV2NativeBackgroundTurnOwner | undefined,
+      ProviderAdapter.ProviderAdapterProtocolError
+    >;
     readonly adopt: (
       input: ProviderAdapter.ProviderAdapterV2ExternalTurnInput & {
         readonly session: ProviderAdapter.ProviderAdapterV2SessionRuntime;
@@ -54,6 +64,13 @@ const make = Effect.gen(function* () {
   const locks = yield* KeyedLock.make<string>();
   const startupBoundary = yield* DateTime.now;
   const observing = new WeakMap<ProviderAdapter.ProviderAdapterV2SessionRuntime, Set<string>>();
+  const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+  const recoverBackground = yield* makeNativeBackgroundRecovery({
+    ids,
+    store,
+    ingestor,
+    isObserved: (session, runId) => observing.get(session)?.has(runId) === true,
+  });
 
   const adopt = Effect.fn("ExternalNativeRuns.adopt")(function* (
     input: ProviderAdapter.ProviderAdapterV2ExternalTurnInput & {
@@ -462,6 +479,17 @@ const make = Effect.gen(function* () {
     );
   });
   return ExternalNativeRuns.of({
+    recoverBackground: (input) =>
+      recoverBackground(input).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapter.ProviderAdapterProtocolError({
+              driver: input.session.driver,
+              detail: "Could not recover native background work",
+              cause,
+            }),
+        ),
+      ),
     reconcileSnapshot: (input) =>
       reconcileSnapshot(input).pipe(
         Effect.mapError(

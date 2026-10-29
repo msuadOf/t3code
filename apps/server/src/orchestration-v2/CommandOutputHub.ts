@@ -66,6 +66,7 @@ export interface CommandOutputHubShape {
     input: CommandOutputTarget & {
       readonly chunk: string;
       readonly truncated?: boolean | undefined;
+      readonly replace?: boolean | undefined;
     },
   ) => Effect.Effect<void>;
   /**
@@ -169,11 +170,18 @@ export const make = Effect.gen(function* () {
       { discard: true },
     );
 
-  const append: CommandOutputHubShape["append"] = ({ chunk, truncated, ...target }) =>
+  const append: CommandOutputHubShape["append"] = ({ chunk, truncated, replace, ...target }) =>
     Effect.suspend(() => {
-      if (chunk.length === 0 && !truncated) return Effect.void;
+      if (chunk.length === 0 && !truncated && !replace) return Effect.void;
       const key = commandKey(target);
-      const previous = tails.get(key) ?? EMPTY_TERMINAL_OUTPUT;
+      if (replace) {
+        finished.delete(key);
+        for (const subscriber of subscribers.get(key) ?? []) {
+          subscriber.needsReplace = true;
+          subscriber.pendingAppend = "";
+        }
+      }
+      const previous = (replace ? undefined : tails.get(key)) ?? EMPTY_TERMINAL_OUTPUT;
       const tail = appendTerminalOutput(
         truncated ? { ...previous, truncated: true } : previous,
         chunk,
@@ -305,7 +313,7 @@ export const make = Effect.gen(function* () {
               return {
                 kind: "replace",
                 text: tail.text,
-                truncated: tail.truncated,
+                truncated: tail.truncated || Boolean(settled.outputTruncated),
                 running: false,
               };
             }

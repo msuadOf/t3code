@@ -5,6 +5,7 @@ const LIMIT = 64 * 1024;
 export interface ShellOutputCursor {
   cursor: number | undefined;
   truncated?: boolean;
+  replace?: boolean;
 }
 
 export interface ShellOutputPage {
@@ -19,9 +20,10 @@ export const tailShellOutput = Effect.fn("OpenCode.tailShellOutput")(
   function* <E>(options: {
     readonly state: ShellOutputCursor;
     readonly read: (cursor: number) => Effect.Effect<ShellOutputPage, E>;
-    readonly onChunk: (chunk: string, truncated: boolean) => Effect.Effect<void>;
+    readonly onChunk: (chunk: string, truncated: boolean, replace: boolean) => Effect.Effect<void>;
   }) {
     let truncated = options.state.truncated ?? false;
+    options.state.replace ??= options.state.cursor === undefined;
     if (options.state.cursor === undefined) {
       const probe = yield* options.read(Number.MAX_SAFE_INTEGER);
       options.state.cursor = Math.max(0, probe.size - LIMIT);
@@ -32,14 +34,16 @@ export const tailShellOutput = Effect.fn("OpenCode.tailShellOutput")(
       const cursor: number = options.state.cursor;
       const page: ShellOutputPage = yield* options.read(cursor);
       if (page.cursor > cursor) {
-        yield* options.onChunk(page.output, truncated || page.truncated);
+        yield* options.onChunk(page.output, truncated || page.truncated, options.state.replace);
         options.state.cursor = page.cursor;
         truncated = false;
         options.state.truncated = false;
-      } else if (truncated) {
-        yield* options.onChunk("", true);
+        options.state.replace = false;
+      } else if (truncated || options.state.replace) {
+        yield* options.onChunk("", truncated, options.state.replace);
         truncated = false;
         options.state.truncated = false;
+        options.state.replace = false;
       }
       if (page.cursor <= cursor || page.cursor >= page.size) yield* Effect.sleep("100 millis");
     }
