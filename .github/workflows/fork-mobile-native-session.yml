@@ -206,8 +206,22 @@ jobs:
               plistlib.dump({'application-identifier': identifier, 'keychain-access-groups': [identifier], 'get-task-allow': True}, output)
           PYENT
           codesign --force --sign - --generate-entitlement-der --entitlements "$RUNNER_TEMP/simulator-entitlements.plist" "$app_path"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          codesign --display --entitlements :- "$app_path" > artifacts/native-session/simulator-entitlements.plist
           xcrun simctl install "$device_id" "$app_path"
           maestro --device "$device_id" test -e DAEMON_ADDRESS="$DAEMON_ADDRESS" -e PAIRING_CODE="$PAIRING_CODE" -e CONTROL_URL="$CONTROL_URL" --format junit --output artifacts/native-session/results.xml --test-output-dir artifacts/native-session/maestro .github/native-stream/session-flow.yaml
+
+      - name: Collect iOS crash reports
+        if: always() && matrix.platform == 'ios'
+        run: |
+          python3 - <<'PYCRASH'
+          import pathlib, shutil
+          reports = pathlib.Path.home() / 'Library/Logs/DiagnosticReports'
+          target = pathlib.Path('artifacts/native-session/crashes')
+          target.mkdir(parents=True, exist_ok=True)
+          for report in reports.glob('*T3CodeDev*.ips'):
+              shutil.copy(report, target / report.name)
+          PYCRASH
 
       - name: Stop isolated fixture
         if: always()
