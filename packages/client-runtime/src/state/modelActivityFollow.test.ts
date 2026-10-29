@@ -77,6 +77,19 @@ describe("model activity follow target", () => {
       ),
     ).toBe("s:next");
   });
+  it("holds the completed body until confirmation despite a newer completed auxiliary response", () => {
+    const requests = [request("body", "completed"), request("auxiliary", "completed")];
+    expect(resolveModelActivityFollowTarget(requests, "s:body")).toBe("s:body");
+    expect(
+      resolveModelActivityFollowTarget([...requests, request("next", "running")], "s:body"),
+    ).toBe("s:next");
+    expect(
+      resolveModelActivityFollowTarget(
+        [request("body", "completed", true), requests[1]!],
+        "s:body",
+      ),
+    ).toBe("s:auxiliary");
+  });
   it("does not open a failed response or return to older activity", () => {
     expect(
       resolveModelActivityFollowTarget(

@@ -8,10 +8,10 @@ export function resolveModelActivityFollowTarget(
   requests: ReadonlyArray<Pick<ModelActivityRequest, "sessionId" | "id" | "confirmed" | "status">>,
   previousTarget: string | null,
 ): string | null {
-  const floor = Math.max(
-    0,
-    requests.findIndex((request) => modelActivityRequestKey(request) === previousTarget),
+  const previousIndex = requests.findIndex(
+    (request) => modelActivityRequestKey(request) === previousTarget,
   );
+  const floor = Math.max(0, previousIndex);
   let fallback: string | null = null;
   for (let index = requests.length - 1; index >= floor; index--) {
     const request = requests[index];
@@ -20,6 +20,9 @@ export function resolveModelActivityFollowTarget(
     if (request.status === "running") return key;
     fallback ??= key;
   }
+  // Keep the response's final lines in view while native persistence catches up.
+  const previous = requests[previousIndex];
+  if (previous && !previous.confirmed && previous.status === "completed") return previousTarget;
   return fallback;
 }
 
