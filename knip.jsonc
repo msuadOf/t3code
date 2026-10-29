@@ -96,6 +96,7 @@
       // Expo loads plugins and the fingerprint config by string; Metro embeds the browser entry in the native WebView.
       "entry": [
         "index.ts!",
+        "testing/native-stream-entry.tsx",
         "fingerprint.config.js",
         "plugins/*.cjs",
         "scripts/generate-device-stream.mts",

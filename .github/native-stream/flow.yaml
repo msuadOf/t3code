@@ -1,0 +1,38 @@
+appId: com.t3tools.t3code.dev
+---
+- launchApp:
+    clearState: true
+- assertVisible: Native stream component smoke
+- tapOn: Begin body stream
+- assertVisible: "body: streaming"
+- assertVisible: "(?s).*BODY_TOKEN_1.*"
+- assertVisible: "(?s).*BODY_TOKEN_4.*"
+- assertVisible: Showing the latest text. Earlier text will appear when available.
+- assertNotVisible:
+    id: complete-text
+- takeScreenshot: artifacts/native-stream/body-streaming
+- tapOn: Interrupt
+- assertVisible: "body: interrupted"
+- assertVisible: Showing the latest text. Earlier text is missing.
+- assertVisible: "(?s).*BODY_TOKEN_4.*"
+- takeScreenshot: artifacts/native-stream/body-interrupted
+- tapOn: Restore complete
+- assertVisible: "body: complete"
+- assertVisible:
+    id: complete-text
+- assertVisible: "(?s).*PREFIX_RECOVERED.*BODY_TOKEN_1.*BODY_TOKEN_4.*"
+- assertNotVisible: Showing the latest text. Earlier text is missing.
+- takeScreenshot: artifacts/native-stream/body-recovered
+- tapOn: Begin thinking stream
+- assertVisible: "thinking: streaming"
+- assertVisible: "(?s).*THINKING_TOKEN_1.*"
+- assertVisible: "(?s).*THINKING_TOKEN_4.*"
+- assertVisible: Showing the latest text. Earlier text will appear when available.
+- assertNotVisible:
+    id: complete-text
+- takeScreenshot: artifacts/native-stream/thinking-streaming
+- tapOn: Restore complete
+- assertVisible: "thinking: complete"
+- assertVisible: "(?s).*PREFIX_RECOVERED.*THINKING_TOKEN_1.*THINKING_TOKEN_4.*"
+- assertNotVisible: Showing the latest text. Earlier text will appear when available.
+- takeScreenshot: artifacts/native-stream/thinking-recovered

@@ -1,0 +1,161 @@
+name: Fork Native Stream Smoke
+
+on:
+  push:
+    branches: [codex/mobile-native-stream-ci]
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-stream-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_VARIANT: development
+  T3CODE_MOBILE_UPDATES_ENABLED: "0"
+  CI: "1"
+  NODE_OPTIONS: --max-old-space-size=4096
+
+jobs:
+  native:
+    name: Native stream / ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: android
+            runner: ubuntu-24.04
+          - platform: ios
+            runner: macos-26
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Free Android build disk
+        if: matrix.platform == 'android'
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=@t3tools/mobile...
+              - --filter=@t3tools/scripts...
+              - --filter=t3...
+
+      - name: Expose pnpm
+        run: |
+          pnpm_version="$(node --print "require('./package.json').packageManager.split('@').pop()")"
+          echo "$HOME/.vite-plus/package_manager/pnpm/$pnpm_version/pnpm/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install pinned Maestro
+        env:
+          MAESTRO_VERSION: cli-2.12.0
+        run: |
+          curl -fsSL "https://github.com/mobile-dev-inc/Maestro/releases/download/$MAESTRO_VERSION/maestro.zip" -o "$RUNNER_TEMP/maestro.zip"
+          echo 'a6044a84542f522f434c5dc3d609e60c7446d423f3ed1b2ae513f5c48663ec5e  maestro.zip' > "$RUNNER_TEMP/maestro.sha256"
+          (cd "$RUNNER_TEMP" && shasum -a 256 -c maestro.sha256)
+          unzip -q "$RUNNER_TEMP/maestro.zip" -d "$RUNNER_TEMP/maestro-cli"
+          echo "$RUNNER_TEMP/maestro-cli/maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Select isolated fixture entry
+        run: |
+          mkdir -p artifacts/native-stream
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const path = 'apps/mobile/package.json';
+          const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
+          pkg.main = 'testing/native-stream-entry.tsx';
+          fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');
+          JS
+
+      - name: Generate native project
+        working-directory: apps/mobile
+        run: pnpm exec expo prebuild --clean --platform ${{ matrix.platform }} 2>&1 | tee ../../artifacts/native-stream/prebuild.log
+
+      - uses: gradle/actions/setup-gradle@v5
+        if: matrix.platform == 'android'
+
+      - name: Build Android fixture APK
+        if: matrix.platform == 'android'
+        working-directory: apps/mobile/android
+        run: ./gradlew app:assembleRelease -PreactNativeArchitectures=x86_64 --max-workers=2 2>&1 | tee ../../../artifacts/native-stream/build.log
+
+      - name: Enable KVM
+        if: matrix.platform == 'android'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Test Android native renderer
+        if: matrix.platform == 'android'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7_pro
+          cores: 2
+          ram-size: 2048M
+          disable-animations: true
+          script: |
+            adb install apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+            maestro test --format junit --output artifacts/native-stream/results.xml --test-output-dir artifacts/native-stream/maestro .github/native-stream/flow.yaml
+
+      - name: Build iOS fixture app
+        if: matrix.platform == 'ios'
+        working-directory: apps/mobile
+        run: |
+          xcodebuild -workspace ios/T3CodeDev.xcworkspace -scheme T3CodeDev -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/native-stream-ios" CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build > ../../artifacts/native-stream/build.log 2>&1
+
+      - name: Test iOS native renderer
+        if: matrix.platform == 'ios'
+        run: |
+          device_id="$(xcrun simctl list devices available --json | node --input-type=module -e '
+            let input = "";
+            for await (const chunk of process.stdin) input += chunk;
+            const device = Object.values(JSON.parse(input).devices).flat().find(d => d.isAvailable && d.name.startsWith("iPhone"));
+            if (!device) throw new Error("No available iPhone simulator");
+            console.log(device.udid);
+          ')"
+          xcrun simctl boot "$device_id"
+          xcrun simctl bootstatus "$device_id" -b
+          xcrun simctl ui "$device_id" appearance light
+          xcrun simctl install "$device_id" "$RUNNER_TEMP/native-stream-ios/Build/Products/Release-iphonesimulator/T3CodeDev.app"
+          maestro --device "$device_id" test --format junit --output artifacts/native-stream/results.xml --test-output-dir artifacts/native-stream/maestro .github/native-stream/flow.yaml
+
+      - name: Upload native smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-stream-smoke-${{ matrix.platform }}
+          path: artifacts/native-stream/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Explain verification scope
+        if: always()
+        run: |
+          echo '### Native stream component smoke (${{ matrix.platform }})' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Builds the native app with a CI-only entry point and exercises the production StreamedTextContent component using fixture deltas. Assertions cover live body/thinking suffixes, interruption, and completed prefix recovery. This is not CLI → daemon → normal native app end-to-end verification. No account, OTA update, signing secret, release, or version change is involved.' >> "$GITHUB_STEP_SUMMARY"
