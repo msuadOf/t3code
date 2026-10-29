@@ -57,6 +57,14 @@ current text block finishes.
 A native background service owns its own credentials. The password field applies
 to an explicit server URL; it does not replace the native service's password.
 
+Shared root sessions on the environment's native service can use T3's MCP tools.
+Tool calls are authorized for the original OpenCode session ID, including calls
+made from the CLI. Same-directory sessions may see other sessions' T3 tool names,
+but cannot use their authorization. Attaching preserves the session's native
+permissions, so a tool may still need approval in OpenCode. Native child sessions
+do not inherit the root session's T3 tool authorization. An explicit external
+**Server URL** does not receive this tool bridge.
+
 ## Approvals
 
 OpenCode follows the shared [permission modes](./permission-modes.md). **Auto** has
