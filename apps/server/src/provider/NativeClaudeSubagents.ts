@@ -5,7 +5,7 @@ const object = (value: unknown): value is RecordValue =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const string = (value: unknown): string | undefined =>
   typeof value === "string" && value.length > 0 ? value : undefined;
-export const nativeClaudeAgentId = (value: unknown): value is string =>
+const nativeClaudeAgentId = (value: unknown): value is string =>
   typeof value === "string" && /^[a-f0-9]{6,64}$/.test(value);
 
 export interface NativeClaudeSubagentLaunch {

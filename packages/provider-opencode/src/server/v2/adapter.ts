@@ -92,6 +92,7 @@ import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/sel
 import { OPENCODE_PROVIDER, openCodePermissionRequestKind } from "../adapter.ts";
 import { openCodeToolProjectionKind, openCodeToolTurnItem } from "../toolItems.ts";
 import { tailShellOutput, type ShellOutputCursor } from "./shellOutput.ts";
+import { findRunningShell } from "./runningShell.ts";
 import {
   appendToolInput,
   endToolInput,
@@ -2828,6 +2829,41 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       const found = start === null || read.at(-1)?.id === start;
       if (!found) return undefined;
       const recent = before !== undefined && before !== null ? read.slice(0, -1) : read;
+      const runningCommands = recent.flatMap((message) =>
+        message.type !== "assistant"
+          ? []
+          : message.content.flatMap((part) => {
+              if (
+                part.type !== "tool" ||
+                part.state.status !== "running" ||
+                openCodeToolProjectionKind(part.name) !== "command_execution" ||
+                part.time.ran === undefined
+              )
+                return [];
+              const command = stringField(part.state.input, "command");
+              return command === undefined
+                ? []
+                : [
+                    {
+                      id: part.id,
+                      command,
+                      ran: DateTime.toEpochMillis(part.time.ran),
+                      shellId: stringField(part.state.metadata, "shellID"),
+                    },
+                  ];
+            }),
+      );
+      const needsShellRecovery = runningCommands.some(
+        (tool) => tool.shellId === undefined && turn.tools.get(tool.id)?.shell === undefined,
+      );
+      const runningShells = needsShellRecovery
+        ? yield* client.shell
+            .list({ location: { directory: AbsolutePath.make(state.directory) } })
+            .pipe(
+              Effect.map((response) => response.data),
+              Effect.catch(() => Effect.succeed([])),
+            )
+        : [];
       const idle = recent.find((message) => message.type === "idle");
       const assistant = recent.find((message) => message.type === "assistant");
       if (assistant?.retry !== undefined) {
@@ -2882,15 +2918,27 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             turn.startedAt.set(part.id, yield* DateTime.now);
           }
           const tool = turn.tools.get(part.id)!;
+          if (typeof part.state.input === "object" && part.state.input !== null) {
+            tool.input = part.state.input as Record<string, unknown>;
+          }
           if (part.state.status === "running") {
             tool.phase = "running";
-            const shellId = stringField(part.state.metadata, "shellID");
+            const command = runningCommands.find((candidate) => candidate.id === part.id);
+            const shellId =
+              stringField(part.state.metadata, "shellID") ??
+              tool.shell?.id ??
+              (command === undefined
+                ? undefined
+                : findRunningShell(
+                    command,
+                    runningCommands,
+                    runningShells,
+                    sessionId,
+                    state.directory,
+                  ));
             if (shellId !== undefined) yield* startShell(state, turn, part.id, shellId);
           } else if (part.state.status === "streaming" && tool.phase === undefined) {
             tool.phase = "preparing";
-          }
-          if (typeof part.state.input === "object" && part.state.input !== null) {
-            tool.input = part.state.input as Record<string, unknown>;
           }
           if (part.state.status === "completed") {
             yield* stopShell(tool);
