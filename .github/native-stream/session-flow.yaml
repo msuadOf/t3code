@@ -30,14 +30,17 @@ appId: com.t3tools.t3code.dev
 - tapOn: "(?s).*Native stream smoke.*"
 - assertVisible: Thinking
 - runScript: advance.js
+- extendedWaitUntil:
+    visible: "(?s).*NATIVE_TOKEN_06.*"
+    timeout: 30000
 - runFlow:
     when:
       true: ${STREAM_KIND == 'reasoning'}
     commands:
       - tapOn: Thinking
-- extendedWaitUntil:
-    visible: "(?s).*NATIVE_TOKEN_06.*"
-    timeout: 30000
+      - extendedWaitUntil:
+          visible: Showing the latest text. Earlier text will appear when available.
+          timeout: 30000
 - takeScreenshot: artifacts/native-session/first-live-delta
 - extendedWaitUntil:
     visible: "(?s).*NATIVE_TOKEN_24.*"
