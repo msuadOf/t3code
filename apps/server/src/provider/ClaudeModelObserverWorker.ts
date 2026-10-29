@@ -4,6 +4,7 @@ import * as NodeHttps from "node:https";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
+import { claudeModelResponseTap } from "./ClaudeModelResponseTap.ts";
 
 export interface ClaudeModelActivity {
   readonly seq: number;
@@ -182,23 +183,8 @@ export async function startClaudeModelObserver(input: {
         const observing = Boolean(
           sessionId &&
           !relative.endsWith("count_tokens") &&
-          String(native.headers["content-type"]).includes("text/event-stream") &&
-          !native.headers["content-encoding"],
+          String(native.headers["content-type"]).includes("text/event-stream"),
         );
-        if (
-          sessionId &&
-          native.headers["content-encoding"] &&
-          String(native.headers["content-type"]).includes("text/event-stream")
-        ) {
-          captureGap = true;
-          publish({
-            sessionId,
-            requestId,
-            messageId: null,
-            type: "observer.capture_gap",
-            data: { reason: "compressed-response" },
-          });
-        }
         const decoder = new TextDecoder();
         let buffered = "";
         let stopped = false;
@@ -268,21 +254,46 @@ export async function startClaudeModelObserver(input: {
             }
           }
         };
-        native.on("data", tap);
-        native.on("end", () =>
-          finish((native.statusCode ?? 502) >= 400 ? "upstream-error" : "completed"),
-        );
+        const capture = observing
+          ? claudeModelResponseTap({
+              encoding: native.headers["content-encoding"],
+              onData: (chunk) => {
+                tap(chunk);
+                return !stopped;
+              },
+              onGap: (reason) => {
+                captureGap = true;
+                publish({
+                  sessionId: sessionId!,
+                  requestId,
+                  messageId,
+                  type: "observer.capture_gap",
+                  data: { reason },
+                });
+              },
+              onEnd: () =>
+                finish((native.statusCode ?? 502) >= 400 ? "upstream-error" : "completed"),
+            })
+          : undefined;
+        native.on("data", (chunk: Buffer) => capture?.write(chunk));
+        native.on("end", () => {
+          if (capture) capture.end();
+          else finish((native.statusCode ?? 502) >= 400 ? "upstream-error" : "completed");
+        });
         native.on("error", () => {
+          capture?.abort();
           finish("upstream-error");
           response.destroy();
         });
         native.on("aborted", () => {
+          capture?.abort();
           finish("upstream-error");
           response.destroy();
         });
         native.pipe(response);
         response.on("close", () => {
           if (!response.writableFinished) {
+            capture?.abort();
             finish("client-disconnected");
             native.destroy();
           }

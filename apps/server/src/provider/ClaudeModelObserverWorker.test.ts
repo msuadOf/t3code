@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off globalFetch:off - Exercises actual loopback HTTP and SSE forwarding.
 import * as NodeHttp from "node:http";
+import * as NodeZlib from "node:zlib";
 import { expect, it } from "vite-plus/test";
 import { startClaudeModelObserver } from "./ClaudeModelObserverWorker.ts";
 
@@ -387,3 +388,115 @@ it.each([
     await new Promise<void>((resolve) => upstream.close(() => resolve()));
   }
 });
+
+it.each([
+  { encoding: "gzip", compress: NodeZlib.gzipSync, gap: null },
+  { encoding: "br", compress: NodeZlib.brotliCompressSync, gap: null },
+  { encoding: "deflate", compress: NodeZlib.deflateSync, gap: null },
+  {
+    encoding: "gzip",
+    compress: () => Buffer.from("corrupt gzip"),
+    gap: "invalid-compressed-response",
+  },
+  { encoding: "gzip, br", compress: NodeZlib.gzipSync, gap: "unsupported-content-encoding" },
+])(
+  "observes $encoding SSE without changing bytes forwarded to the native CLI",
+  async ({ encoding, compress, gap }) => {
+    const sessionId = "11111111-2222-4333-8444-555555555555";
+    const payload = [
+      { type: "message_start", message: { id: "msg_compressed" } },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "压缩思考" },
+      },
+      { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "压缩正文🙂" } },
+      { type: "message_stop" },
+    ]
+      .map((value) => `data: ${JSON.stringify(value)}\n\n`)
+      .join("");
+    const encoded = compress(Buffer.from(payload));
+    const upstream = NodeHttp.createServer((request, response) => {
+      request.resume();
+      response.writeHead(200, {
+        "content-type": "text/event-stream",
+        "content-encoding": encoding,
+      });
+      response.write(encoded.subarray(0, 7));
+      response.end(encoded.subarray(7));
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const address = upstream.address();
+    if (!address || typeof address === "string") throw new Error("No upstream");
+    const observer = await startClaudeModelObserver({
+      upstreamUrl: `http://127.0.0.1:${address.port}`,
+      token: "fixture",
+    });
+    const url = `http://127.0.0.1:${observer.port}`;
+    try {
+      const received = await new Promise<Buffer>((resolve, reject) => {
+        const request = NodeHttp.request(
+          `${url}/proxy/fixture/v1/messages`,
+          { method: "POST" },
+          (response) => {
+            expect(response.headers["content-encoding"]).toBe(encoding);
+            const chunks: Buffer[] = [];
+            response.on("data", (chunk) => chunks.push(chunk));
+            response.on("end", () => resolve(Buffer.concat(chunks)));
+            response.on("error", reject);
+          },
+        );
+        request.on("error", reject);
+        request.end(
+          JSON.stringify({ metadata: { user_id: JSON.stringify({ session_id: sessionId }) } }),
+        );
+      });
+      expect(received).toEqual(encoded);
+      const activity = await fetch(`${url}/events?sessionId=${sessionId}`, {
+        headers: { authorization: "Bearer fixture" },
+      });
+      const reader = activity.body!.getReader();
+      const events: Array<{ type: string; data: Record<string, unknown> }> = [];
+      let buffered = "";
+      const decoder = new TextDecoder();
+      try {
+        while (!events.some((event) => event.type === "observer.request_end")) {
+          const part = await reader.read();
+          if (part.done) throw new Error("Activity stream ended before request completion");
+          buffered += decoder.decode(part.value, { stream: true });
+          let index: number;
+          while ((index = buffered.indexOf("\n\n")) !== -1) {
+            const event = JSON.parse(buffered.slice(0, index).slice(6));
+            buffered = buffered.slice(index + 2);
+            if (event.type === "observer.snapshot") events.push(...event.events);
+            else events.push(event);
+          }
+        }
+      } finally {
+        await reader.cancel();
+      }
+      if (gap) {
+        expect(events.map((event) => event.type)).toEqual([
+          "observer.capture_gap",
+          "observer.request_end",
+        ]);
+        expect(events[0]?.data).toEqual({ reason: gap });
+        expect(events.at(-1)?.data).toMatchObject({ complete: false, reason: "completed" });
+        return;
+      }
+      expect(events.map((event) => event.type)).toEqual([
+        "message_start",
+        "content_block_delta",
+        "content_block_delta",
+        "message_stop",
+        "observer.request_end",
+      ]);
+      expect(events[2]?.data).toMatchObject({ delta: { text: "压缩正文🙂" } });
+      expect(events.at(-1)?.data).toMatchObject({ complete: true, reason: "completed" });
+    } finally {
+      await observer.close();
+      upstream.closeAllConnections();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    }
+  },
+);
