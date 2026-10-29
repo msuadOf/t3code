@@ -4007,3 +4007,128 @@ it.effect("native progress preserves root metadata and rejects foreign or termin
     );
   }).pipe(Effect.scoped),
 );
+
+it.effect.each(["idle", "other-caller", "reservation"] as const)(
+  "ProviderSessionManagerV2 handles a native MCP session change with %s ownership",
+  (ownership) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const holdOpen = yield* Ref.make(false);
+      const openEntered = yield* Deferred.make<void>();
+      const continueOpen = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("native-mcp-rotation");
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const original = (yield* mcpSessions.read(threadId))!;
+        const originalToken = original.authorizationHeader.replace(/^Bearer\s+/, "");
+        assert.isTrue(
+          yield* original.bindNativeSession!({
+            metadataKey: "nativeSession",
+            sessionId: "old-native",
+          }),
+        );
+        const unknownReplacement = yield* Effect.exit(
+          runtime.ensureThread({ threadId, modelSelection, runtimePolicy }),
+        );
+        assert.isTrue(Exit.isFailure(unknownReplacement));
+        if (Exit.isFailure(unknownReplacement))
+          assert.include(Cause.pretty(unknownReplacement.cause), "unknown replacement");
+        const native = (nativeThreadId: string) =>
+          makeProviderThread({ idAllocator, threadId, providerSessionId, now, nativeThreadId });
+        yield* runtime.resumeThread({ providerThread: native("old-native") });
+        assert.equal(
+          (yield* mcpSessions.read(threadId))!.providerSessionId,
+          original.providerSessionId,
+        );
+        if (ownership !== "idle") {
+          const otherSessionId = yield* idAllocator.allocate.providerSession({
+            providerInstanceId: modelSelection.instanceId,
+            threadId,
+          });
+          if (ownership === "reservation") yield* Ref.set(holdOpen, true);
+          const opening = manager.open({
+            threadId,
+            providerSessionId: otherSessionId,
+            modelSelection,
+            runtimePolicy,
+          });
+          const pendingOpen =
+            ownership === "reservation"
+              ? yield* opening.pipe(Effect.forkChild({ startImmediately: true }))
+              : undefined;
+          if (pendingOpen) yield* Deferred.await(openEntered);
+          else yield* opening;
+          const before = (yield* Ref.get(state)).resumeCount;
+          const blocked = yield* Effect.exit(
+            runtime.resumeThread({ providerThread: native("new-native") }),
+          );
+          assert.isTrue(Exit.isFailure(blocked));
+          assert.equal((yield* Ref.get(state)).resumeCount, before);
+          assert.isDefined(yield* registry.resolve(originalToken));
+          assert.equal(
+            (yield* mcpSessions.read(threadId))!.providerSessionId,
+            original.providerSessionId,
+          );
+          if (pendingOpen) {
+            yield* Deferred.succeed(continueOpen, undefined);
+            yield* Fiber.join(pendingOpen);
+          }
+        } else {
+          yield* runtime.resumeThread({ providerThread: native("new-native") });
+          const replacement = (yield* mcpSessions.read(threadId))!;
+          assert.notEqual(replacement.providerSessionId, original.providerSessionId);
+          assert.isUndefined(yield* registry.resolve(originalToken));
+          assert.isTrue(
+            yield* replacement.bindNativeSession!({
+              metadataKey: "nativeSession",
+              sessionId: "new-native",
+            }),
+          );
+          yield* runtime.resumeThread({ providerThread: native("new-native") });
+          assert.equal(
+            (yield* mcpSessions.read(threadId))!.providerSessionId,
+            replacement.providerSessionId,
+          );
+          yield* manager.close(providerSessionId);
+          assert.isUndefined(
+            yield* registry.resolve(replacement.authorizationHeader.replace(/^Bearer\s+/, "")),
+          );
+        }
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            beforeOpen: () =>
+              Ref.get(holdOpen).pipe(
+                Effect.flatMap((hold) =>
+                  hold
+                    ? Deferred.succeed(openEntered, undefined).pipe(
+                        Effect.andThen(Deferred.await(continueOpen)),
+                      )
+                    : Effect.void,
+                ),
+              ),
+          }),
+        ),
+      );
+    }),
+);
