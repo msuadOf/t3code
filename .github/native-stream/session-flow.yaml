@@ -2,7 +2,9 @@ appId: com.t3tools.t3code.dev
 ---
 - launchApp:
     clearState: true
-- openLink: t3code-dev:///connections/new
+- tapOn: Settings
+- tapOn: Environments
+- tapOn: Add environment
 - tapOn: Address
 - inputText: ${DAEMON_ADDRESS}
 - tapOn: Code

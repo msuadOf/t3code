@@ -148,7 +148,8 @@ try:
         "permissions": [{"action": "*", "resource": "*", "effect": "allow"}]})
     sid = session.get("data", session)["id"]
     master, slave = pty.openpty()
-    processes.append(subprocess.Popen([binary, "--server", url, "--session", sid, str(work)],
+    processes.append(subprocess.Popen([binary, "--server", url, "--session", sid,
+                                      "--prompt", "Stream the native CI markers.", str(work)],
                                      cwd=work, env=env, stdin=slave, stdout=slave, stderr=slave))
     os.close(slave)
 
@@ -214,7 +215,6 @@ try:
     metadata.update(t3Pid=processes[-1].pid, t3Port=t3_port, t3Home=str(t3_home),
                     pairingPath=str(root / "pairing.json"))
     write_private(root / "fixture.json", metadata)
-    api("/api/session/" + sid + "/prompt", {"text": "Stream the native CI markers."})
     print(json.dumps(metadata), flush=True)
     while not stop.wait(0.25):
         if any(process.poll() is not None for process in processes):

@@ -95,7 +95,24 @@ jobs:
           tar -xzf "$RUNNER_TEMP/opencode-native/$(tail -n 1 "$RUNNER_TEMP/opencode-pack-name")" -C "$RUNNER_TEMP/opencode-native"
           echo "OPENCODE_BINARY=$RUNNER_TEMP/opencode-native/package/bin/opencode" >> "$GITHUB_ENV"
 
+      - name: Identify native app sources
+        id: native-source
+        run: |
+          git rev-parse HEAD:apps/mobile HEAD:packages HEAD:scripts HEAD:assets HEAD:pnpm-lock.yaml HEAD:package.json HEAD:pnpm-workspace.yaml HEAD:third-party-licenses.config.json > "$RUNNER_TEMP/native-source-hashes"
+          echo "$APP_VARIANT:$T3CODE_MOBILE_UPDATES_ENABLED" >> "$RUNNER_TEMP/native-source-hashes"
+          echo "digest=$(shasum -a 256 "$RUNNER_TEMP/native-source-hashes" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore compiled native app
+        id: native-app
+        uses: actions/cache/restore@v4
+        with:
+          key: native-session-app-v1-${{ matrix.platform }}-${{ steps.native-source.outputs.digest }}
+          path: |
+            apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+            ${{ runner.temp }}/native-stream-ios/Build/Products/Release-iphonesimulator/T3CodeDev.app
+
       - name: Generate native project
+        if: steps.native-app.outputs.cache-hit != 'true'
         working-directory: apps/mobile
         run: pnpm exec expo prebuild --clean --platform ${{ matrix.platform }} 2>&1 | tee ../../artifacts/native-session/prebuild.log
 
@@ -103,15 +120,24 @@ jobs:
         if: matrix.platform == 'android'
 
       - name: Build Android fixture APK
-        if: matrix.platform == 'android'
+        if: matrix.platform == 'android' && steps.native-app.outputs.cache-hit != 'true'
         working-directory: apps/mobile/android
         run: ./gradlew app:assembleRelease -PreactNativeArchitectures=x86_64 --max-workers=2 2>&1 | tee ../../../artifacts/native-session/build.log
 
       - name: Build iOS fixture app
-        if: matrix.platform == 'ios'
+        if: matrix.platform == 'ios' && steps.native-app.outputs.cache-hit != 'true'
         working-directory: apps/mobile
         run: |
           xcodebuild -workspace ios/T3CodeDev.xcworkspace -scheme T3CodeDev -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/native-stream-ios" CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build > ../../artifacts/native-session/build.log 2>&1
+
+      - name: Save compiled native app before UI checks
+        if: steps.native-app.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          key: ${{ steps.native-app.outputs.cache-primary-key }}
+          path: |
+            apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+            ${{ runner.temp }}/native-stream-ios/Build/Products/Release-iphonesimulator/T3CodeDev.app
 
       - name: Start isolated native session and T3 daemon
         run: |
@@ -148,9 +174,9 @@ jobs:
           api-level: 36
           target: google_apis
           arch: x86_64
-          profile: pixel_7_pro
-          cores: 2
-          ram-size: 2048M
+          profile: pixel_5
+          cores: 4
+          ram-size: 4096M
           disable-animations: true
           script: |
             adb install apps/mobile/android/app/build/outputs/apk/release/app-release.apk
