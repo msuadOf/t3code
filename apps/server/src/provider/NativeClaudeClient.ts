@@ -281,7 +281,40 @@ export class NativeClaudeClient {
   }
 
   async reply(session: NativeClaudeSession, text: string): Promise<void> {
-    await this.request({ op: "reply", short: requireNativeClaudeBackgroundId(session), text });
+    const short = requireNativeClaudeBackgroundId(session);
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await this.request({ op: "reply", short, text });
+        return;
+      } catch (error) {
+        // ERESPAWNING is a negative acknowledgement, before input is accepted.
+        // Never replay after a transport error or into a replacement worker.
+        if (
+          !(error instanceof NativeClaudeError) ||
+          error.code !== "ERESPAWNING" ||
+          attempt >= 49 ||
+          session.pid === undefined ||
+          session.sessionId === undefined
+        )
+          throw error;
+        await new Promise<void>((resolve) => setTimeout(resolve, 100));
+        const owners = (await this.listSessions()).filter(
+          (owner) => owner.sessionId === session.sessionId,
+        );
+        const current = owners[0];
+        if (
+          owners.length !== 1 ||
+          current?.kind !== "background" ||
+          current.id !== short ||
+          current.pid !== session.pid ||
+          current.startedAt !== session.startedAt ||
+          current.status !== "idle" ||
+          current.state === "stopped" ||
+          current.state === "failed"
+        )
+          throw error;
+      }
+    }
   }
 
   /**

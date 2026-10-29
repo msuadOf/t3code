@@ -60,6 +60,58 @@ async function withDaemon(
 }
 
 describe("Claude native shared-session transport", () => {
+  it("retries explicitly unaccepted startup input into the same idle native worker", async () => {
+    let requests = 0;
+    const owner = { ...session, pid: 42, status: "idle" };
+    await withDaemon(
+      (socket) => {
+        requests += 1;
+        socket.end(
+          requests === 1 ? '{"ok":false,"code":"ERESPAWNING"}\n' : '{"ok":true,"op":"reply"}\n',
+        );
+      },
+      async (client) => {
+        client.listSessions = async () => [owner];
+        await client.reply(owner, "one prompt");
+      },
+    );
+    expect(requests).toBe(2);
+  });
+
+  it("does not replay startup input into a replacement worker", async () => {
+    let requests = 0;
+    const owner = { ...session, pid: 42, status: "idle" };
+    await withDaemon(
+      (socket) => {
+        requests += 1;
+        socket.end('{"ok":false,"code":"ERESPAWNING"}\n');
+      },
+      async (client) => {
+        client.listSessions = async () => [{ ...owner, pid: 43 }];
+        await expect(client.reply(owner, "one prompt")).rejects.toMatchObject({
+          code: "ERESPAWNING",
+        });
+      },
+    );
+    expect(requests).toBe(1);
+  });
+
+  it("does not replay a non-startup native rejection", async () => {
+    let requests = 0;
+    await withDaemon(
+      (socket) => {
+        requests += 1;
+        socket.end('{"ok":false,"code":"ENOREPLY"}\n');
+      },
+      async (client) => {
+        await expect(client.reply({ ...session, pid: 42 }, "one prompt")).rejects.toMatchObject({
+          code: "ENOREPLY",
+        });
+      },
+    );
+    expect(requests).toBe(1);
+  });
+
   it("rejects foreground sessions instead of opening an independent resume writer", () => {
     expect(() => requireNativeClaudeBackgroundId({ ...session, kind: "interactive" })).toThrow(
       "/background",
