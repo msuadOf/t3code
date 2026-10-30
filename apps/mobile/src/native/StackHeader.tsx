@@ -121,19 +121,38 @@ function optionsSignature(value: unknown, seen = new WeakSet<object>()): string 
   return String(value);
 }
 
+const nativeItemFactoryPaths = new Set([
+  "options.unstable_headerLeftItems",
+  "options.unstable_headerRightItems",
+  "options.unstable_headerCenterItems",
+  "options.unstable_headerToolbarItems",
+]);
+
 function stabilizeOptionFunctions(
   value: unknown,
   path: string,
   latestFunctions: Map<string, (...args: unknown[]) => unknown>,
   wrappers: Map<string, (...args: unknown[]) => unknown>,
+  factoryArguments: Map<string, unknown[]>,
   seen = new WeakSet<object>(),
 ): unknown {
   if (typeof value === "function") {
     latestFunctions.set(path, value as (...args: unknown[]) => unknown);
+    const itemFactory = nativeItemFactoryPaths.has(path);
+    const refreshItems = (args: unknown[]) =>
+      stabilizeOptionFunctions(
+        latestFunctions.get(path)?.(...args),
+        `${path}.items`,
+        latestFunctions,
+        wrappers,
+        factoryArguments,
+      );
     let wrapper = wrappers.get(path);
     if (!wrapper) {
       wrapper = (...args: unknown[]) => {
-        return latestFunctions.get(path)?.(...args);
+        if (!itemFactory) return latestFunctions.get(path)?.(...args);
+        factoryArguments.set(path, args);
+        return refreshItems(args);
       };
       wrappers.set(path, wrapper);
     }
@@ -143,7 +162,14 @@ function stabilizeOptionFunctions(
     if (seen.has(value)) return value;
     seen.add(value);
     return value.map((entry, index) =>
-      stabilizeOptionFunctions(entry, `${path}[${index}]`, latestFunctions, wrappers, seen),
+      stabilizeOptionFunctions(
+        entry,
+        `${path}[${index}]`,
+        latestFunctions,
+        wrappers,
+        factoryArguments,
+        seen,
+      ),
     );
   }
   if (value !== null && typeof value === "object") {
@@ -152,7 +178,14 @@ function stabilizeOptionFunctions(
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
         key,
-        stabilizeOptionFunctions(entry, `${path}.${key}`, latestFunctions, wrappers, seen),
+        stabilizeOptionFunctions(
+          entry,
+          `${path}.${key}`,
+          latestFunctions,
+          wrappers,
+          factoryArguments,
+          seen,
+        ),
       ]),
     );
   }
@@ -176,23 +209,38 @@ export function NativeStackScreenOptions(props: {
   const lastAppliedOptionsSignatureRef = useRef<string | undefined>(undefined);
   const latestOptionFunctionsRef = useRef(new Map<string, (...args: unknown[]) => unknown>());
   const optionFunctionWrappersRef = useRef(new Map<string, (...args: unknown[]) => unknown>());
+  const nativeItemFactoryArgumentsRef = useRef(new Map<string, unknown[]>());
   const normalizedOptions = useMemo(() => normalizeScreenOptions(props.options), [props.options]);
-  const stableOptions = normalizedOptions
-    ? (stabilizeOptionFunctions(
-        normalizedOptions,
-        "options",
-        latestOptionFunctionsRef.current,
-        optionFunctionWrappersRef.current,
-      ) as NativeStackNavigationOptions)
-    : undefined;
 
   useLayoutEffect(() => {
     if (!tabActive) {
       lastAppliedOptionsSignatureRef.current = undefined;
       return;
     }
-    if (!navigation || !stableOptions) {
+    if (!navigation || !normalizedOptions) {
       return;
+    }
+    const stableOptions = stabilizeOptionFunctions(
+      normalizedOptions,
+      "options",
+      latestOptionFunctionsRef.current,
+      optionFunctionWrappersRef.current,
+      nativeItemFactoryArgumentsRef.current,
+    ) as NativeStackNavigationOptions;
+
+    // Native headers retain materialized items. Refresh their action refs after
+    // commit even when unchanged visuals do not require navigation.setOptions.
+    for (const path of nativeItemFactoryPaths) {
+      const factory = (normalizedOptions as Record<string, unknown>)[path.slice("options.".length)];
+      const args = nativeItemFactoryArgumentsRef.current.get(path);
+      if (typeof factory !== "function" || !args) continue;
+      stabilizeOptionFunctions(
+        factory(...args),
+        `${path}.items`,
+        latestOptionFunctionsRef.current,
+        optionFunctionWrappersRef.current,
+        nativeItemFactoryArgumentsRef.current,
+      );
     }
     const signature = optionsSignature([stableOptions, props.optionsVersion]);
     if (lastAppliedOptionsSignatureRef.current === signature) {
@@ -209,9 +257,10 @@ export function NativeStackScreenOptions(props: {
         "options",
         latestOptionFunctionsRef.current,
         optionFunctionWrappersRef.current,
+        nativeItemFactoryArgumentsRef.current,
       ) as NativeStackNavigationOptions,
     );
-  }, [navigation, normalizedOptions, props.optionsVersion, stableOptions, tabActive]);
+  }, [navigation, normalizedOptions, props.optionsVersion, tabActive]);
 
   useEffect(() => {
     if (!navigation || !props.listeners) {

@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from "vite-plus/test";
 
 type HeaderOptions = {
   unstable_headerLeftItems?: () => NativeStackHeaderItem[];
-  unstable_headerRightItems?: () => NativeStackHeaderItem[];
+  unstable_headerRightItems?: (props?: { tintColor: string }) => NativeStackHeaderItem[];
   unstable_headerToolbarItems?: () => NativeStackHeaderItem[];
 };
 
@@ -15,6 +15,7 @@ const harness = vi.hoisted(() => ({
   renderedItems: [] as NativeStackHeaderItem[],
   setOptionsCalls: 0,
   openedDocuments: [] as string[],
+  itemProps: undefined as { tintColor: string } | undefined,
 }));
 
 // Native headers retain the actions materialized when navigation applies options. Like React
@@ -33,7 +34,7 @@ vi.mock("@react-navigation/native", () => {
         return;
       harness.renderedItems =
         options.unstable_headerLeftItems?.() ??
-        options.unstable_headerRightItems?.() ??
+        options.unstable_headerRightItems?.(harness.itemProps) ??
         options.unstable_headerToolbarItems?.() ??
         [];
     },
@@ -45,6 +46,7 @@ vi.mock("@react-navigation/native", () => {
 });
 
 import { NativeHeaderToolbar } from "./NativeHeaderToolbar";
+import { NativeStackScreenOptions } from "./StackHeader";
 
 let root: Root | null = null;
 type Placement = "left" | "right" | "bottom";
@@ -120,6 +122,7 @@ afterEach(() => {
   harness.renderedItems = [];
   harness.setOptionsCalls = 0;
   harness.openedDocuments = [];
+  harness.itemProps = undefined;
   vi.unstubAllGlobals();
 });
 
@@ -145,4 +148,92 @@ it("applies a custom header element rendered inside a navigation container", () 
 
   renderConnecting("Reconnecting");
   expect(renderedCustomLabel()).toBe("Reconnecting");
+});
+
+it.each(["left", "right", "bottom"] as const)(
+  "uses the latest form values from the originally registered %s native button",
+  (placement) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    function PairToolbar(props: { readonly host: string; readonly code: string }) {
+      return (
+        <NativeHeaderToolbar placement={placement}>
+          <NativeHeaderToolbar.Button
+            label="Add environment"
+            onPress={() => harness.openedDocuments.push(`${props.host}|${props.code}`)}
+          />
+        </NativeHeaderToolbar>
+      );
+    }
+    root = createRoot(document.createElement("div"));
+    act(() => root!.render(<PairToolbar host="h" code="" />));
+    const original = harness.renderedItems[0];
+    if (original?.type !== "button") throw new Error("Expected native pairing button");
+    const applied = harness.setOptionsCalls;
+    act(() => root!.render(<PairToolbar host="http://127.0.0.1:3773" code="PAIRCODE" />));
+    expect(harness.setOptionsCalls).toBe(applied);
+    original.onPress?.();
+    expect(harness.openedDocuments).toEqual(["http://127.0.0.1:3773|PAIRCODE"]);
+  },
+);
+
+it("refreshes an originally registered nested menu action without reapplying unchanged options", () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  function Menu(props: { path: string }) {
+    return (
+      <NativeHeaderToolbar placement="right">
+        <NativeHeaderToolbar.Menu title="Actions">
+          <NativeHeaderToolbar.Menu title="Document">
+            <NativeHeaderToolbar.MenuAction
+              onPress={() => harness.openedDocuments.push(props.path)}
+            >
+              Open
+            </NativeHeaderToolbar.MenuAction>
+          </NativeHeaderToolbar.Menu>
+        </NativeHeaderToolbar.Menu>
+      </NativeHeaderToolbar>
+    );
+  }
+  root = createRoot(document.createElement("div"));
+  act(() => root!.render(<Menu path="first" />));
+  const menu = harness.renderedItems[0];
+  if (menu?.type !== "menu") throw new Error("Expected menu");
+  const submenu = menu.menu.items[0];
+  if (submenu?.type !== "submenu") throw new Error("Expected submenu");
+  const original = submenu.items[0];
+  if (original?.type !== "action") throw new Error("Expected action");
+  const applied = harness.setOptionsCalls;
+  act(() => root!.render(<Menu path="latest" />));
+  expect(harness.setOptionsCalls).toBe(applied);
+  original.onPress?.();
+  expect(harness.openedDocuments).toEqual(["latest"]);
+});
+
+it("refreshes direct item-factory callbacks using actual native factory arguments", () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  harness.itemProps = { tintColor: "native-blue" };
+  function Options(props: { host: string }) {
+    return (
+      <NativeStackScreenOptions
+        options={{
+          unstable_headerRightItems: (native: { tintColor: string }) => [
+            {
+              type: "button",
+              label: "Connect",
+              onPress: () => harness.openedDocuments.push(`${props.host}|${native.tintColor}`),
+            },
+          ],
+        }}
+      />
+    );
+  }
+  root = createRoot(document.createElement("div"));
+  act(() => root!.render(<Options host="first" />));
+  const original = harness.renderedItems[0];
+  if (original?.type !== "button") throw new Error("Expected button");
+  const applied = harness.setOptionsCalls;
+  act(() => root!.render(<Options host="latest" />));
+  expect(harness.setOptionsCalls).toBe(applied);
+  expect(harness.openedDocuments).toEqual([]);
+  original.onPress?.();
+  expect(harness.openedDocuments).toEqual(["latest|native-blue"]);
 });
