@@ -40,8 +40,7 @@ appId: com.t3tools.t3code.dev
       - assertVisible: "^${PAIRING_CODE}$"
       - hideKeyboard
       - tapOn:
-          text: "^Add environment$"
-          index: 1
+          point: "90%,10%"
 - runFlow:
     when:
       platform: Android
