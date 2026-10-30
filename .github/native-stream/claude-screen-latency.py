@@ -37,7 +37,7 @@ def request(path, **query):
         return json.load(response)
 
 
-def capture(name):
+def capture(name, timeout=10):
     path = output / (name + ".png")
     began = time.monotonic_ns()
     if args.platform == "android":
@@ -47,10 +47,10 @@ def capture(name):
         raw_path = output / (name + ".raw")
         with raw_path.open("wb") as image:
             subprocess.run(command + ["exec-out", "screencap"], stdout=image,
-                           check=True, timeout=10)
+                           check=True, timeout=timeout)
     else:
         subprocess.run(["xcrun", "simctl", "io", args.device, "screenshot", str(path)],
-                       capture_output=True, check=True, timeout=10)
+                       capture_output=True, check=True, timeout=timeout)
     captured = time.monotonic_ns()
     row = {"path": str(path), "captureStartNs": began, "captureCompleteNs": captured}
     if args.platform == "android": row["rawPath"] = str(raw_path)
@@ -91,7 +91,7 @@ def contains(frame, marker):
     return normalize(marker) in normalize(frame["text"])
 
 
-baseline = recognize(capture("baseline-ready"))
+baseline = recognize(capture("baseline-ready", timeout=60))
 if not contains(baseline, "NATIVE_CLAUDE_READY"):
     raise RuntimeError("The actual native screenshot does not show the open stdout capture")
 if any(contains(baseline, "NATIVE_CLAUDE_LATENCY_" + str(stage)) for stage in range(1, 4)):
