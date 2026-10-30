@@ -232,7 +232,7 @@ jobs:
           ready = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-session-ready.jsonl'
           if ready.read_text().strip():
               root = pathlib.Path(json.loads(ready.read_text().splitlines()[0])['root'])
-              for name in ['t3.log', 'native.log']:
+              for name in ['t3.log', 'native.log', 'model-events.jsonl', 'final-native-state.json', 'cli-terminal.bin']:
                   if (root / name).exists(): shutil.copy(root / name, 'artifacts/native-session/' + name)
           PY
           fi

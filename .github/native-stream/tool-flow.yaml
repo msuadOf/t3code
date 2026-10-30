@@ -16,7 +16,9 @@ appId: com.t3tools.t3code.dev
 - assertNotVisible: "(?s).*NATIVE_TOOL_03.*"
 - takeScreenshot: artifacts/native-session/tool-live-progress
 - runScript: complete.js
-- extendedWaitUntil:
-    visible: "(?s).*NATIVE_TOOL_DONE.*"
+- scrollUntilVisible:
+    element:
+      text: "(?s).*NATIVE_TOOL_DONE.*"
+    direction: DOWN
     timeout: 30000
 - takeScreenshot: artifacts/native-session/tool-completed

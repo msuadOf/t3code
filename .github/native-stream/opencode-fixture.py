@@ -68,6 +68,9 @@ class Model(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        with (root / "model-events.jsonl").open("a") as log:
+            log.write(json.dumps({"roles": [message.get("role") for message in body.get("messages", [])],
+                "tools": [tool.get("function", {}).get("name") for tool in body.get("tools", [])]}) + "\n")
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -253,6 +256,18 @@ try:
     pairing = json.loads(issued.stdout[issued.stdout.index("{"):])
     write_private(root / "pairing.json", {"host": f"http://127.0.0.1:{t3_port}",
                                           "code": pairing["credential"]})
+    for attempt in range(120):
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{t3_port}/.well-known/t3/environment", timeout=2
+            ) as response:
+                json.load(response)
+            break
+        except (OSError, ValueError):
+            if stop.wait(0.1):
+                raise RuntimeError("Fixture stopped before environment discovery became ready")
+    else:
+        raise RuntimeError("T3 environment discovery did not become ready")
     metadata.update(t3Pid=processes[-1].pid, t3Port=t3_port, t3Home=str(t3_home),
                     pairingPath=str(root / "pairing.json"))
     write_private(root / "fixture.json", metadata)
@@ -262,6 +277,13 @@ try:
             raise RuntimeError("Native server or CLI exited during verification")
 finally:
     shutdown(None, None)
+    if "sid" in locals() and processes and processes[0].poll() is None:
+        try:
+            write_private(root / "final-native-state.json", {
+                "messages": api("/api/session/" + sid + "/message?order=desc&limit=20"),
+                "active": api("/api/session/active"), "markers": markers})
+        except (OSError, ValueError) as error:
+            write_private(root / "final-native-state.json", {"error": str(error)})
     for process in reversed(processes):
         if process.poll() is None:
             process.terminate()
