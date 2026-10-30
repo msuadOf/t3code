@@ -6,6 +6,8 @@ on:
     paths:
       - .github/workflows/fork-claude-native-latency.yml
       - .github/native-stream/claude*
+      - .github/native-stream/android-screencap.py
+      - .github/native-stream/test_android_screencap.py
       - apps/server/src/provider/NativeClaude*
   workflow_dispatch:
 
@@ -85,6 +87,9 @@ jobs:
           (cd "$RUNNER_TEMP" && shasum -a 256 -c maestro.sha256)
           unzip -q "$RUNNER_TEMP/maestro.zip" -d "$RUNNER_TEMP/maestro-cli"
           echo "$RUNNER_TEMP/maestro-cli/maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Verify raw screenshot decoder
+        run: python3 .github/native-stream/test_android_screencap.py
 
       - name: Prepare screenshot recognition
         run: |
@@ -237,13 +242,19 @@ jobs:
           if [ -f "$RUNNER_TEMP/native-session-fixture.pid" ]; then kill -TERM "$(cat "$RUNNER_TEMP/native-session-fixture.pid")" 2>/dev/null || true; fi
           if [ -f "$RUNNER_TEMP/native-session-ready.jsonl" ]; then
             python3 - <<'PY'
-          import json, os, pathlib, shutil
+          import json, os, pathlib, shutil, time
           ready = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-session-ready.jsonl'
           if ready.read_text().strip():
               root = pathlib.Path(json.loads(ready.read_text().splitlines()[0])['root'])
-              for name in ['t3.log', 'native.log', 'model-events.jsonl', 'final-native-state.json', 'cli-terminal.bin', 'latency.json', 'cleanup-error.txt']:
+              deadline = time.monotonic() + 90
+              while not (root / 'final-native-state.json').exists() and time.monotonic() < deadline:
+                  time.sleep(.25)
+              if not (root / 'final-native-state.json').exists():
+                  pathlib.Path('artifacts/native-session/cleanup-incomplete.txt').write_text('Fixture cleanup did not produce final native state within 90 seconds; available evidence was retained.')
+              for name in ['t3.log', 'native.log', 'model-events.jsonl', 'final-native-state.json', 'cli-terminal.bin', 'latency.json', 'cleanup-error.txt', 'native-inventory-before-cleanup.json', 'native-output-manifest.json', 'native-evidence-error.txt', 'native-inventory-error.txt']:
                   if (root / name).exists(): shutil.copy(root / name, 'artifacts/native-session/' + name)
               if (root / 'native-evidence').exists(): shutil.copytree(root / 'native-evidence', 'artifacts/native-session/native-evidence', dirs_exist_ok=True)
+              if (root / 'native-transcript-evidence').exists(): shutil.copytree(root / 'native-transcript-evidence', 'artifacts/native-session/native-transcript-evidence', dirs_exist_ok=True)
           PY
           fi
 

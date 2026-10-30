@@ -6,6 +6,7 @@ subtracted from any observation. Every matching screenshot remains evidence.
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,9 @@ output.mkdir(parents=True, exist_ok=True)
 control = os.environ["CONTROL_URL"].rstrip("/")
 frames = []
 results = []
+raw_spec = importlib.util.spec_from_file_location("android_screencap", Path(__file__).with_name("android-screencap.py"))
+raw_screencap = importlib.util.module_from_spec(raw_spec)
+raw_spec.loader.exec_module(raw_screencap)
 
 
 def request(path, **query):
@@ -40,15 +44,17 @@ def capture(name):
         command = ["adb"]
         if args.device != "booted":
             command += ["-s", args.device]
-        with path.open("wb") as image:
-            subprocess.run(command + ["exec-out", "screencap", "-p"], stdout=image,
+        raw_path = output / (name + ".raw")
+        with raw_path.open("wb") as image:
+            subprocess.run(command + ["exec-out", "screencap"], stdout=image,
                            check=True, timeout=10)
     else:
         subprocess.run(["xcrun", "simctl", "io", args.device, "screenshot", str(path)],
                        capture_output=True, check=True, timeout=10)
     captured = time.monotonic_ns()
-    row = {"path": str(path), "captureStartNs": began, "captureCompleteNs": captured,
-           "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    row = {"path": str(path), "captureStartNs": began, "captureCompleteNs": captured}
+    if args.platform == "android": row["rawPath"] = str(raw_path)
+    else: row["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
     frames.append(row)
     (output / "frames.json").write_text(json.dumps(frames, indent=2))
     return row
@@ -56,6 +62,14 @@ def capture(name):
 
 def recognize(frame):
     if args.platform == "android":
+        raw = Path(frame["rawPath"]).read_bytes()
+        metadata, pixels = raw_screencap.decode_raw(raw, expected_header=16)
+        frame["rawSha256"] = hashlib.sha256(raw).hexdigest()
+        frame["rawMetadata"] = metadata
+        png = raw_screencap.encode_png(metadata, pixels)
+        Path(frame["path"]).write_bytes(png)
+        frame["sha256"] = hashlib.sha256(png).hexdigest()
+        frame["pngEncodedNs"] = time.monotonic_ns()
         command = ["tesseract", frame["path"], "stdout", "--psm", "6", "-l", "eng"]
     else:
         command = [os.environ["CLAUDE_SCREEN_OCR"], frame["path"]]
@@ -94,13 +108,13 @@ for stage in range(1, 4):
     found = None
     for frame in burst:
         recognize(frame)
-        if contains(frame, "NATIVE_CLAUDE_LATENCY_" + str(stage)):
+        if found is None and contains(frame, "NATIVE_CLAUDE_LATENCY_" + str(stage)):
             found = frame
-            break
     if found is None:
         raise RuntimeError(f"Stage {stage}: output never appeared in native screenshot pixels")
     result = request("/visible", stage=stage, capturedNs=found["captureCompleteNs"])
     result.update(stage=stage, screenshot=found["path"], sha256=found["sha256"],
+                  **({"rawPath": found["rawPath"], "rawSha256": found["rawSha256"], "rawMetadata": found["rawMetadata"]} if "rawPath" in found else {}),
                   measurement="native screenshot completion, runner-host monotonic clock")
     results.append(result)
     (output / "results.json").write_text(json.dumps(results, indent=2))

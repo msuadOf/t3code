@@ -210,6 +210,26 @@ try:
         if any(p.poll() is not None for p in processes): raise RuntimeError("T3 exited during native test")
 finally:
     shutdown()
+    # Preserve the isolated native provenance even if UI preparation fails before
+    # any measured marker; never read the user's normal Claude configuration.
+    try:
+        manifest = []
+        for path in native_tmp.rglob('*'):
+            if len(manifest) >= 512: break
+            stat = path.lstat()
+            manifest.append({'path':str(path.relative_to(native_tmp)), 'mode':oct(stat.st_mode),
+                             'uid':stat.st_uid, 'bytes':stat.st_size, 'symlink':path.is_symlink()})
+        write_private(root / 'native-output-manifest.json', manifest)
+        transcript_dir = root / 'native-transcript-evidence'
+        for index, path in enumerate((config / 'projects').glob('*/' + sid + '.jsonl')):
+            transcript_dir.mkdir(exist_ok=True)
+            shutil.copy2(path, transcript_dir / (str(index) + '-' + path.name))
+    except Exception as error:
+        (root / 'native-evidence-error.txt').write_text(str(error))
+    try:
+        write_private(root / 'native-inventory-before-cleanup.json', json.loads(run(['agents','--json','--all']).stdout))
+    except Exception as error:
+        (root / 'native-inventory-error.txt').write_text(str(error))
     try:
         for job in json.loads(run(['agents','--json','--all']).stdout):
             if job.get('kind') == 'background': run(['stop',job['id']])
