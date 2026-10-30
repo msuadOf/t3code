@@ -1,6 +1,11 @@
 name: Fork Claude Native Latency
 
 on:
+  push:
+    branches: [codex/claude-native-trace-source]
+    paths:
+      - .github/workflows/fork-claude-native-latency.yml
+      - .github/native-stream/claude*
   workflow_dispatch:
 
 defaults:
