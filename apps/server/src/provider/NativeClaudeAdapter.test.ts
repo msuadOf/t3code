@@ -1,3 +1,4 @@
+import { NativeClaudeSessionOutput } from "./NativeClaudeSessionOutput.ts";
 // @effect-diagnostics nodeBuiltinImport:off -- Isolated native MCP launch metadata fixture.
 import * as NodeFSP from "node:fs/promises";
 import { vi } from "vite-plus/test";
@@ -69,7 +70,10 @@ class FixtureClient extends NativeClaudeClient {
   readonly subscribed = new Promise<void>((resolve) => {
     this.onSubscribe = resolve;
   });
-  override async *subscribe(_session: NativeClaudeSession, signal?: AbortSignal) {
+  override async *subscribe(
+    _session: NativeClaudeSession,
+    signal?: AbortSignal,
+  ): ReturnType<NativeClaudeClient["subscribe"]> {
     this.subscriptions += 1;
     this.onSubscribe?.();
     yield { type: "snapshot", record: {} };
@@ -2315,5 +2319,206 @@ it.effect.each([
     if (mode === "recover")
       expect(events.some((event) => event.type === "turn.terminal")).toBe(false);
     expect(client.resumes).toEqual([]);
+  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
+);
+
+it.effect("keeps live capture and terminal intake flowing while native inventory is stalled", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped();
+    const project = path.join(root, "projects", "workspace");
+    yield* fs.makeDirectory(project, { recursive: true });
+    const records = [
+      { type: "user", uuid: "live-user", parentUuid: null, message: { content: "Run foreground" } },
+      {
+        type: "assistant",
+        uuid: "live-call",
+        parentUuid: "live-user",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "live-tool",
+              name: "Bash",
+              input: { command: "run foreground" },
+            },
+          ],
+          stop_reason: "tool_use",
+        },
+      },
+    ];
+    yield* fs.writeFileString(
+      path.join(project, `${nativeId}.jsonl`),
+      records
+        .map((record) =>
+          JSON.stringify({
+            ...record,
+            sessionId: nativeId,
+            cwd: "/work",
+            timestamp: "2026-10-29T00:00:00Z",
+          }),
+        )
+        .join("\n") + "\n",
+    );
+    let pending: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      pending = resolve;
+    });
+    let release: (() => void) | undefined;
+    const stalled = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let sendState: (() => void) | undefined;
+    const stateReady = new Promise<void>((resolve) => {
+      sendState = resolve;
+    });
+    let sendStream: (() => void) | undefined;
+    const streamReady = new Promise<void>((resolve) => {
+      sendStream = resolve;
+    });
+    let streamConsumed = false;
+    let stall = false;
+    class StalledInventoryClient extends FixtureClient {
+      override async *subscribe(_job: NativeClaudeSession, signal?: AbortSignal) {
+        yield { type: "snapshot", record: { sessionId: nativeId } };
+        await stateReady;
+        yield { type: "state", patch: { tempo: "active" } };
+        await streamReady;
+        yield { type: "stream", line: "TERMINAL_PROGRESS" };
+        streamConsumed = true;
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) resolve();
+          else signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
+      override async listSessions() {
+        if (stall) {
+          pending?.();
+          await stalled;
+        }
+        return this.inventory;
+      }
+    }
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        release?.();
+        sendState?.();
+        sendStream?.();
+      }),
+    );
+    const client = new StalledInventoryClient("background");
+    Object.assign(client.inventory[0]!, { status: "busy", state: "working" });
+    let output = "FIRST";
+    let delivered = "";
+    const spy = vi
+      .spyOn(NativeClaudeSessionOutput.prototype, "sample")
+      .mockImplementation(async () => {
+        if (delivered === output) return [];
+        delivered = output;
+        return [{ source: "workspace/live.output", chunk: output, output, truncated: false }];
+      });
+    yield* Effect.addFinalizer(() => Effect.sync(() => spy.mockRestore()));
+    const now = DateTime.makeUnsafe(1);
+    const providerThread: OrchestrationV2ProviderThread = {
+      id: ProviderThreadId.make("live-thread"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: instanceId,
+      providerSessionId: ProviderSessionId.make("live-session"),
+      appThreadId: threadId,
+      nativeThreadRef: {
+        driver: ProviderDriverKind.make("claudeAgent"),
+        nativeId,
+        strength: "strong",
+      },
+      nativeConversationHeadRef: null,
+      status: "active",
+      ownerNodeId: null,
+      firstRunOrdinal: null,
+      lastRunOrdinal: null,
+      handoffIds: [],
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const owner: ProviderAdapter.ProviderAdapterV2TurnInput = {
+      threadId,
+      providerThread,
+      modelSelection,
+      runtimePolicy,
+      runId: RunId.make("live-run"),
+      runOrdinal: 1,
+      providerTurnOrdinal: 1,
+      attemptId: RunAttemptId.make("live-attempt"),
+      rootNodeId: NodeId.make("live-root"),
+      appThread: fixtureAppThread(now, providerThread.id),
+      message: {
+        createdBy: "user",
+        creationSource: "provider",
+        messageId: MessageId.make("live-message"),
+        text: "Run foreground",
+        attachments: [],
+      },
+    };
+    const adapter = yield* makeNativeClaudeAdapter({
+      instanceId,
+      configDirectory: root,
+      binaryPath: "never-executed",
+      environment: {},
+      client,
+    });
+    const runtime = yield* adapter.openSession({
+      threadId,
+      providerSessionId: providerThread.providerSessionId!,
+      modelSelection,
+      runtimePolicy,
+      onExternalTurn: () => Effect.succeed(owner),
+    });
+    const events: ProviderAdapter.ProviderAdapterV2Event[] = [];
+    const first = yield* Deferred.make<void>();
+    const second = yield* Deferred.make<void>();
+    yield* runtime.events.pipe(
+      Stream.runForEach((event) =>
+        Effect.gen(function* () {
+          events.push(event);
+          if (event.type === "command_output.delta" && event.chunk === "FIRST")
+            yield* Deferred.succeed(first, undefined);
+          if (event.type === "command_output.delta" && event.chunk === "SECOND")
+            yield* Deferred.succeed(second, undefined);
+        }),
+      ),
+      Effect.forkScoped,
+    );
+    yield* runtime.resumeThread({ threadId, providerThread });
+    yield* Deferred.await(first);
+    stall = true;
+    sendState?.();
+    yield* Effect.promise(() => blocked);
+    sendStream?.();
+    output = "SECOND";
+    yield* TestClock.adjust("250 millis");
+    yield* TestClock.adjust("250 millis");
+    const receivedTerminal = events.some(
+      (event) => event.type === "command_output.delta" && event.chunk.includes("TERMINAL_PROGRESS"),
+    );
+    const consumedBeforeRelease = streamConsumed;
+    const deliveredBeforeRelease = delivered;
+    stall = false;
+    release?.();
+    expect(deliveredBeforeRelease).toBe("SECOND");
+    expect(consumedBeforeRelease).toBe(true);
+    expect(receivedTerminal).toBe(true);
+    yield* Deferred.await(second);
+    expect(
+      events.some((event) => event.type === "command_output.delta" && event.chunk === "SECOND"),
+    ).toBe(true);
+    stall = false;
+    release?.();
+    yield* runtime.unloadThread!({ providerThread });
+    const detachedCount = events.length;
+    output = "DETACHED";
+    yield* TestClock.adjust("250 millis");
+    expect(delivered).toBe("SECOND");
+    expect(events).toHaveLength(detachedCount);
   }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, IdAllocator.layer))),
 );

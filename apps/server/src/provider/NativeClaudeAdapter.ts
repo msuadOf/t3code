@@ -387,6 +387,50 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
             }
           : {}),
       });
+      // Native inventory may block on a subprocess. Once ownership is known,
+      // stdout and terminal pixels must not wait for another inventory refresh.
+      const captureLock = yield* Semaphore.make(1);
+      type LiveCapture = {
+        owner: ProviderAdapter.ProviderAdapterV2TurnInput;
+        providerTurnId: OrchestrationV2ProviderTurn["id"];
+        turnId: string;
+        startedAt: number;
+        excludedPaths: readonly string[];
+      };
+      const liveCaptures = new Map<string, LiveCapture>();
+      const sampleCapture = Effect.fn("NativeClaudeAdapter.sampleCapture")(function* (
+        id: string,
+        capture: LiveCapture,
+        finished: boolean,
+      ) {
+        yield* sessionStreams.sample(
+          id,
+          capture.owner,
+          capture.providerTurnId,
+          capture.turnId,
+          capture.startedAt,
+          finished,
+          capture.excludedPaths,
+        );
+        yield* terminalView.sample(
+          id,
+          capture.owner,
+          capture.providerTurnId,
+          capture.turnId,
+          capture.startedAt,
+          finished,
+        );
+      });
+      yield* Effect.gen(function* () {
+        for (const [id, capture] of liveCaptures) {
+          yield* sampleCapture(id, capture, false);
+        }
+      }).pipe(
+        captureLock.withPermit,
+        Effect.catch((cause) => Effect.logWarning("Claude live output capture failed", { cause })),
+        Effect.repeat(Schedule.spaced("250 millis")),
+        Effect.forkScoped,
+      );
       const settleQuestion = Effect.fn("NativeClaudeAdapter.settleQuestion")(function* (
         key: string,
         status: "resolved" | "cancelled",
@@ -470,6 +514,8 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
           return job;
         });
       const observation = yield* Semaphore.make(1);
+      // State refresh must never block intake of subsequent native terminal bytes.
+      const refreshRequests = yield* Queue.sliding<void>(1);
       const watchers = new Map<
         string,
         { readonly generation: string; readonly controller: AbortController }
@@ -503,7 +549,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
               const next = JSON.stringify(frame);
               if (next === signature) return Effect.void;
               signature = next;
-              return hydrate();
+              return Queue.offer(refreshRequests, undefined).pipe(Effect.asVoid);
             }),
             Effect.catch(() => Effect.void),
           );
@@ -760,23 +806,25 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                 ? inventory.find((session) => session.sessionId === id)
                 : undefined;
             const finished = nativeClaudeObservedTurnIsTerminal(turn, job, ownership.interrupted);
-            yield* sessionStreams.sample(
-              id,
-              owner,
-              providerTurnId,
-              turn.id,
-              turn.startedAt,
-              finished,
-              commands.map((command) => command.outputPath),
-            );
-            yield* terminalView.sample(
-              id,
-              owner,
-              providerTurnId,
-              turn.id,
-              turn.startedAt,
-              finished,
-            );
+            yield* Effect.gen(function* () {
+              const capture: LiveCapture = {
+                owner,
+                providerTurnId,
+                turnId: turn.id,
+                startedAt: turn.startedAt,
+                excludedPaths: commands.map((command) => command.outputPath),
+              };
+              if (finished) {
+                // Finalize only a capture that was observed live, never old history.
+                if (liveCaptures.get(id)?.turnId === turn.id) {
+                  liveCaptures.delete(id);
+                  yield* sampleCapture(id, capture, true);
+                }
+              } else {
+                liveCaptures.set(id, capture);
+                yield* sampleCapture(id, capture, false);
+              }
+            }).pipe(captureLock.withPermit);
             const nativeFailure = turn.status === "failed" || job?.state === "failed";
             const wasInterrupted =
               ownership.interrupted || turn.status === "interrupted" || job?.state === "stopped";
@@ -1286,6 +1334,12 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
           }
         }
       }, observation.withPermit);
+      yield* Queue.take(refreshRequests).pipe(
+        Effect.flatMap(() => hydrate()),
+        Effect.catch((cause) => Effect.logWarning("Claude native state refresh failed", { cause })),
+        Effect.forever,
+        Effect.forkScoped,
+      );
       yield* hydrate().pipe(
         Effect.catch((cause) =>
           Effect.logWarning("Claude native observer failed; check native worker availability", {
@@ -1391,6 +1445,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
             observed.delete(id);
             recoverBackgroundOnRegister.delete(id);
             backgroundOutput.drop(id);
+            liveCaptures.delete(id);
             sessionStreams.drop(id);
             terminalView.drop(id);
             watchers.get(id)?.controller.abort();
@@ -1403,7 +1458,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
               }
             for (const [key, question] of questions)
               if (question.nativeSessionId === id) questions.delete(key);
-          });
+          }).pipe(captureLock.withPermit);
         }, observation.withPermit),
         startTurn: Effect.fn("NativeClaudeAdapter.startTurn")(function* (request) {
           const id = nativeId(request.providerThread);

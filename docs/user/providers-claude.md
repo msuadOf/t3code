@@ -230,9 +230,10 @@ this view may include earlier conversation and starts from live bytes after
 connection. It is never parsed into approvals, tool results or future context.
 Both views use the same daemon events on web, desktop and mobile. Captures start
 only for live turns, stop with their turn, and are bounded; discovery limits are
-reported as incomplete capture. The one-second sampling cadence targets updates
-within two seconds on a healthy local connection, not an unconditional network
-latency guarantee.
+reported as incomplete capture. Once a live turn is bound, stdout and CLI view
+captures sample independently every 250 ms, without waiting for native inventory
+refreshes. This targets updates within two seconds on a healthy local connection;
+it is not an unconditional network latency guarantee.
 
 ## Native conversation controls
 
