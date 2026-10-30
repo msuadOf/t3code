@@ -11,6 +11,54 @@ def write_private(path, value):
     path.parent.mkdir(parents=True, exist_ok=True); path.write_text(json.dumps(value, indent=2)); path.chmod(0o600)
 def shutdown(*_):
     start.set(); stop.set(); advance.set(); complete.set(); [(root / ("advance-" + str(stage))).touch() for stage in range(1,4)]; (root / "complete").touch()
+def foreground_evidence(stage):
+    """Verify the real native tool has not returned a completion/background receipt."""
+    evidence = {"sessionId": sid, "toolId": "native_foreground_ci", "verified": False}
+    try:
+        inventory = json.loads(run(['agents', '--json', '--all']).stdout)
+        owned = [job for job in inventory if job.get('sessionId') == sid]
+        evidence['inventory'] = [{key: job[key] for key in
+            ['id', 'sessionId', 'kind', 'pid', 'state', 'status', 'startedAt'] if key in job}
+            for job in owned]
+        transcripts = list((config / 'projects').glob('*/' + sid + '.jsonl'))
+        if len(transcripts) != 1:
+            raise RuntimeError('Expected one canonical native transcript')
+        raw = transcripts[0].read_text()
+        lines = raw.splitlines()
+        entries = []
+        for index, line in enumerate(lines):
+            if not line.strip(): continue
+            try: entry = json.loads(line)
+            except ValueError:
+                if index == len(lines) - 1 and not raw.endswith('\n'): break
+                raise
+            if entry.get('sessionId') == sid: entries.append(entry)
+        calls, receipts = [], []
+        for entry in entries:
+            message = entry.get('message', {})
+            blocks = message.get('content', []) if isinstance(message, dict) else []
+            if not isinstance(blocks, list): continue
+            for block in blocks:
+                if not isinstance(block, dict): continue
+                if entry.get('type') == 'assistant' and block.get('type') == 'tool_use' and block.get('id') == 'native_foreground_ci':
+                    calls.append(block)
+                if entry.get('type') == 'user' and block.get('type') == 'tool_result' and block.get('tool_use_id') == 'native_foreground_ci':
+                    receipts.append(block)
+        evidence['toolCalls'] = calls
+        evidence['toolReceipts'] = receipts
+        matching_call = len(calls) == 1 and calls[0].get('name') == 'Bash'
+        arguments = calls[0].get('input', {}) if matching_call else {}
+        native_active = len(owned) == 1 and owned[0].get('kind') == 'background' and owned[0].get('state') not in ['stopped', 'failed']
+        evidence['verified'] = bool(native_active and matching_call and
+            arguments.get('run_in_background', False) is False and
+            arguments.get('command') == 'python3 -u ' + shlex.quote(str(root / 'native-progress.py')) and
+            not receipts)
+        evidence['reason'] = 'Native foreground Bash call exists with no matching tool-result receipt' if evidence['verified'] else 'Native foreground ownership or pending tool receipt could not be verified'
+    except Exception as error:
+        evidence['error'] = str(error)
+    write_private(root / 'native-evidence' / ('stage-' + stage + '.json'), evidence)
+    return evidence
+
 class Model(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_): pass
     def do_GET(self):
@@ -38,8 +86,11 @@ class Model(http.server.BaseHTTPRequestHandler):
                 sample["visibleNs"] = captured
                 sample["acknowledgedNs"] = acknowledged
                 sample["stillBlocked"] = not (root / "complete").exists()
+                evidence = foreground_evidence(stage)
+                sample["foregroundVerified"] = evidence['verified']
+                sample["foregroundEvidence"] = 'native-evidence/stage-' + stage + '.json'
                 sample["latencyMs"] = (captured - sample["emittedNs"]) / 1e6
-                sample["passed"] = sample["stillBlocked"] and 0 <= sample.get("latencyMs", 999999) <= 2000
+                sample["passed"] = sample["stillBlocked"] and sample["foregroundVerified"] and 0 <= sample.get("latencyMs", 999999) <= 2000
                 write_private(root / "latency.json", timing)
             elif path == "/shutdown": shutdown()
             result = dict(timing.get(stage, {})) if path == "/visible" else dict(timing)
@@ -169,5 +220,5 @@ finally:
             process.terminate()
             try: process.wait(timeout=5)
             except subprocess.TimeoutExpired: process.kill(); process.wait()
-    write_private(root / 'final-native-state.json', {'timing':timing,'accountUsed':False,'commandSchedulingChanged':False})
+    write_private(root / 'final-native-state.json', {'timing':timing,'accountUsed':False,'foregroundVerifiedAtEverySample':len(timing) == 3 and all(sample.get('foregroundVerified') for sample in timing.values())})
     model.shutdown(); model.server_close()

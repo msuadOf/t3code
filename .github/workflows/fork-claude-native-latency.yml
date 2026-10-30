@@ -242,6 +242,7 @@ jobs:
               root = pathlib.Path(json.loads(ready.read_text().splitlines()[0])['root'])
               for name in ['t3.log', 'native.log', 'model-events.jsonl', 'final-native-state.json', 'cli-terminal.bin', 'latency.json', 'cleanup-error.txt']:
                   if (root / name).exists(): shutil.copy(root / name, 'artifacts/native-session/' + name)
+              if (root / 'native-evidence').exists(): shutil.copytree(root / 'native-evidence', 'artifacts/native-session/native-evidence', dirs_exist_ok=True)
           PY
           fi
 
