@@ -69,7 +69,7 @@ class FixtureClient extends NativeClaudeClient {
   readonly subscribed = new Promise<void>((resolve) => {
     this.onSubscribe = resolve;
   });
-  override async *subscribeState(_session: NativeClaudeSession, signal?: AbortSignal) {
+  override async *subscribe(_session: NativeClaudeSession, signal?: AbortSignal) {
     this.subscriptions += 1;
     this.onSubscribe?.();
     yield { type: "snapshot", record: {} };
@@ -1072,7 +1072,7 @@ it.effect("keeps a replacement watcher alive when its predecessor's scope closes
       override async listSessions() {
         return [job];
       }
-      override async *subscribeState(_job: NativeClaudeSession, signal?: AbortSignal) {
+      override async *subscribe(_job: NativeClaudeSession, signal?: AbortSignal) {
         const index = controllers.length;
         controllers.push(signal!);
         if (index === 1) secondReady?.();

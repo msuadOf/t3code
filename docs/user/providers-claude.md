@@ -218,7 +218,21 @@ T3 does not change command timeouts or move commands into the background to obta
 live output. Sharing a background Claude session does not require its commands to
 run as background tasks. Commands that Claude natively runs in the background can
 still expose a live output tail through their verified task receipt; continuous
-output from commands that stay in the foreground is not yet guaranteed.
+output from foreground commands is also observed from verified session-owned native
+output files. These appear as **Session output (tool not identified)**, separate
+from tool results: a session file identifies its session, not a particular Bash
+call or exit status. Capture completion does not establish command success.
+
+A separate **Native CLI view (partial)** restores the live terminal screen from a
+passive native subscription. It can show command progress even when no structured
+output is available. Cursor redraws are applied rather than appended to chat;
+this view may include earlier conversation and starts from live bytes after
+connection. It is never parsed into approvals, tool results or future context.
+Both views use the same daemon events on web, desktop and mobile. Captures start
+only for live turns, stop with their turn, and are bounded; discovery limits are
+reported as incomplete capture. The one-second sampling cadence targets updates
+within two seconds on a healthy local connection, not an unconditional network
+latency guarantee.
 
 ## Native conversation controls
 

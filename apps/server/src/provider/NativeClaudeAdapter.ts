@@ -1,3 +1,4 @@
+import { makeNativeClaudeTerminalView } from "./NativeClaudeTerminalView.ts";
 import { nativeSessionProjectionId } from "@t3tools/provider-core/server/nativeSessions";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import {
@@ -52,6 +53,7 @@ import {
   type PreparedClaudeMcp,
 } from "./NativeClaudeMcpBindings.ts";
 import type { NativeClaudeBackgroundCommand } from "./NativeClaudeBackgroundCommands.ts";
+import { makeNativeClaudeSessionStreams } from "./NativeClaudeSessionStreams.ts";
 import { makeNativeClaudeBackgroundOutput } from "./NativeClaudeBackgroundOutput.ts";
 import { NativeClaudeSessions } from "./NativeClaudeSessions.ts";
 import {
@@ -373,6 +375,18 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         emit,
         itemOrdinal,
       });
+      const terminalView = makeNativeClaudeTerminalView({ ids: allocator, emit, itemOrdinal });
+      const sessionStreams = makeNativeClaudeSessionStreams({
+        ids: allocator,
+        emit,
+        itemOrdinal,
+        ...(options.environment.CLAUDE_CODE_TMPDIR || options.environment.TMPDIR
+          ? {
+              temporaryDirectory:
+                options.environment.CLAUDE_CODE_TMPDIR || options.environment.TMPDIR!,
+            }
+          : {}),
+      });
       const settleQuestion = Effect.fn("NativeClaudeAdapter.settleQuestion")(function* (
         key: string,
         status: "resolved" | "cancelled",
@@ -478,10 +492,12 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
           yield* Effect.addFinalizer(() => Effect.sync(() => controller.abort()));
           let signature = "";
           yield* Stream.fromAsyncIterable(
-            client.subscribeState(job, controller.signal),
+            client.subscribe(job, controller.signal),
             (cause) => cause,
           ).pipe(
             Stream.runForEach((frame) => {
+              terminalView.accept(id, frame);
+              if (frame.type === "stream") return Effect.void;
               // A snapshot is the subscription baseline; replayed snapshots must not spin hydrate.
               if (frame.type === "snapshot") return Effect.void;
               const next = JSON.stringify(frame);
@@ -744,6 +760,23 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                 ? inventory.find((session) => session.sessionId === id)
                 : undefined;
             const finished = nativeClaudeObservedTurnIsTerminal(turn, job, ownership.interrupted);
+            yield* sessionStreams.sample(
+              id,
+              owner,
+              providerTurnId,
+              turn.id,
+              turn.startedAt,
+              finished,
+              commands.map((command) => command.outputPath),
+            );
+            yield* terminalView.sample(
+              id,
+              owner,
+              providerTurnId,
+              turn.id,
+              turn.startedAt,
+              finished,
+            );
             const nativeFailure = turn.status === "failed" || job?.state === "failed";
             const wasInterrupted =
               ownership.interrupted || turn.status === "interrupted" || job?.state === "stopped";
@@ -1358,6 +1391,8 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
             observed.delete(id);
             recoverBackgroundOnRegister.delete(id);
             backgroundOutput.drop(id);
+            sessionStreams.drop(id);
+            terminalView.drop(id);
             watchers.get(id)?.controller.abort();
             watchers.delete(id);
             for (const key of subagentOwners.keys())
