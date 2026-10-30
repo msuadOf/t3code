@@ -214,27 +214,11 @@ Claude Code's verbose mode can stay enabled when you use Claude for text generat
 thread titles, branch names, commit messages, and pull request descriptions. On a remote connection,
 T3 Code uses the Claude configuration on the connected server.
 
-## Optional automatic command backgrounding
-
-**Automatically background long commands in new sessions** is off by default.
-When enabled, T3 gives newly launched workers a private native setting that reduces
-the default foreground wait to five seconds. Eligible commands that exceed that wait
-continue in Claude's background task system, where T3 can read their live output.
-Commands with explicit model-supplied timeouts retain those timeouts; T3 does not
-rewrite tool arguments or lower the maximum timeout.
-
-This changes execution behavior. A command starting with `sleep` may be stopped at
-its timeout instead of moving to the background. Directory changes inside a moved
-command do not carry over to later commands. A subagent can terminate its moved
-foreground command when the subagent finishes. This option does not turn every
-foreground tool into a streaming tool.
-
-The option applies only when T3 launches a new worker. Reopening history can use it
-when that history has no existing native job. Attaching to or waking an existing
-worker preserves its saved launch settings. Changing the option does not install it into active workers.
-Disabling model activity keeps the command policy; new forks inherit the source's
-owned command policy without modifying its settings. Global Claude settings are
-not changed.
+T3 does not change command timeouts or move commands into the background to obtain
+live output. Sharing a background Claude session does not require its commands to
+run as background tasks. Commands that Claude natively runs in the background can
+still expose a live output tail through their verified task receipt; continuous
+output from commands that stay in the foreground is not yet guaranteed.
 
 ## Native conversation controls
 

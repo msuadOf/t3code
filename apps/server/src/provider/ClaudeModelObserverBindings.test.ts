@@ -1,7 +1,3 @@
-import {
-  prepareClaudeBackgroundSettings,
-  readClaudeBackgroundPolicy,
-} from "./NativeClaudeBackgroundPolicy.ts";
 // @effect-diagnostics nodeBuiltinImport:off - Isolated private-file routing verification.
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
@@ -447,42 +443,4 @@ it("rejects a private route whose telemetry destination or privacy settings were
       readClaudeModelObserverBinding({ stateDir, instanceId, nativeSessionId }),
     ).rejects.toThrow("telemetry settings");
   }
-});
-
-it("retains an opted-in native background policy when model observation is disabled and reenabled", async () => {
-  const prepared = await prepareClaudeModelObserverSettings({
-    stateDir,
-    instanceId,
-    upstreamUrl: descriptor().upstreamUrl,
-  });
-  const input = {
-    stateDir,
-    instanceId,
-    nativeSessionId,
-    configDirectory: descriptor().configDirectory,
-  };
-  await prepareClaudeBackgroundSettings(input.configDirectory, prepared.settingsPath);
-  await writeClaudeModelObserverBinding({ ...descriptor(), ...prepared, stateDir });
-  const job = NodePath.join(
-    input.configDirectory,
-    "jobs",
-    nativeSessionId.slice(0, 8),
-    "state.json",
-  );
-  await NodeFSP.mkdir(NodePath.dirname(job), { recursive: true });
-  await NodeFSP.writeFile(
-    job,
-    JSON.stringify({
-      sessionId: nativeSessionId,
-      state: "stopped",
-      respawnFlags: ["--settings", prepared.settingsPath],
-    }),
-  );
-  expect(await isClaudeModelObserverBindingCurrent(input)).toBe(true);
-  await setClaudeModelObserverEnabled({ ...input, enabled: false });
-  expect(await isClaudeModelObserverBindingCurrent(input)).toBe(false);
-  expect(await readClaudeBackgroundPolicy(prepared.settingsPath)).toBe(true);
-  await setClaudeModelObserverEnabled({ ...input, enabled: true });
-  expect(await isClaudeModelObserverBindingCurrent(input)).toBe(true);
-  expect(await readClaudeBackgroundPolicy(prepared.settingsPath)).toBe(true);
 });

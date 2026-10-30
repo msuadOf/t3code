@@ -282,7 +282,6 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       configDirectory: configDir,
       modelActivity,
       observeNewSessions: effectiveConfig.modelActivityForNewSessions === true,
-      autoBackgroundCommands: effectiveConfig.autoBackgroundCommands === true,
       resolveAttachmentPath: providerHost.resolveAttachmentPath,
       mcp: {
         bindings: mcpBindings,

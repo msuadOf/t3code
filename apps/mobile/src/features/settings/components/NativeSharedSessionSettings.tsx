@@ -45,29 +45,24 @@ export function NativeSharedSessionSettings({
   const upstream =
     typeof saved.modelActivityUpstreamUrl === "string" ? saved.modelActivityUpstreamUrl : "";
   const observeNew = saved.modelActivityForNewSessions === true;
-  const autoBackgroundCommands = saved.autoBackgroundCommands === true;
   const [draft, setDraft] = useState<{
     endpoint: string;
     root: string;
     upstream: string;
     observeNew: boolean;
-    autoBackgroundCommands: boolean;
   } | null>(null);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const canManage = useEnvironmentScope(environmentId, AuthProvidersManageScope);
   const updateSettings = useAtomCommand(serverEnvironment.mutateProviderInstance);
-  const value = draft ?? { endpoint, root, upstream, observeNew, autoBackgroundCommands };
+  const value = draft ?? { endpoint, root, upstream, observeNew };
   const needsCliLogin = isCodex && saved.setupMode === "managed";
   const dirty =
     needsCliLogin ||
     value.endpoint.trim() !== endpoint ||
     value.root.trim() !== root ||
-    (isClaude &&
-      (value.upstream.trim() !== upstream ||
-        value.observeNew !== observeNew ||
-        value.autoBackgroundCommands !== autoBackgroundCommands));
+    (isClaude && (value.upstream.trim() !== upstream || value.observeNew !== observeNew));
   const unavailable = disabled || !canManage || saving;
 
   async function save() {
@@ -104,7 +99,6 @@ export function NativeSharedSessionSettings({
                 ? {
                     modelActivityUpstreamUrl: value.upstream.trim(),
                     modelActivityForNewSessions: value.observeNew,
-                    autoBackgroundCommands: value.autoBackgroundCommands,
                   }
                 : {}),
             },
@@ -195,24 +189,13 @@ export function NativeSharedSessionSettings({
         ) : null}
       </View>
       {isClaude ? (
-        <>
-          <SettingsSwitchRow
-            label="Automatically background long commands in new sessions"
-            subtitle="Off by default. New workers wait up to 5 seconds before Claude backgrounds eligible commands. Explicit timeouts still apply. Sleep-first commands may stop; background cd does not change the session directory; subagents may stop commands when they finish. Existing workers are unchanged."
-            value={value.autoBackgroundCommands}
-            disabled={unavailable}
-            onValueChange={(autoBackgroundCommands) =>
-              setDraft({ ...value, autoBackgroundCommands })
-            }
-          />
-          <SettingsSwitchRow
-            label="Observe model activity for new sessions"
-            subtitle="API key / gateway only. Existing sessions are unchanged."
-            value={value.observeNew}
-            disabled={unavailable}
-            onValueChange={(observeNew) => setDraft({ ...value, observeNew })}
-          />
-        </>
+        <SettingsSwitchRow
+          label="Observe model activity for new sessions"
+          subtitle="API key / gateway only. Existing sessions are unchanged."
+          value={value.observeNew}
+          disabled={unavailable}
+          onValueChange={(observeNew) => setDraft({ ...value, observeNew })}
+        />
       ) : null}
       <SettingsActionRow
         icon="checkmark"

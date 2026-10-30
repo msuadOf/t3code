@@ -107,14 +107,3 @@ describe("ProviderSettingsForm helpers", () => {
     expect(next).toEqual({ experimental: false });
   });
 });
-
-it("offers native command backgrounding as an explicit off-by-default Claude switch", () => {
-  const claude = providerClients.get(ProviderDriverKind.make("claudeAgent"));
-  const field = deriveProviderSettingsFields(claude!).find(
-    (item) => item.key === "autoBackgroundCommands",
-  )!;
-  expect(field.control).toBe("switch");
-  const enabled = nextProviderConfigWithFieldValue({}, field, true);
-  expect(enabled).toEqual({ autoBackgroundCommands: true });
-  expect(nextProviderConfigWithFieldValue(enabled, field, false)).toBeUndefined();
-});
