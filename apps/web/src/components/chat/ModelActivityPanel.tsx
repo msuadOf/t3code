@@ -52,17 +52,17 @@ function ModelRequest({
         {request.confirmed
           ? "Saved in conversation"
           : request.status === "running"
-            ? "Receiving · Not yet saved by Claude"
+            ? "Receiving · Not yet matched to Claude history"
             : request.status === "failed"
-              ? "Stream ended unexpectedly · Not yet saved by Claude"
-              : "Response received · Not yet saved by Claude"}
+              ? "Stream ended unexpectedly · Not yet matched to Claude history"
+              : "Response received · Not yet matched to Claude history"}
       </p>
       <CollapsiblePanel animate={false}>
         <div className="space-y-2 px-2 pb-3">
           <p className="text-xs text-muted-foreground">
             {request.confirmed
               ? "Matched to Claude’s saved message. Expand only to inspect the observed response."
-              : "Not yet saved by Claude"}
+              : "Not yet matched to Claude history"}
           </p>
           {request.messageId ? (
             <p className="break-all font-mono text-xs text-muted-foreground">
@@ -165,7 +165,7 @@ export function ModelActivityView({
     return observeResize(elements, follow);
   });
   const disconnected = activity.connectionState === "disconnected" || failed;
-  const unsaved = requests.filter((request) => !request.confirmed).length;
+  const unmatched = requests.filter((request) => !request.confirmed).length;
   return (
     <aside
       aria-label="Model activity"
@@ -180,7 +180,11 @@ export function ModelActivityView({
       >
         <CollapsibleTrigger render={<Button variant="ghost" size="sm" />}>
           {open ? "▾" : "▸"} Model activity
-          {disconnected ? " · reconnecting" : unsaved > 0 ? ` · ${unsaved} not yet saved` : ""}
+          {disconnected
+            ? " · reconnecting"
+            : unmatched > 0
+              ? ` · ${unmatched} not yet matched`
+              : ""}
         </CollapsibleTrigger>
         <CollapsiblePanel animate={false}>
           {target ? (

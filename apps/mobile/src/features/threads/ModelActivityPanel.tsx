@@ -42,7 +42,7 @@ function ModelRequest({
       <RowPressable
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
-        accessibilityLabel={`${modelActivitySourceLabel(request)}, request ${request.id.slice(-8)}, ${request.confirmed ? "Saved in conversation" : "Not yet saved by Claude"}`}
+        accessibilityLabel={`${modelActivitySourceLabel(request)}, request ${request.id.slice(-8)}, ${request.confirmed ? "Saved in conversation" : "Not yet matched to Claude history"}`}
         onPress={() => {
           onToggle();
           setExpanded({ confirmed: request.confirmed, open: !open });
@@ -64,7 +64,7 @@ function ModelRequest({
           <Text className="text-xs text-foreground-muted">
             {request.confirmed
               ? "Matched to Claude’s saved message. Expand only to inspect the observed response."
-              : "Not yet saved by Claude"}
+              : "Not yet matched to Claude history"}
           </Text>
           {request.messageId ? (
             <Text selectable className="font-mono text-xs text-foreground-muted">
@@ -165,7 +165,7 @@ function ModelActivityView({
   // oxlint-disable-next-line unicorn/no-array-reverse -- Hermes lacks toReversed; reverse only this copy.
   const newestFirst = [...requests].reverse();
   const disconnected = activity.connectionState === "disconnected" || failed;
-  const unsaved = requests.filter((request) => !request.confirmed).length;
+  const unmatched = requests.filter((request) => !request.confirmed).length;
   return (
     <View
       accessibilityLabel="Model activity"
@@ -182,7 +182,11 @@ function ModelActivityView({
       >
         <Text className="py-2 text-sm text-foreground">
           {open ? "▾" : "▸"} Model activity
-          {disconnected ? " · reconnecting" : unsaved > 0 ? ` · ${unsaved} not yet saved` : ""}
+          {disconnected
+            ? " · reconnecting"
+            : unmatched > 0
+              ? ` · ${unmatched} not yet matched`
+              : ""}
         </Text>
       </RowPressable>
       {open ? (

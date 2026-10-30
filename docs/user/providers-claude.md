@@ -133,8 +133,8 @@ Web, desktop and mobile show the same **Model activity** panel. It receives real
 response increments, including available text, thinking and partial tool input.
 Named tools show their arguments as they arrive. **Arguments received** means the
 model finished preparing the call; execution results appear in the saved conversation.
-These responses can include auxiliary model requests and are marked **Not yet saved
-by Claude**. Only a matching message saved by Claude changes the status to **Saved
+These responses can include auxiliary model requests and are marked **Not yet matched
+to Claude history**. Only a matching message saved by Claude changes the status to **Saved
 in conversation** and collapses that response; provisional activity does not become
 conversation history or future context. Missing or trimmed activity is indicated.
 
