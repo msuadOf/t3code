@@ -33,9 +33,9 @@ appId: com.t3tools.t3code.dev
 - tapOn: "(?s).*Native stream smoke.*"
 - runScript: claude-start.js
 - extendedWaitUntil:
-    visible: "(?s)^(Running.*Read-only.*|Running.*Bash.*|Bash)$"
+    visible: "(?s)^(Running (Read-only|Bash|Native|python3)( .*)?|Bash)$"
     timeout: 30000
-- tapOn: "(?s)^(Running.*Read-only.*|Running.*Bash.*|Bash)$"
+- tapOn: "(?s)^(Running (Read-only|Bash|Native|python3)( .*)?|Bash)$"
 - extendedWaitUntil:
     visible: "(?s).*Read-only native terminal view.*"
     timeout: 30000
