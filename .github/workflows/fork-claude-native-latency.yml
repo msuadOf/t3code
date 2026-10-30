@@ -165,6 +165,34 @@ jobs:
             apps/mobile/android/app/build/outputs/apk/release/app-release.apk
             ${{ runner.temp }}/native-stream-ios/Build/Products/Release-iphonesimulator/T3CodeDev.app
 
+      - name: Prepare iOS simulator and install app
+        if: matrix.platform == 'ios'
+        timeout-minutes: 15
+        run: |
+          python3 .github/native-stream/claude-run-bounded.py 60 list-device-types xcrun simctl list devicetypes --json > "$RUNNER_TEMP/latency-device-types.json"
+          python3 .github/native-stream/claude-run-bounded.py 60 list-runtimes xcrun simctl list runtimes --json > "$RUNNER_TEMP/latency-runtimes.json"
+          node --input-type=module - "$RUNNER_TEMP/latency-device-types.json" "$RUNNER_TEMP/latency-runtimes.json" <<'JSDEVICE' > "$RUNNER_TEMP/latency-device-selection.json"
+          import fs from "node:fs";
+          const types = JSON.parse(fs.readFileSync(process.argv[2], "utf8")).devicetypes;
+          const runtimes = JSON.parse(fs.readFileSync(process.argv[3], "utf8")).runtimes;
+          const device = types.find(d => d.identifier === "com.apple.CoreSimulator.SimDeviceType.iPhone-SE-3rd-generation");
+          const runtime = runtimes.filter(r => r.isAvailable && r.name.startsWith("iOS ")).sort((a, b) => b.version.localeCompare(a.version, undefined, {numeric: true}))[0];
+          if (!device || !runtime) throw new Error("iPhone SE (3rd generation) and an available iOS runtime are required for bounded-framebuffer latency acceptance");
+          console.log(JSON.stringify({deviceType: device.identifier, deviceName: device.name, runtime: runtime.identifier}));
+          JSDEVICE
+          device_type="$(node -p "JSON.parse(require('fs').readFileSync(process.env.RUNNER_TEMP+'/latency-device-selection.json','utf8')).deviceType")"
+          runtime="$(node -p "JSON.parse(require('fs').readFileSync(process.env.RUNNER_TEMP+'/latency-device-selection.json','utf8')).runtime")"
+          device_id="$(python3 .github/native-stream/claude-run-bounded.py 60 create-device xcrun simctl create 'T3 latency iPhone SE' "$device_type" "$runtime")"
+          cp "$RUNNER_TEMP/latency-device-selection.json" artifacts/native-session/ios-device-selection.json
+          echo "$device_id" > artifacts/native-session/ios-device-id.txt
+          echo "IOS_LATENCY_DEVICE=$device_id" >> "$GITHUB_ENV"
+          python3 .github/native-stream/claude-run-bounded.py 60 boot xcrun simctl boot "$device_id"
+          python3 .github/native-stream/claude-run-bounded.py 300 boot-ready xcrun simctl bootstatus "$device_id" -b
+          app_path="$RUNNER_TEMP/native-stream-ios/Build/Products/Release-iphonesimulator/T3CodeDev.app"
+          python3 .github/native-stream/claude-run-bounded.py 60 verify-signature codesign --verify --deep --strict --verbose=2 "$app_path"
+          python3 .github/native-stream/claude-run-bounded.py 60 inspect-entitlements codesign --display --entitlements :- "$app_path" > artifacts/native-session/simulator-entitlements.plist
+          python3 .github/native-stream/claude-run-bounded.py 180 install-app xcrun simctl install "$device_id" "$app_path"
+
       - name: Start isolated native session and T3 daemon
         run: |
           python3 .github/native-stream/claude-fixture.py > "$RUNNER_TEMP/native-session-ready.jsonl" 2> artifacts/native-session/fixture.log &
@@ -216,32 +244,11 @@ jobs:
 
       - name: Test iOS native renderer
         if: matrix.platform == 'ios'
+        timeout-minutes: 20
         env:
           MAESTRO_DRIVER_STARTUP_TIMEOUT: "300000"
         run: |
-          xcrun simctl list devicetypes --json > "$RUNNER_TEMP/latency-device-types.json"
-          xcrun simctl list runtimes --json > "$RUNNER_TEMP/latency-runtimes.json"
-          node --input-type=module - "$RUNNER_TEMP/latency-device-types.json" "$RUNNER_TEMP/latency-runtimes.json" <<'JSDEVICE' > "$RUNNER_TEMP/latency-device-selection.json"
-          import fs from "node:fs";
-          const types = JSON.parse(fs.readFileSync(process.argv[2], "utf8")).devicetypes;
-          const runtimes = JSON.parse(fs.readFileSync(process.argv[3], "utf8")).runtimes;
-          const device = types.find(d => d.identifier === "com.apple.CoreSimulator.SimDeviceType.iPhone-SE-3rd-generation");
-          const runtime = runtimes.filter(r => r.isAvailable && r.name.startsWith("iOS ")).sort((a, b) => b.version.localeCompare(a.version, undefined, {numeric: true}))[0];
-          if (!device || !runtime) throw new Error("iPhone SE (3rd generation) and an available iOS runtime are required for bounded-framebuffer latency acceptance");
-          console.log(JSON.stringify({deviceType: device.identifier, deviceName: device.name, runtime: runtime.identifier}));
-          JSDEVICE
-          device_type="$(node -p "JSON.parse(require('fs').readFileSync(process.env.RUNNER_TEMP+'/latency-device-selection.json','utf8')).deviceType")"
-          runtime="$(node -p "JSON.parse(require('fs').readFileSync(process.env.RUNNER_TEMP+'/latency-device-selection.json','utf8')).runtime")"
-          device_id="$(xcrun simctl create 'T3 latency iPhone SE' "$device_type" "$runtime")"
-          cp "$RUNNER_TEMP/latency-device-selection.json" artifacts/native-session/ios-device-selection.json
-          echo "$device_id" > artifacts/native-session/ios-device-id.txt
-          xcrun simctl boot "$device_id"
-          xcrun simctl bootstatus "$device_id" -b
-          xcrun simctl ui "$device_id" appearance light
-          app_path="$RUNNER_TEMP/native-stream-ios/Build/Products/Release-iphonesimulator/T3CodeDev.app"
-          codesign --verify --deep --strict --verbose=2 "$app_path"
-          codesign --display --entitlements :- "$app_path" > artifacts/native-session/simulator-entitlements.plist
-          xcrun simctl install "$device_id" "$app_path"
+          device_id="$IOS_LATENCY_DEVICE"
           maestro --device "$device_id" test -e DAEMON_ADDRESS="$DAEMON_ADDRESS" -e PAIRING_CODE="$PAIRING_CODE" -e CONTROL_URL="$CONTROL_URL" --format junit --output artifacts/native-session/results.xml --test-output-dir artifacts/native-session/maestro .github/native-stream/claude-session-flow.yaml
           python3 .github/native-stream/claude-screen-latency.py --platform ios --device "$device_id"
 
