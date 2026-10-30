@@ -1,7 +1,16 @@
 appId: com.t3tools.t3code.dev
 ---
-- launchApp:
-    clearState: true
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - launchApp:
+          clearState: true
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - launchApp
 - runFlow:
     when:
       platform: Android
