@@ -211,6 +211,8 @@ jobs:
 
       - name: Test iOS native renderer
         if: matrix.platform == 'ios'
+        env:
+          MAESTRO_DRIVER_STARTUP_TIMEOUT: "300000"
         run: |
           xcrun simctl list devicetypes --json > "$RUNNER_TEMP/latency-device-types.json"
           xcrun simctl list runtimes --json > "$RUNNER_TEMP/latency-runtimes.json"
