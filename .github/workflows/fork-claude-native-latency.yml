@@ -10,6 +10,12 @@ on:
       - .github/native-stream/test_android_screencap.py
       - apps/server/src/provider/NativeClaude*
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Native platform to accept
+        type: choice
+        options: [all, android, ios]
+        default: all
 
 defaults:
   run:
@@ -34,11 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: android
-            runner: ubuntu-24.04
-          - platform: ios
-            runner: macos-15
+        include: ${{ fromJSON(inputs.platform == 'ios' && '[{"platform":"ios","runner":"macos-15"}]' || inputs.platform == 'android' && '[{"platform":"android","runner":"ubuntu-24.04"}]' || '[{"platform":"android","runner":"ubuntu-24.04"},{"platform":"ios","runner":"macos-15"}]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
