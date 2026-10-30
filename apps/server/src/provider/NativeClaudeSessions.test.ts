@@ -454,6 +454,7 @@ it.effect(
           message: {
             stop_reason: "end_turn",
             model: "native-child-model",
+            id: "native-child-response",
             content: [{ type: "text", text: "Child result" }],
           },
         }) + "\n",
@@ -468,6 +469,121 @@ it.effect(
         result: "Child result",
         model: "native-child-model",
       });
+      expect(yield* Effect.promise(() => source.confirmedModelMessageIds(id))).toEqual([
+        "native-child-response",
+      ]);
+      const meta = path.join(childDirectory, `agent-${agentId}.meta.json`);
+      yield* fs.writeFileString(
+        meta,
+        JSON.stringify({ toolUseId: "other-parent-tool", finished: true }),
+      );
+      expect(yield* Effect.promise(() => source.confirmedModelMessageIds(id))).toEqual([]);
+      yield* fs.writeFileString(meta, JSON.stringify({ toolUseId: "agent-tool", finished: true }));
+      const childPath = path.join(childDirectory, `agent-${agentId}.jsonl`);
+      const genuine = yield* fs.readFileString(childPath);
+      const childEntry = JSON.parse(genuine.trim());
+      const untrusted = [
+        { ...childEntry, agentId: "a-other", message: { id: "wrong-agent" } },
+        { ...childEntry, sessionId: "other", message: { id: "wrong-session" } },
+        { ...childEntry, isSidechain: false, message: { id: "not-sidechain" } },
+        { ...childEntry, timestamp: "2026-10-28T17:24:28Z", message: { id: "before-launch" } },
+      ];
+      yield* fs.writeFileString(
+        childPath,
+        genuine +
+          untrusted.map((entry) => JSON.stringify(entry)).join("\n") +
+          "\n" +
+          '{"type":"assistant","message":',
+      );
+      expect(yield* Effect.promise(() => source.confirmedModelMessageIds(id))).toEqual([
+        "native-child-response",
+      ]);
+      const outputPath = `/tmp/claude-1000/work/${id}/tasks/native-child-task.output`;
+      const common = {
+        sessionId: id,
+        agentId,
+        isSidechain: true,
+        timestamp: "2026-10-28T17:24:31Z",
+      };
+      const commandRecords = [
+        {
+          ...common,
+          type: "user",
+          uuid: "child-prompt",
+          parentUuid: null,
+          message: { content: "child work" },
+        },
+        {
+          ...common,
+          type: "assistant",
+          uuid: "child-call",
+          parentUuid: "child-prompt",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "child-bash",
+                name: "Bash",
+                input: { command: "printf child-output" },
+              },
+            ],
+          },
+        },
+        {
+          ...common,
+          type: "user",
+          uuid: "child-receipt",
+          parentUuid: "child-call",
+          toolUseResult: { backgroundTaskId: "native-child-task" },
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "child-bash",
+                content: `Command running in background. Output is being written to: ${outputPath}`,
+              },
+            ],
+          },
+        },
+      ];
+      yield* fs.writeFileString(
+        childPath,
+        commandRecords.map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+      );
+      expect(yield* Effect.promise(() => source.backgroundCommands(id))).toMatchObject([
+        {
+          turnId: "prompt",
+          parentToolId: "agent-tool",
+          agentId,
+          toolId: "child-bash",
+          taskId: "native-child-task",
+          command: "printf child-output",
+          outputPath,
+          status: "running",
+        },
+      ]);
+      const notification = {
+        type: "user",
+        sessionId: id,
+        uuid: "background-result",
+        parentUuid: "result",
+        timestamp: "2026-10-28T17:24:32Z",
+        turnOrigin: "task_notification",
+        promptSource: "system",
+        origin: { kind: "task-notification", producer: "session-task" },
+        message: {
+          content: `<task-notification><task-id>native-child-task</task-id><tool-use-id>child-bash</tool-use-id><output-file>${outputPath}</output-file><status>completed</status></task-notification>`,
+        },
+      };
+      yield* fs.writeFileString(
+        path.join(directory, `${id}.jsonl`),
+        [...records, notification].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+      );
+      expect(yield* Effect.promise(() => source.backgroundCommands(id))).toMatchObject([
+        { agentId, parentToolId: "agent-tool", status: "completed" },
+      ]);
+      yield* fs.writeFileString(meta, JSON.stringify({ toolUseId: "unrelated" }));
+      expect(yield* Effect.promise(() => source.backgroundCommands(id))).toEqual([]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
@@ -777,3 +893,60 @@ it.effect(
       });
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it("includes sibling parallel tool receipts only for calls on the active native branch", () => {
+  const prompt = { type: "user", uuid: "prompt", parentUuid: null, message: { content: "work" } };
+  const call = (uuid: string, parentUuid: string, id: string) => ({
+    type: "assistant",
+    uuid,
+    parentUuid,
+    message: {
+      id: "model",
+      content: [{ type: "tool_use", id, name: "Bash", input: { command: id } }],
+    },
+  });
+  const receipt = (uuid: string, parentUuid: string, id: string) => ({
+    type: "user",
+    uuid,
+    parentUuid,
+    toolUseResult: { backgroundTaskId: id },
+    message: { content: [{ type: "tool_result", tool_use_id: id, content: `${id} result` }] },
+  });
+  const records = [
+    prompt,
+    call("one", "prompt", "first"),
+    call("two", "one", "second"),
+    receipt("first-result", "one", "first"),
+    receipt("second-result", "two", "second"),
+    {
+      type: "assistant",
+      uuid: "done",
+      parentUuid: "second-result",
+      message: { content: [{ type: "text", text: "done" }] },
+    },
+  ];
+  expect(
+    nativeClaudeHistory(records)[0]
+      ?.items.filter((item) => item.type === "tool")
+      .map((item) => [item.id, item.status, item.text]),
+  ).toEqual([
+    ["first", "completed", "first result"],
+    ["second", "completed", "second result"],
+  ]);
+  const ambiguous = [
+    ...records.slice(0, -1),
+    receipt("duplicate-result", "one", "first"),
+    records.at(-1)!,
+  ];
+  expect(nativeClaudeHistory(ambiguous)[0]?.items.find((item) => item.id === "first")?.status).toBe(
+    "running",
+  );
+  const foreign = [
+    ...records.slice(0, -1),
+    receipt("foreign-result", "not-an-active-call", "first"),
+    records.at(-1)!,
+  ];
+  expect(nativeClaudeHistory(foreign)[0]?.items.find((item) => item.id === "first")?.text).toBe(
+    "first result",
+  );
+});

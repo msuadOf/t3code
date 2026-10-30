@@ -69,3 +69,61 @@ it("shows live text before source confirmation and preserves it when source conf
     .toBeVisible();
   await expect.element(screen.getByText("Live fixture response")).toBeVisible();
 });
+
+it("keeps receiving after a partial history match and collapses only after stream completion", async () => {
+  const event = (seq: number, type: string, data: Record<string, unknown>): ModelActivity => ({
+    seq,
+    type,
+    data,
+    sessionId: "partial",
+    requestId: "partial",
+    messageId: "msg-partial",
+  });
+  let activity = reduceModelActivity(emptyModelActivityState, {
+    kind: "snapshot",
+    available: true,
+    epoch: "partial",
+    seq: 1,
+    oldestSeq: 1,
+    after: 0,
+    gap: false,
+    confirmedMessageIds: [],
+    events: [
+      event(1, "content_block_delta", {
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "Initial thinking" },
+      }),
+    ],
+  });
+  // No navigation is involved in native history confirmation.
+  await using screen = await render(<ModelActivityView activity={activity} failed={false} />, {
+    router: false,
+  });
+  activity = reduceModelActivity(activity, {
+    kind: "confirmed",
+    epoch: "partial",
+    messageIds: ["msg-partial"],
+  });
+  activity = reduceModelActivity(activity, {
+    kind: "event",
+    epoch: "partial",
+    event: event(2, "content_block_delta", {
+      index: 1,
+      delta: { type: "text_delta", text: "Text arriving after history match" },
+    }),
+  });
+  await screen.rerender(<ModelActivityView activity={activity} failed={false} />);
+  await expect.element(screen.getByText("Text arriving after history match")).toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: /Source not yet confirmed/ }))
+    .toHaveAttribute("aria-expanded", "true");
+  activity = reduceModelActivity(activity, {
+    kind: "event",
+    epoch: "partial",
+    event: event(3, "message_stop", {}),
+  });
+  await screen.rerender(<ModelActivityView activity={activity} failed={false} />);
+  await expect
+    .element(screen.getByRole("button", { name: /Source not yet confirmed/ }))
+    .toHaveAttribute("aria-expanded", "false");
+});

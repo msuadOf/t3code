@@ -5,6 +5,8 @@ import {
   reduceModelActivity,
   modelActivityBlockLabel,
   modelActivitySourceLabel,
+  modelActivityIsSaved,
+  modelActivityStatusLabel,
 } from "./modelActivity.ts";
 
 const event = (
@@ -489,4 +491,18 @@ it("retains thirty-two response streams when late source-only metadata exceeds t
     responses.map((response) => response.requestId),
   );
   expect(state.truncated).toBe(false);
+});
+
+it("describes matched history without declaring a running or interrupted response complete", () => {
+  expect(modelActivityIsSaved({ status: "running", confirmed: true })).toBe(false);
+  expect(modelActivityStatusLabel({ status: "running", confirmed: true })).toBe(
+    "Receiving · Matched to Claude history",
+  );
+  expect(modelActivityStatusLabel({ status: "failed", confirmed: true })).toBe(
+    "Stream ended unexpectedly · Matched to Claude history",
+  );
+  expect(modelActivityIsSaved({ status: "completed", confirmed: true })).toBe(true);
+  expect(modelActivityStatusLabel({ status: "completed", confirmed: true })).toBe(
+    "Saved in conversation",
+  );
 });

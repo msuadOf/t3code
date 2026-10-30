@@ -1,7 +1,9 @@
+import { nativeClaudeConversationBranch as conversationBranch } from "./NativeClaudeConversationBranch.ts";
 import {
   nativeClaudeBackgroundCommands,
   type NativeClaudeBackgroundCommand,
 } from "./NativeClaudeBackgroundCommands.ts";
+import { nativeClaudeConfirmedModelIds } from "./NativeClaudeModelMessages.ts";
 import { nativeClaudeForkOwner } from "./NativeClaudeForks.ts";
 // @effect-diagnostics nodeBuiltinImport:off -- read-only native JSONL reader interoperates with the socket client without changing global process environment.
 import * as NodeFSP from "node:fs/promises";
@@ -22,6 +24,8 @@ import {
 import {
   isNativeClaudeTaskNotification,
   nativeClaudeSubagentLaunches,
+  nativeClaudeSubagentEntries,
+  type NativeClaudeSubagentLaunch,
   observeNativeClaudeSubagent,
   type NativeClaudeSubagentObservation,
 } from "./NativeClaudeSubagents.ts";
@@ -65,33 +69,6 @@ function timestamp(value: unknown, fallback: number): number {
   const parsed =
     typeof value === "string" ? Date.parse(value) : typeof value === "number" ? value : Number.NaN;
   return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-/** Follow the last persisted conversation leaf so abandoned /rewind branches are not replayed. */
-function conversationBranch(entries: readonly Entry[]): readonly Entry[] {
-  const nodes = entries.filter(
-    (entry) => typeof entry.uuid === "string" && entry.isSidechain !== true,
-  );
-  const parents = new Set(nodes.map((entry) => entry.parentUuid));
-  const byId = new Map(
-    entries
-      .filter((entry) => typeof entry.uuid === "string")
-      .map((entry) => [entry.uuid as string, entry]),
-  );
-  // Native persistence can flush an assistant before its buffered user/attachment ancestors.
-  let cursor = nodes.findLast((entry) => !parents.has(entry.uuid));
-  const selected: Entry[] = [];
-  const seen = new Set<string>();
-  while (cursor && typeof cursor.uuid === "string" && !seen.has(cursor.uuid)) {
-    seen.add(cursor.uuid);
-    if (
-      (cursor.type === "user" || cursor.type === "assistant" || cursor.type === "attachment") &&
-      cursor.isSidechain !== true
-    )
-      selected.push(cursor);
-    cursor = typeof cursor.parentUuid === "string" ? byId.get(cursor.parentUuid) : undefined;
-  }
-  return selected.toReversed();
 }
 
 export function nativeClaudeHistory(entries: readonly Entry[]): readonly NativeHistoryTurn[] {
@@ -250,6 +227,10 @@ export class NativeClaudeSessions {
   private readonly commandCache = new WeakMap<
     readonly Entry[],
     readonly NativeClaudeBackgroundCommand[]
+  >();
+  private readonly launchCache = new WeakMap<
+    readonly Entry[],
+    readonly NativeClaudeSubagentLaunch[]
   >();
   private readonly cache = new Map<
     string,
@@ -469,16 +450,12 @@ export class NativeClaudeSessions {
     for (const file of await this.files()) {
       if (NodePath.basename(file, ".jsonl").toLowerCase() !== sessionId.toLowerCase()) continue;
       const entries = (await this.transcript(file)).entries;
-      const ids = new Set<string>();
-      // Only persisted model IDs establish provenance; transcript entry UUIDs do not.
-      for (let index = entries.length - 1; index >= 0 && ids.size < 256; index--) {
-        const entry = entries[index]!;
-        if (entry.type !== "assistant" || entry.sessionId !== sessionId || !object(entry.message))
-          continue;
-        if (typeof entry.message.id === "string" && entry.message.id.length > 0)
-          ids.add(entry.message.id);
-      }
-      return [...ids];
+      const children = await this.linkedSubagentTranscripts(sessionId, file, entries);
+      return nativeClaudeConfirmedModelIds(
+        sessionId,
+        entries,
+        children.map(({ launch, entries }) => ({ agentId: launch.agentId, entries })),
+      );
     }
     const job = (this.lastInventory ?? (await this.client.listSessions())).find(
       (session) => session.kind === "background" && session.sessionId === sessionId,
@@ -503,11 +480,81 @@ export class NativeClaudeSessions {
     return commands;
   }
 
+  private async subagentSidecar(
+    file: string,
+    sessionId: string,
+    launch: NativeClaudeSubagentLaunch,
+  ) {
+    const base = NodePath.join(
+      NodePath.dirname(file),
+      sessionId,
+      "subagents",
+      `agent-${launch.agentId}`,
+    );
+    try {
+      const [metadata, transcript] = await Promise.all([
+        NodeFSP.readFile(`${base}.meta.json`, "utf8").then((text) => JSON.parse(text) as unknown),
+        this.transcript(`${base}.jsonl`),
+      ]);
+      return { metadata, entries: transcript.entries };
+    } catch (cause) {
+      if (!object(cause) || cause.code !== "ENOENT") throw cause;
+      return undefined;
+    }
+  }
+
+  private parsedSubagentLaunches(entries: readonly Entry[]) {
+    const cached = this.launchCache.get(entries);
+    if (cached) return cached;
+    const launches = nativeClaudeSubagentLaunches(
+      nativeClaudeHistory(entries),
+      conversationBranch(entries),
+    );
+    this.launchCache.set(entries, launches);
+    return launches;
+  }
+
+  private async linkedSubagentTranscripts(
+    sessionId: string,
+    file: string,
+    entries: readonly Entry[],
+  ) {
+    const launches = this.parsedSubagentLaunches(entries);
+    return await Promise.all(
+      launches.map(async (launch) => ({
+        launch,
+        entries: nativeClaudeSubagentEntries(
+          sessionId,
+          launch,
+          await this.subagentSidecar(file, sessionId, launch),
+        ),
+      })),
+    );
+  }
+
   async backgroundCommands(sessionId: string) {
     if (!UUID.test(sessionId)) throw new Error("Invalid Claude session ID.");
     for (const file of await this.files()) {
       if (NodePath.basename(file, ".jsonl") !== sessionId) continue;
-      return this.parsedBackgroundCommands(sessionId, (await this.transcript(file)).entries);
+      const entries = (await this.transcript(file)).entries;
+      const children = await this.linkedSubagentTranscripts(sessionId, file, entries);
+      const notifications = conversationBranch(entries).filter(isNativeClaudeTaskNotification);
+      return [
+        ...this.parsedBackgroundCommands(sessionId, entries),
+        ...children.flatMap(({ launch, entries: childEntries }) => {
+          // Child provenance is verified before adapting its sidechain for the common history parser.
+          const normalized = childEntries.map((entry) => ({ ...entry, isSidechain: false }));
+          return nativeClaudeBackgroundCommands(sessionId, nativeClaudeHistory(normalized), [
+            ...conversationBranch(normalized),
+            ...notifications,
+          ]).map((command) => ({
+            ...command,
+            turnId: launch.turnId,
+            parentToolId: launch.toolId,
+            agentId: launch.agentId,
+          }));
+        }),
+      ];
     }
     return [];
   }
@@ -518,30 +565,10 @@ export class NativeClaudeSessions {
     for (const file of await this.files()) {
       if (NodePath.basename(file, ".jsonl") !== sessionId) continue;
       const entries = (await this.transcript(file)).entries;
-      const launches = nativeClaudeSubagentLaunches(
-        nativeClaudeHistory(entries),
-        conversationBranch(entries),
-      );
+      const launches = this.parsedSubagentLaunches(entries);
       return await Promise.all(
         launches.map(async (launch) => {
-          const base = NodePath.join(
-            NodePath.dirname(file),
-            sessionId,
-            "subagents",
-            `agent-${launch.agentId}`,
-          );
-          let sidecar: { metadata: unknown; entries: readonly Entry[] } | undefined;
-          try {
-            const [metadata, transcript] = await Promise.all([
-              NodeFSP.readFile(`${base}.meta.json`, "utf8").then(
-                (text) => JSON.parse(text) as unknown,
-              ),
-              this.transcript(`${base}.jsonl`),
-            ]);
-            sidecar = { metadata, entries: transcript.entries };
-          } catch (cause) {
-            if (!object(cause) || cause.code !== "ENOENT") throw cause;
-          }
+          const sidecar = await this.subagentSidecar(file, sessionId, launch);
           return observeNativeClaudeSubagent(
             sessionId,
             launch,

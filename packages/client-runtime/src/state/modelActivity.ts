@@ -54,6 +54,22 @@ const record = (value: unknown): Readonly<Record<string, unknown>> =>
     ? (value as Readonly<Record<string, unknown>>)
     : {};
 
+export const modelActivityIsSaved = (request: Pick<ModelActivityRequest, "confirmed" | "status">) =>
+  request.confirmed && request.status === "completed";
+
+export function modelActivityStatusLabel(
+  request: Pick<ModelActivityRequest, "confirmed" | "status">,
+): string {
+  if (modelActivityIsSaved(request)) return "Saved in conversation";
+  const progress =
+    request.status === "running"
+      ? "Receiving"
+      : request.status === "failed"
+        ? "Stream ended unexpectedly"
+        : "Response received";
+  return `${progress} · ${request.confirmed ? "Matched to Claude history" : "Not yet matched to Claude history"}`;
+}
+
 export function modelActivitySourceLabel(request: ModelActivityRequest): string {
   const source = request.source;
   if (!source) return "Source not yet confirmed";

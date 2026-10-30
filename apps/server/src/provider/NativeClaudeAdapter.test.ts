@@ -31,6 +31,7 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2RuntimeRequest,
 } from "@t3tools/contracts";
+import { nativeSessionProjectionId } from "@t3tools/provider-core/server/nativeSessions";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
@@ -1964,6 +1965,8 @@ it.effect(
 
 it.effect.each([
   "complete",
+  "child",
+  "child-siblings",
   "detach",
   "recover",
   "recover-completed",
@@ -1972,7 +1975,7 @@ it.effect.each([
   Effect.gen(function* () {
     const completedRecovery = mode === "recover-completed" || mode === "recover-after-read-error";
     let failCommands = mode === "recover-after-read-error";
-    if (failCommands) {
+    if (failCommands || mode.startsWith("child")) {
       const original = NativeClaudeSessions.prototype.backgroundCommands;
       yield* Effect.acquireRelease(
         Effect.sync(() =>
@@ -1981,7 +1984,22 @@ it.effect.each([
             .mockImplementation(function (this: NativeClaudeSessions, session) {
               return failCommands
                 ? Promise.reject(new Error("temporary native transcript read failure"))
-                : original.call(this, session);
+                : original.call(this, session).then((commands) =>
+                    mode.startsWith("child")
+                      ? commands.flatMap((command) => [
+                          { ...command, parentToolId: "parent-agent-tool", agentId: "a123child" },
+                          ...(mode === "child-siblings"
+                            ? [
+                                {
+                                  ...command,
+                                  parentToolId: "second-parent-agent-tool",
+                                  agentId: "a456child",
+                                },
+                              ]
+                            : []),
+                        ])
+                      : commands,
+                  );
             }),
         ),
         (spy) => Effect.sync(() => spy.mockRestore()),
@@ -2211,7 +2229,38 @@ it.effect.each([
         ...(mode.startsWith("recover") ? { providerTurnId: "original-admission-turn" } : {}),
       },
     });
+    if (mode.startsWith("child")) {
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      expect(command?.type === "turn_item.updated" && command.turnItem.parentItemId).toBe(
+        ids.derive.turnItemFromProviderItem({
+          driver: ProviderDriverKind.make("claudeAgent"),
+          nativeItemId: nativeSessionProjectionId(providerThread, "parent-agent-tool"),
+        }),
+      );
+      expect(
+        command?.type === "turn_item.updated" && command.turnItem.nativeItemRef?.nativeId,
+      ).toContain("a123child");
+    }
     yield* Deferred.await(first);
+    if (mode === "child-siblings") {
+      const commands = events.filter(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "command_execution" &&
+          event.turnItem.status === "running",
+      );
+      expect(
+        new Set(commands.map((event) => event.type === "turn_item.updated" && event.turnItem.id))
+          .size,
+      ).toBe(2);
+      expect(
+        new Set(
+          commands.map(
+            (event) => event.type === "turn_item.updated" && event.turnItem.parentItemId,
+          ),
+        ).size,
+      ).toBe(2);
+    }
     if (completedRecovery) {
       yield* Deferred.await(completed);
       const final = events.findLast(

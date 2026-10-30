@@ -1,3 +1,4 @@
+import { nativeClaudeTaskNotificationContents } from "./NativeClaudeTaskNotifications.ts";
 import type { NativeHistoryTurn } from "@t3tools/provider-core/server/nativeSessions";
 
 type Entry = Readonly<Record<string, unknown>>;
@@ -6,6 +7,8 @@ const uuid = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
 export interface NativeClaudeBackgroundCommand {
   readonly turnId: string;
   readonly toolId: string;
+  readonly parentToolId?: string;
+  readonly agentId?: string;
   readonly taskId: string;
   readonly outputPath: string;
   readonly command: string;
@@ -74,44 +77,39 @@ export function nativeClaudeBackgroundCommands(
         }
       }
     }
-    if (
-      entry.type !== "user" ||
-      entry.turnOrigin !== "task_notification" ||
-      entry.promptSource !== "system" ||
-      !object(entry.origin) ||
-      entry.origin.kind !== "task-notification" ||
-      entry.origin.producer !== "session-task" ||
-      typeof content !== "string" ||
-      !content.trim().startsWith("<task-notification>") ||
-      !content.trim().endsWith("</task-notification>")
-    )
-      continue;
-    const tag = (name: string) => {
-      const matches = [...content.matchAll(new RegExp(`<${name}>([^<]*)</${name}>`, "g"))];
-      return matches.length === 1 ? matches[0]?.[1] : undefined;
-    };
-    const toolId = tag("tool-use-id"),
-      taskId = tag("task-id"),
-      outputPath = tag("output-file"),
-      status = tag("status");
-    if (
-      !toolId ||
-      !taskId ||
-      !outputPath ||
-      (status !== "completed" && status !== "failed" && status !== "killed" && status !== "stopped")
-    )
-      continue;
-    const mappedStatus = status === "killed" || status === "stopped" ? "cancelled" : status;
-    const at = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : NaN;
-    const id = key(toolId, taskId, outputPath),
-      previous = notifications.get(id);
-    if (previous === null || (previous && previous.status !== mappedStatus))
-      notifications.set(id, null);
-    else if (!previous)
-      notifications.set(id, {
-        status: mappedStatus,
-        ...(Number.isFinite(at) ? { completedAt: at } : {}),
-      });
+    for (const notificationContent of nativeClaudeTaskNotificationContents(entry)) {
+      const tag = (name: string) => {
+        const matches = [
+          ...notificationContent.matchAll(new RegExp(`<${name}>([^<]*)</${name}>`, "g")),
+        ];
+        return matches.length === 1 ? matches[0]?.[1] : undefined;
+      };
+      const toolId = tag("tool-use-id"),
+        taskId = tag("task-id"),
+        outputPath = tag("output-file"),
+        status = tag("status");
+      if (
+        !toolId ||
+        !taskId ||
+        !outputPath ||
+        (status !== "completed" &&
+          status !== "failed" &&
+          status !== "killed" &&
+          status !== "stopped")
+      )
+        continue;
+      const mappedStatus = status === "killed" || status === "stopped" ? "cancelled" : status;
+      const at = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : NaN;
+      const id = key(toolId, taskId, outputPath),
+        previous = notifications.get(id);
+      if (previous === null || (previous && previous.status !== mappedStatus))
+        notifications.set(id, null);
+      else if (!previous)
+        notifications.set(id, {
+          status: mappedStatus,
+          ...(Number.isFinite(at) ? { completedAt: at } : {}),
+        });
+    }
   }
   const result: NativeClaudeBackgroundCommand[] = [];
   for (const turn of history)

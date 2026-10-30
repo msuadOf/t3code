@@ -15,7 +15,12 @@ export function resolveModelActivityFollowTarget(
   let fallback: string | null = null;
   for (let index = requests.length - 1; index >= floor; index--) {
     const request = requests[index];
-    if (!request || request.confirmed || request.status === "failed") continue;
+    if (
+      !request ||
+      (request.confirmed && request.status !== "running") ||
+      request.status === "failed"
+    )
+      continue;
     const key = modelActivityRequestKey(request);
     if (request.status === "running") return key;
     fallback ??= key;

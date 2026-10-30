@@ -1,3 +1,8 @@
+import {
+  prepareClaudeBackgroundSettings,
+  ownedClaudeBackgroundSettings,
+  readClaudeBackgroundPolicy,
+} from "./NativeClaudeBackgroundPolicy.ts";
 // @effect-diagnostics nodeBuiltinImport:off -- native daemon socket transport and CLI invocation use Node interoperability.
 // @effect-diagnostics globalTimers:off -- bound the native socket handshake independently of Effect runtimes.
 // @effect-diagnostics globalDate:off -- native daemon dispatch protocol requires a wall-clock timestamp.
@@ -112,6 +117,7 @@ export interface NativeClaudeModelActivity {
 }
 
 export interface NativeClaudeClientOptions {
+  readonly autoBackgroundCommands?: boolean;
   readonly modelActivity?: NativeClaudeModelActivity;
   readonly configDirectory?: string;
   readonly platform?: NodeJS.Platform;
@@ -725,10 +731,21 @@ export class NativeClaudeClient {
         "A canonical full Claude session UUID is required to resume its history.",
       );
     const prepared = input.observeModelActivity ? await activity!.prepare() : undefined;
+    const config = this.options.configDirectory ?? this.options.environment?.CLAUDE_CONFIG_DIR;
+    const addBackgroundPolicy =
+      this.options.autoBackgroundCommands === true && existing === undefined;
+    if (addBackgroundPolicy && !config)
+      throw new NativeClaudeError(
+        "ECONFIG",
+        "Claude background policy requires an explicit configuration directory.",
+      );
+    const workerSettings = addBackgroundPolicy
+      ? await prepareClaudeBackgroundSettings(config!, prepared?.settingsPath)
+      : prepared?.settingsPath;
     const args = [
       "--bg",
       ...(input.mcpConfigPath ? ["--mcp-config", input.mcpConfigPath] : []),
-      ...(prepared ? ["--settings", prepared.settingsPath] : []),
+      ...(workerSettings ? ["--settings", workerSettings] : []),
       // Saved sessions retain their own options; overrides make the CLI fork a copy.
       ...(input.resume && input.sessionId
         ? ["--resume", input.sessionId]
@@ -856,7 +873,10 @@ export class NativeClaudeClient {
     ).length;
     if (
       settingsCount > 0 &&
-      (settingsCount !== 1 || (!(await nativeClaudeForkOwner(config, flags)) && !sourceObserver))
+      (settingsCount !== 1 ||
+        (!(await nativeClaudeForkOwner(config, flags)) &&
+          !sourceObserver &&
+          !(await ownedClaudeBackgroundSettings(config, flags))))
     )
       throw new NativeClaudeError(
         "EFORKCONFIG",
@@ -871,10 +891,18 @@ export class NativeClaudeClient {
     );
     // Explicit settings belong only to this fork; source model/permission flags remain native launch flags.
     const prepared = input.observeModelActivity ? await activity!.prepare() : undefined;
+    const sourceSettingsIndex = flags.indexOf("--settings");
+    const inheritedPolicy =
+      sourceSettingsIndex >= 0 &&
+      (await readClaudeBackgroundPolicy(flags[sourceSettingsIndex + 1]!));
+    const forkWorkerSettings =
+      this.options.autoBackgroundCommands || inheritedPolicy
+        ? await prepareClaudeBackgroundSettings(config, prepared?.settingsPath)
+        : prepared?.settingsPath;
     const settingsPath = await prepareNativeClaudeFork(
       config,
       { sourceSessionId: input.sessionId, targetThreadId: input.targetThreadId },
-      prepared?.settingsPath,
+      forkWorkerSettings,
     );
     const output = await this.runCLI(
       [

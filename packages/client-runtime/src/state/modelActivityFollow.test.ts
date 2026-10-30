@@ -107,3 +107,12 @@ describe("model activity follow target", () => {
     );
   });
 });
+
+it("continues following a partially persisted response until its stream completes", () => {
+  expect(resolveModelActivityFollowTarget([request("body", "running", true)], "s:body")).toBe(
+    "s:body",
+  );
+  expect(
+    resolveModelActivityFollowTarget([request("body", "completed", true)], "s:body"),
+  ).toBeNull();
+});

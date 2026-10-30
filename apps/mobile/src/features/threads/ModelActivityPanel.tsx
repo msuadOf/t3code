@@ -2,6 +2,8 @@ import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import {
   modelActivityBlockLabel,
+  modelActivityIsSaved,
+  modelActivityStatusLabel,
   modelActivitySourceLabel,
 } from "@t3tools/client-runtime/state/model-activity";
 import type {
@@ -32,39 +34,33 @@ function ModelRequest({
   readonly followActive: boolean;
 }) {
   const [expanded, setExpanded] = useState<{ confirmed: boolean; open: boolean } | null>(null);
+  const saved = modelActivityIsSaved(request);
   const defaultOpen =
-    !request.confirmed &&
+    !saved &&
     !(request.status === "failed" && !request.blocks.some((block) => block.text.length > 0));
-  const open =
-    followActive || (expanded?.confirmed === request.confirmed ? expanded.open : defaultOpen);
+  const open = followActive || (expanded?.confirmed === saved ? expanded.open : defaultOpen);
   return (
     <View className="gap-2">
       <RowPressable
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
-        accessibilityLabel={`${modelActivitySourceLabel(request)}, request ${request.id.slice(-8)}, ${request.confirmed ? "Saved in conversation" : "Not yet matched to Claude history"}`}
+        accessibilityLabel={`${modelActivitySourceLabel(request)}, request ${request.id.slice(-8)}, ${modelActivityStatusLabel(request)}`}
         onPress={() => {
           onToggle();
-          setExpanded({ confirmed: request.confirmed, open: !open });
+          setExpanded({ confirmed: saved, open: !open });
         }}
       >
         <Text className="py-2 text-sm text-foreground">
           {open ? "▾" : "▸"} {modelActivitySourceLabel(request)} · {request.id.slice(-8)} ·{" "}
-          {request.confirmed
-            ? "Saved in conversation"
-            : request.status === "running"
-              ? "Receiving"
-              : request.status === "failed"
-                ? "Stream ended unexpectedly"
-                : "Response received"}
+          {modelActivityStatusLabel(request)}
         </Text>
       </RowPressable>
       {open ? (
         <View className="gap-2 pb-3">
           <Text className="text-xs text-foreground-muted">
-            {request.confirmed
+            {saved
               ? "Matched to Claude’s saved message. Expand only to inspect the observed response."
-              : "Not yet matched to Claude history"}
+              : modelActivityStatusLabel(request)}
           </Text>
           {request.messageId ? (
             <Text selectable className="font-mono text-xs text-foreground-muted">

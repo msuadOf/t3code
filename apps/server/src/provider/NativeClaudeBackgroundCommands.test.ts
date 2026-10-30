@@ -108,3 +108,79 @@ it("rejects ambiguous native receipts for the same original Bash tool", () => {
   };
   expect(nativeClaudeBackgroundCommands(sessionId, history, [call, receipt, other])).toEqual([]);
 });
+
+it("accepts native joined background notices with explicit owned envelope", () => {
+  const { turnOrigin: _turnOrigin, promptSource: _promptSource, ...native } = notification;
+  const text = notification.message.content;
+  const wrapped = {
+    ...native,
+    isMeta: true,
+    joinedNoticeLengths: [text.length],
+    joinedNoticeOwn: [true],
+    joinedNoticeRunIds: ["native-run"],
+    message: { content: `Native system notice wrapper\n\n${text}` },
+  };
+  expect(
+    nativeClaudeBackgroundCommands(sessionId, history, [call, receipt, wrapped])[0]?.status,
+  ).toBe("completed");
+  for (const invalid of [
+    { ...wrapped, isMeta: false },
+    { ...wrapped, joinedNoticeOwn: [false] },
+    { ...wrapped, joinedNoticeLengths: [text.length - 1] },
+    { ...wrapped, joinedNoticeRunIds: [] },
+    { ...wrapped, origin: { kind: "user" } },
+  ])
+    expect(
+      nativeClaudeBackgroundCommands(sessionId, history, [call, receipt, invalid])[0]?.status,
+    ).toBe("running");
+});
+
+it("finishes both background commands in an owned joined notification without accepting foreign notices", () => {
+  const secondPath = outputPath.replace("/task.output", "/tasktwo.output");
+  const secondText = notification.message.content
+    .replaceAll(">task<", ">tasktwo<")
+    .replaceAll(">tool<", ">tool-two<")
+    .replaceAll(outputPath, secondPath);
+  const firstText = notification.message.content;
+  const { turnOrigin: _turnOrigin, promptSource: _promptSource, ...native } = notification;
+  const joined = {
+    ...native,
+    isMeta: true,
+    joinedNoticeLengths: [firstText.length, secondText.length],
+    joinedNoticeOwn: [true, true],
+    joinedNoticeRunIds: ["first-run", "second-run"],
+    message: { content: `Native wrapper\n\n${firstText}\n\n${secondText}` },
+  };
+  const entries = [
+    call,
+    receipt,
+    { ...call, message: { content: [{ type: "tool_use", id: "tool-two", name: "Bash" }] } },
+    {
+      ...receipt,
+      toolUseResult: { backgroundTaskId: "tasktwo" },
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tool-two",
+            content: `Output is being written to: ${secondPath}.`,
+          },
+        ],
+      },
+    },
+  ];
+  const turns = [
+    { ...history[0]!, items: [...history[0]!.items, { ...history[0]!.items[0]!, id: "tool-two" }] },
+  ];
+  expect(
+    nativeClaudeBackgroundCommands(sessionId, turns, [...entries, joined]).map(
+      (command) => command.status,
+    ),
+  ).toEqual(["completed", "completed"]);
+  expect(
+    nativeClaudeBackgroundCommands(sessionId, turns, [
+      ...entries,
+      { ...joined, joinedNoticeOwn: [true, false] },
+    ]).map((command) => command.status),
+  ).toEqual(["completed", "running"]);
+});

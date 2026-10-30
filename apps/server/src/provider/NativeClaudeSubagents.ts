@@ -1,3 +1,4 @@
+import { nativeClaudeTaskNotificationContents } from "./NativeClaudeTaskNotifications.ts";
 import type { NativeHistoryTurn } from "@t3tools/provider-core/server/nativeSessions";
 
 type RecordValue = Readonly<Record<string, unknown>>;
@@ -75,10 +76,27 @@ export function nativeClaudeSubagentLaunches(
 export function isNativeClaudeTaskNotification(entry: Readonly<Record<string, unknown>>): boolean {
   return (
     entry.type === "user" &&
-    entry.turnOrigin === "task_notification" &&
     object(entry.origin) &&
     entry.origin.kind === "task-notification" &&
     entry.origin.producer === "session-task"
+  );
+}
+
+/** The parent receipt and native metadata must both identify this exact sidechain. */
+export function nativeClaudeSubagentEntries(
+  sessionId: string,
+  launch: NativeClaudeSubagentLaunch,
+  sidecar: { readonly metadata: unknown; readonly entries: readonly RecordValue[] } | undefined,
+): readonly RecordValue[] {
+  if (!sidecar || !object(sidecar.metadata) || sidecar.metadata.toolUseId !== launch.toolId)
+    return [];
+  return sidecar.entries.filter(
+    (entry) =>
+      entry.agentId === launch.agentId &&
+      entry.sessionId === sessionId &&
+      entry.isSidechain === true &&
+      typeof entry.timestamp === "string" &&
+      Date.parse(entry.timestamp) >= launch.startedAt,
   );
 }
 
@@ -91,16 +109,7 @@ export function observeNativeClaudeSubagent(
 ): NativeClaudeSubagentObservation {
   const metadata = sidecar?.metadata;
   const linked = object(metadata) && metadata.toolUseId === launch.toolId;
-  const records = linked
-    ? sidecar!.entries.filter(
-        (entry) =>
-          entry.agentId === launch.agentId &&
-          entry.sessionId === sessionId &&
-          entry.isSidechain === true &&
-          typeof entry.timestamp === "string" &&
-          Date.parse(entry.timestamp) >= launch.startedAt,
-      )
-    : [];
+  const records = nativeClaudeSubagentEntries(sessionId, launch, sidecar);
   const last = records.findLast((entry) => entry.type === "assistant" && object(entry.message));
   const message = last !== undefined && object(last.message) ? last.message : undefined;
   const model = string(message?.model);
@@ -118,36 +127,27 @@ export function observeNativeClaudeSubagent(
     ...(progress ? { progress } : {}),
   };
   for (const entry of notifications.toReversed()) {
-    if (
-      !isNativeClaudeTaskNotification(entry) ||
-      entry.sessionId !== sessionId ||
-      entry.promptSource !== "system" ||
-      entry.turnOrigin !== "task_notification" ||
-      !object(entry.origin) ||
-      entry.origin.kind !== "task-notification" ||
-      entry.origin.producer !== "session-task" ||
-      !object(entry.message) ||
-      typeof entry.message.content !== "string"
-    )
-      continue;
-    const at = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
-    if (!Number.isFinite(at) || at < launch.startedAt) continue;
-    // All identity/status fields precede the model-authored result, which is never parsed for status.
-    const match =
-      /^<task-notification>\s*<task-id>([^<]+)<\/task-id>\s*<tool-use-id>([^<]+)<\/tool-use-id>\s*(?:<output-file>[^<]*<\/output-file>\s*)?<status>(completed|failed|stopped)<\/status>/.exec(
-        entry.message.content,
-      );
-    if (!match || match[1] !== launch.agentId || match[2] !== launch.toolId) continue;
-    const result =
-      /<result>([\s\S]*)<\/result>\s*(?:<usage>[\s\S]*<\/usage>\s*)?<\/task-notification>\s*$/.exec(
-        entry.message.content,
-      )?.[1];
-    return {
-      ...native,
-      status: match[3] === "stopped" ? "cancelled" : (match[3] as "completed" | "failed"),
-      completedAt: at,
-      ...(result === undefined ? {} : { result }),
-    };
+    if (entry.sessionId !== sessionId) continue;
+    for (const content of nativeClaudeTaskNotificationContents(entry).toReversed()) {
+      const at = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+      if (!Number.isFinite(at) || at < launch.startedAt) continue;
+      // All identity/status fields precede the model-authored result, which is never parsed for status.
+      const match =
+        /^<task-notification>\s*<task-id>([^<]+)<\/task-id>\s*<tool-use-id>([^<]+)<\/tool-use-id>\s*(?:<output-file>[^<]*<\/output-file>\s*)?<status>(completed|failed|stopped)<\/status>/.exec(
+          content,
+        );
+      if (!match || match[1] !== launch.agentId || match[2] !== launch.toolId) continue;
+      const result =
+        /<result>([\s\S]*)<\/result>\s*(?:<usage>[\s\S]*<\/usage>\s*)?<\/task-notification>\s*$/.exec(
+          content,
+        )?.[1];
+      return {
+        ...native,
+        status: match[3] === "stopped" ? "cancelled" : (match[3] as "completed" | "failed"),
+        completedAt: at,
+        ...(result === undefined ? {} : { result }),
+      };
+    }
   }
   // finished records only an end, not its outcome. Missing/partial sidecars do not prove termination.
   if (linked && metadata.finished === true) {

@@ -1,3 +1,7 @@
+import {
+  claudeBackgroundPolicyEnabled,
+  withoutClaudeBackgroundPolicy,
+} from "./NativeClaudeBackgroundPolicy.ts";
 // @effect-diagnostics nodeBuiltinImport:off - Private native-worker routing files are process infrastructure.
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
@@ -229,7 +233,7 @@ const privateSettingsRoute = async (settingsPath: string): Promise<string | unde
   )
     throw new Error("Invalid Claude observer private settings");
   const route = settings.env.ANTHROPIC_BASE_URL;
-  const env = settings.env;
+  const env = withoutClaudeBackgroundPolicy(settings.env);
   if (Object.keys(env).length !== 1) {
     const expected = claudeModelObserverEnvironment(route);
     if (
@@ -307,8 +311,18 @@ export async function setClaudeModelObserverEnabled(
         })
       ).modelBaseUrl
     : binding.upstreamUrl;
+  const savedSettings = await readRoutingJson(binding.settingsPath);
+  const policyEnabled =
+    record(savedSettings) &&
+    record(savedSettings.env) &&
+    claudeBackgroundPolicyEnabled(savedSettings.env);
   await atomicPrivateJson(binding.settingsPath, {
-    env: input.enabled ? claudeModelObserverEnvironment(route) : { ANTHROPIC_BASE_URL: route },
+    env: {
+      ...(input.enabled ? claudeModelObserverEnvironment(route) : { ANTHROPIC_BASE_URL: route }),
+      ...(policyEnabled
+        ? { BASH_DEFAULT_TIMEOUT_MS: "5000", CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0" }
+        : {}),
+    },
   });
   await writeClaudeModelObserverBinding({
     ...binding,

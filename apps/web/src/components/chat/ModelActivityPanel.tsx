@@ -2,6 +2,8 @@ import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import {
   modelActivityBlockLabel,
+  modelActivityIsSaved,
+  modelActivityStatusLabel,
   modelActivitySourceLabel,
 } from "@t3tools/client-runtime/state/model-activity";
 import type {
@@ -32,37 +34,29 @@ function ModelRequest({
   readonly followActive: boolean;
 }) {
   const [expanded, setExpanded] = useState<{ confirmed: boolean; open: boolean } | null>(null);
+  const saved = modelActivityIsSaved(request);
   const defaultOpen =
-    !request.confirmed &&
+    !saved &&
     !(request.status === "failed" && !request.blocks.some((block) => block.text.length > 0));
-  const open =
-    followActive || (expanded?.confirmed === request.confirmed ? expanded.open : defaultOpen);
+  const open = followActive || (expanded?.confirmed === saved ? expanded.open : defaultOpen);
   return (
     <Collapsible
       open={open}
       onOpenChange={(open) => {
         onToggle();
-        setExpanded({ confirmed: request.confirmed, open });
+        setExpanded({ confirmed: saved, open });
       }}
     >
       <CollapsibleTrigger render={<Button variant="ghost" size="sm" />}>
         {open ? "▾" : "▸"} {modelActivitySourceLabel(request)} · {request.id.slice(-8)}
       </CollapsibleTrigger>
-      <p className="px-2 text-xs text-muted-foreground">
-        {request.confirmed
-          ? "Saved in conversation"
-          : request.status === "running"
-            ? "Receiving · Not yet matched to Claude history"
-            : request.status === "failed"
-              ? "Stream ended unexpectedly · Not yet matched to Claude history"
-              : "Response received · Not yet matched to Claude history"}
-      </p>
+      <p className="px-2 text-xs text-muted-foreground">{modelActivityStatusLabel(request)}</p>
       <CollapsiblePanel animate={false}>
         <div className="space-y-2 px-2 pb-3">
           <p className="text-xs text-muted-foreground">
-            {request.confirmed
+            {saved
               ? "Matched to Claude’s saved message. Expand only to inspect the observed response."
-              : "Not yet matched to Claude history"}
+              : modelActivityStatusLabel(request)}
           </p>
           {request.messageId ? (
             <p className="break-all font-mono text-xs text-muted-foreground">

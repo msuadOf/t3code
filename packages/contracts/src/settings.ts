@@ -719,6 +719,14 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         providerSettingsForm: { placeholder: "https://api.anthropic.com", clearWhenEmpty: "omit" },
       }),
     ),
+    autoBackgroundCommands: Schema.optionalKey(Schema.Boolean).pipe(
+      Schema.annotateKey({
+        title: "Automatically background long commands in new sessions",
+        providerSettingsForm: { control: "switch" },
+        description:
+          "Off by default. New workers wait up to 5 seconds before Claude automatically moves eligible commands to the background. Explicit command timeouts still apply. Commands starting with sleep may stop instead; background cd does not change the session directory; subagents may stop their commands when they finish. Existing workers are unchanged.",
+      }),
+    ),
     modelActivityForNewSessions: Schema.optionalKey(Schema.Boolean).pipe(
       Schema.annotateKey({
         title: "Observe model activity in new sessions",

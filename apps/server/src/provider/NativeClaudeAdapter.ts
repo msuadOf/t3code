@@ -159,6 +159,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
   readonly client?: NativeClaudeClient;
   readonly modelActivity?: NativeClaudeModelActivity;
   readonly observeNewSessions?: boolean;
+  readonly autoBackgroundCommands?: boolean;
   readonly resolveAttachmentPath?: (attachment: ChatAttachment) => string | null;
   readonly mcp?: {
     readonly bindings: NativeClaudeMcpBindings;
@@ -174,6 +175,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
     options.client ??
     new NativeClaudeClient({
       platform,
+      autoBackgroundCommands: options.autoBackgroundCommands === true,
       configDirectory: options.configDirectory,
       binaryPath: options.binaryPath || "claude",
       environment: options.environment,

@@ -71,7 +71,8 @@ The current native daemon integration has these limits:
   reconnect fallback. These notifications are separate from body/thinking token
   streams; terminal output is not parsed into chat messages.
 - Native background Bash commands with an identifiable output receipt show a live
-  command output tail. Their task status comes from Claude's matching task
+  command output tail, including commands launched by a verified native child Agent.
+  Child commands retain their parent Agent tool and their own output identity. Their task status comes from Claude's matching task
   notification, independently of the model reply. Earlier output may be omitted
   when joining a long-running command. Reconnecting restores pending background
   work to its original records, including completion that happened while T3 was
@@ -134,9 +135,12 @@ response increments, including available text, thinking and partial tool input.
 Named tools show their arguments as they arrive. **Arguments received** means the
 model finished preparing the call; execution results appear in the saved conversation.
 These responses can include auxiliary model requests and are marked **Not yet matched
-to Claude history**. Only a matching message saved by Claude changes the status to **Saved
-in conversation** and collapses that response; provisional activity does not become
-conversation history or future context. Missing or trimmed activity is indicated.
+to Claude history**. Matching uses persisted model message IDs from the main session
+or a child transcript whose parent receipt, metadata, session and Agent identity agree.
+A response collapses as **Saved in conversation** only after its stream finishes and
+its history match is confirmed. Partial history matches do not stop live output or
+following. Provisional activity does not become future context. Missing or trimmed
+activity is indicated.
 
 Source labels appear when Claude's native trace confirms a response's origin:
 **Main session**, **Native agent**, or **Auxiliary request**. Content streams before
@@ -209,6 +213,28 @@ For presets that differ only in API keys or endpoints, use the instance's
 Claude Code's verbose mode can stay enabled when you use Claude for text generation, including
 thread titles, branch names, commit messages, and pull request descriptions. On a remote connection,
 T3 Code uses the Claude configuration on the connected server.
+
+## Optional automatic command backgrounding
+
+**Automatically background long commands in new sessions** is off by default.
+When enabled, T3 gives newly launched workers a private native setting that reduces
+the default foreground wait to five seconds. Eligible commands that exceed that wait
+continue in Claude's background task system, where T3 can read their live output.
+Commands with explicit model-supplied timeouts retain those timeouts; T3 does not
+rewrite tool arguments or lower the maximum timeout.
+
+This changes execution behavior. A command starting with `sleep` may be stopped at
+its timeout instead of moving to the background. Directory changes inside a moved
+command do not carry over to later commands. A subagent can terminate its moved
+foreground command when the subagent finishes. This option does not turn every
+foreground tool into a streaming tool.
+
+The option applies only when T3 launches a new worker. Reopening history can use it
+when that history has no existing native job. Attaching to or waking an existing
+worker preserves its saved launch settings. Changing the option does not install it into active workers.
+Disabling model activity keeps the command policy; new forks inherit the source's
+owned command policy without modifying its settings. Global Claude settings are
+not changed.
 
 ## Native conversation controls
 

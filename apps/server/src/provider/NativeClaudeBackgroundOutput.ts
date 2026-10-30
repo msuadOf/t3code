@@ -36,7 +36,7 @@ export const makeNativeClaudeBackgroundOutput = Effect.fn("NativeClaudeBackgroun
     const bindings = new Map<string, Binding>();
     const finished = new Set<string>();
     const keyOf = (sessionId: string, command: NativeClaudeBackgroundCommand) =>
-      `${sessionId}:${command.toolId}:${command.taskId}`;
+      `${sessionId}:${command.agentId ? `agent:${command.agentId}:` : ""}${command.toolId}:${command.taskId}`;
     const emitItem = Effect.fn("NativeClaudeBackgroundOutput.publish")(function* (
       binding: Binding,
       terminal: boolean,
@@ -155,7 +155,7 @@ export const makeNativeClaudeBackgroundOutput = Effect.fn("NativeClaudeBackgroun
         if (finished.has(key) || bindings.has(key)) return;
         const nativeId = nativeSessionProjectionId(
           owner.providerThread,
-          `background-command:${sessionId}:${command.toolId}:${command.taskId}`,
+          `background-command:${sessionId}:${command.agentId ? `agent:${command.agentId}:` : ""}${command.toolId}:${command.taskId}`,
         );
         const at = yield* DateTime.now;
         const binding: Binding = {
@@ -183,7 +183,10 @@ export const makeNativeClaudeBackgroundOutput = Effect.fn("NativeClaudeBackgroun
             nativeItemRef: { driver, nativeId, strength: "strong" },
             parentItemId: ids.derive.turnItemFromProviderItem({
               driver,
-              nativeItemId: nativeSessionProjectionId(owner.providerThread, command.toolId),
+              nativeItemId: nativeSessionProjectionId(
+                owner.providerThread,
+                command.parentToolId ?? command.toolId,
+              ),
             }),
             ordinal: input.itemOrdinal(
               nativeSessionProjectionId(owner.providerThread, command.turnId),

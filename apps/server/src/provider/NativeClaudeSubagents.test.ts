@@ -151,6 +151,71 @@ describe("native Claude subagent lifecycle", () => {
     ).toBe("running");
   });
 
+  it("keeps joined native notifications out of human turns and reads their owned lifecycle", () => {
+    const {
+      turnOrigin: _turnOrigin,
+      promptSource: _promptSource,
+      ...native
+    } = notification("completed");
+    const text = native.message.content;
+    const joined = {
+      ...native,
+      uuid: "notice",
+      parentUuid: "user",
+      isMeta: true,
+      joinedNoticeLengths: [text.length],
+      joinedNoticeOwn: [true],
+      joinedNoticeRunIds: ["native-run"],
+      message: { content: `Native notice wrapper\n\n${text}` },
+    };
+    expect(observeNativeClaudeSubagent(sessionId, launch, [joined])).toMatchObject({
+      status: "completed",
+      result: "Native child result",
+    });
+    expect(
+      nativeClaudeHistory([
+        {
+          type: "user",
+          uuid: "user",
+          parentUuid: null,
+          sessionId,
+          timestamp: "2026-10-28T17:24:29Z",
+          message: { content: "work" },
+        },
+        joined,
+      ]),
+    ).toHaveLength(1);
+  });
+
+  it("finds a matching owned subagent notice among multiple native joined notices", () => {
+    const {
+      turnOrigin: _turnOrigin,
+      promptSource: _promptSource,
+      ...native
+    } = notification("failed");
+    const text = native.message.content;
+    const unrelated = text
+      .replaceAll(launch.agentId, "a-unrelated")
+      .replaceAll(launch.toolId, "other-tool");
+    const joined = {
+      ...native,
+      isMeta: true,
+      joinedNoticeLengths: [unrelated.length, text.length],
+      joinedNoticeOwn: [true, true],
+      joinedNoticeRunIds: ["first-run", "second-run"],
+      message: { content: `System wrapper\n\n${unrelated}\n\n${text}` },
+    };
+    expect(observeNativeClaudeSubagent(sessionId, launch, [joined])).toMatchObject({
+      status: "failed",
+      result: "Native child result",
+    });
+    expect(
+      observeNativeClaudeSubagent(sessionId, launch, [
+        { ...joined, joinedNoticeOwn: [true, false] },
+      ]).status,
+    ).toBe("running");
+  });
+
   it("accepts only native machine notification identity/status before the model-authored result", () => {
     expect(observeNativeClaudeSubagent(sessionId, launch, [notification("failed")])).toMatchObject({
       status: "failed",
