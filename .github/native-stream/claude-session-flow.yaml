@@ -31,6 +31,7 @@ appId: com.t3tools.t3code.dev
     visible: "(?s).*Native stream smoke.*"
     timeout: 60000
 - tapOn: "(?s).*Native stream smoke.*"
+- runScript: claude-start.js
 - extendedWaitUntil:
     visible: "(?s).*Running.*Read-only.*"
     timeout: 30000
@@ -45,50 +46,4 @@ appId: com.t3tools.t3code.dev
 - extendedWaitUntil:
     visible: "(?s).*NATIVE_CLAUDE_READY.*"
     timeout: 30000
-- assertNotVisible: "(?s).*NATIVE_CLAUDE_LATENCY_1.*"
-- runScript:
-    file: claude-release.js
-    env:
-      STAGE: "1"
-- extendedWaitUntil:
-    visible: "(?s).*NATIVE_CLAUDE_LATENCY_1.*"
-    timeout: 2000
-- takeScreenshot: artifacts/native-session/claude-live-sample-1
-- runScript:
-    file: claude-visible.js
-    env:
-      STAGE: "1"
-- assertNotVisible: "(?s).*NATIVE_CLAUDE_DONE.*"
-- assertNotVisible: "(?s).*NATIVE_CLAUDE_LATENCY_2.*"
-- runScript:
-    file: claude-release.js
-    env:
-      STAGE: "2"
-- extendedWaitUntil:
-    visible: "(?s).*NATIVE_CLAUDE_LATENCY_2.*"
-    timeout: 2000
-- takeScreenshot: artifacts/native-session/claude-live-sample-2
-- runScript:
-    file: claude-visible.js
-    env:
-      STAGE: "2"
-- assertNotVisible: "(?s).*NATIVE_CLAUDE_DONE.*"
-- assertNotVisible: "(?s).*NATIVE_CLAUDE_LATENCY_3.*"
-- runScript:
-    file: claude-release.js
-    env:
-      STAGE: "3"
-- extendedWaitUntil:
-    visible: "(?s).*NATIVE_CLAUDE_LATENCY_3.*"
-    timeout: 2000
-- takeScreenshot: artifacts/native-session/claude-live-sample-3
-- runScript:
-    file: claude-visible.js
-    env:
-      STAGE: "3"
-- assertNotVisible: "(?s).*NATIVE_CLAUDE_DONE.*"
-- runScript: complete.js
-- extendedWaitUntil:
-    visible: "(?s).*NATIVE_CLAUDE_DONE.*"
-    timeout: 30000
-- takeScreenshot: artifacts/native-session/claude-completed
+- takeScreenshot: artifacts/native-session/claude-ready-for-pixel-measurement

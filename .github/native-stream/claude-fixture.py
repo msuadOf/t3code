@@ -5,12 +5,12 @@ root = Path(tempfile.mkdtemp(prefix="t3-native-claude-")).resolve()
 work = root / "project"; work.mkdir()
 config = root / "config"; config.mkdir()
 native_tmp = root / "native-tmp"; native_tmp.mkdir()
-stop = threading.Event(); advance = threading.Event(); complete = threading.Event()
+start = threading.Event(); stop = threading.Event(); advance = threading.Event(); complete = threading.Event()
 processes = []; timing = {}; lock = threading.Lock()
 def write_private(path, value):
     path.parent.mkdir(parents=True, exist_ok=True); path.write_text(json.dumps(value, indent=2)); path.chmod(0o600)
 def shutdown(*_):
-    stop.set(); advance.set(); complete.set(); [(root / ("advance-" + str(stage))).touch() for stage in range(1,4)]; (root / "complete").touch()
+    start.set(); stop.set(); advance.set(); complete.set(); [(root / ("advance-" + str(stage))).touch() for stage in range(1,4)]; (root / "complete").touch()
 class Model(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_): pass
     def do_GET(self):
@@ -20,16 +20,25 @@ class Model(http.server.BaseHTTPRequestHandler):
         if stage not in {"1", "2", "3"}:
             self.send_error(400, "Invalid stage"); return
         with lock:
-            if path == "/advance": advance.set(); (root / ("advance-" + stage)).touch()
+            if path == "/start": start.set()
+            elif path == "/advance": advance.set(); (root / ("advance-" + stage)).touch()
             elif path == "/complete": complete.set(); (root / "complete").touch()
             elif path == "/emitted": timing.setdefault(stage, {})["emittedNs"] = time.monotonic_ns()
             elif path == "/visible":
                 sample = timing.setdefault(stage, {})
                 if "visibleNs" in sample:
                     self.send_error(409, "Sample already acknowledged"); return
-                sample["visibleNs"] = time.monotonic_ns()
+                acknowledged = time.monotonic_ns()
+                captured = urllib.parse.parse_qs(url.query).get("capturedNs", [str(acknowledged)])[0]
+                try: captured = int(captured)
+                except ValueError:
+                    self.send_error(400, "Invalid screenshot timestamp"); return
+                if not sample.get("emittedNs", acknowledged + 1) <= captured <= acknowledged:
+                    self.send_error(400, "Screenshot must follow emission on the same host monotonic clock"); return
+                sample["visibleNs"] = captured
+                sample["acknowledgedNs"] = acknowledged
                 sample["stillBlocked"] = not (root / "complete").exists()
-                if "emittedNs" in sample: sample["latencyMs"] = (sample["visibleNs"] - sample["emittedNs"]) / 1e6
+                sample["latencyMs"] = (captured - sample["emittedNs"]) / 1e6
                 sample["passed"] = sample["stillBlocked"] and 0 <= sample.get("latencyMs", 999999) <= 2000
                 write_private(root / "latency.json", timing)
             elif path == "/shutdown": shutdown()
@@ -50,6 +59,12 @@ class Model(http.server.BaseHTTPRequestHandler):
             self.wfile.write(("event: " + kind + "\ndata: " + json.dumps({"type":kind, **data}) + "\n\n").encode()); self.wfile.flush()
         try:
             send("message_start", message={**message, "content":[], "stop_reason":None})
+            if not has_result:
+                # Pair/open the real app before creating any foreground tool.
+                # Keep the model connection alive; no command timeout is running yet.
+                while not start.wait(.25):
+                    if stop.is_set(): return
+                    self.wfile.write(b": waiting for app readiness\n\n"); self.wfile.flush()
             for index, c in enumerate(content):
                 tool = c["type"] == "tool_use"
                 send("content_block_start", index=index, content_block={"type":"tool_use", "id":c.get("id"), "name":"Bash", "input":{}} if tool else {"type":"text", "text":""})

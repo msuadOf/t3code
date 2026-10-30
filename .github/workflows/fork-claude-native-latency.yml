@@ -85,6 +85,16 @@ jobs:
           unzip -q "$RUNNER_TEMP/maestro.zip" -d "$RUNNER_TEMP/maestro-cli"
           echo "$RUNNER_TEMP/maestro-cli/maestro/bin" >> "$GITHUB_PATH"
 
+      - name: Prepare screenshot recognition
+        run: |
+          if [ "${{ matrix.platform }}" = android ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+          else
+            swiftc -O .github/native-stream/claude-screen-ocr.swift -o "$RUNNER_TEMP/claude-screen-ocr"
+            echo "CLAUDE_SCREEN_OCR=$RUNNER_TEMP/claude-screen-ocr" >> "$GITHUB_ENV"
+          fi
+
       - name: Prepare evidence directory
         run: mkdir -p artifacts/native-session
 
@@ -185,6 +195,7 @@ jobs:
             adb install apps/mobile/android/app/build/outputs/apk/release/app-release.apk
             adb reverse "tcp:$T3_PORT" "tcp:$T3_PORT"
             maestro test -e DAEMON_ADDRESS="$DAEMON_ADDRESS" -e PAIRING_CODE="$PAIRING_CODE" -e CONTROL_URL="$CONTROL_URL" --format junit --output artifacts/native-session/results.xml --test-output-dir artifacts/native-session/maestro .github/native-stream/claude-session-flow.yaml
+            python3 .github/native-stream/claude-screen-latency.py --platform android
 
       - name: Test iOS native renderer
         if: matrix.platform == 'ios'
@@ -204,6 +215,7 @@ jobs:
           codesign --display --entitlements :- "$app_path" > artifacts/native-session/simulator-entitlements.plist
           xcrun simctl install "$device_id" "$app_path"
           maestro --device "$device_id" test -e DAEMON_ADDRESS="$DAEMON_ADDRESS" -e PAIRING_CODE="$PAIRING_CODE" -e CONTROL_URL="$CONTROL_URL" --format junit --output artifacts/native-session/results.xml --test-output-dir artifacts/native-session/maestro .github/native-stream/claude-session-flow.yaml
+          python3 .github/native-stream/claude-screen-latency.py --platform ios --device "$device_id"
 
       - name: Collect iOS crash reports
         if: always() && matrix.platform == 'ios'
