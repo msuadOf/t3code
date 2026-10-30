@@ -1,7 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Read-only native session spool discovery.
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import * as NodeOS from "node:os";
 import { NativeClaudeCommandOutput } from "./NativeClaudeCommandOutput.ts";
 
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
@@ -19,7 +18,9 @@ export class NativeClaudeSessionOutput {
   private readonly gaps = new Set<string>();
   private readonly readers = new Map<string, NativeClaudeCommandOutput>();
   private readonly temporaryDirectory: string;
-  constructor(temporaryDirectory: string = NodeOS.tmpdir()) {
+  // Stock Claude defaults its per-uid task spool to /tmp, including on macOS.
+  // os.tmpdir() instead follows TMPDIR and can point at an unrelated directory.
+  constructor(temporaryDirectory: string = "/tmp") {
     this.temporaryDirectory = temporaryDirectory;
   }
   async sample(sessionId: string, since: number, excludedPaths: readonly string[] = []) {

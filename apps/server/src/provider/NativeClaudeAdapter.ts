@@ -380,11 +380,8 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         ids: allocator,
         emit,
         itemOrdinal,
-        ...(options.environment.CLAUDE_CODE_TMPDIR || options.environment.TMPDIR
-          ? {
-              temporaryDirectory:
-                options.environment.CLAUDE_CODE_TMPDIR || options.environment.TMPDIR!,
-            }
+        ...(options.environment.CLAUDE_CODE_TMPDIR
+          ? { temporaryDirectory: options.environment.CLAUDE_CODE_TMPDIR }
           : {}),
       });
       // Native inventory may block on a subprocess. Once ownership is known,

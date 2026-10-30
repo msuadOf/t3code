@@ -2,8 +2,12 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { expect, it } from "vite-plus/test";
+import { expect, it, vi } from "vite-plus/test";
 import { NativeClaudeSessionOutput } from "./NativeClaudeSessionOutput.ts";
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, realpath: vi.fn(actual.realpath) };
+});
 const sessionId = "11111111-2222-4333-8444-555555555555";
 async function fixture() {
   const base = await NodeFSP.realpath(
@@ -89,5 +93,19 @@ it("reports excessive discovery as a visible gap only once", async () => {
     expect(await f.reader.sample(sessionId, 0)).toEqual([]);
   } finally {
     await NodeFSP.rm(f.base, { recursive: true, force: true });
+  }
+});
+
+it("discovers the stock Claude default spool under /tmp rather than the host OS temp directory", async () => {
+  // Stop at discovery: never inspect another real session's task spool.
+  const stop = new Error("discovery boundary");
+  const realpath = vi.mocked(NodeFSP.realpath);
+  realpath.mockClear();
+  realpath.mockRejectedValueOnce(stop);
+  try {
+    await expect(new NativeClaudeSessionOutput().sample(sessionId, 0)).rejects.toBe(stop);
+    expect(realpath).toHaveBeenCalledExactlyOnceWith("/tmp");
+  } finally {
+    realpath.mockClear();
   }
 });

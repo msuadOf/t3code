@@ -2411,9 +2411,11 @@ it.effect("keeps live capture and terminal intake flowing while native inventory
     Object.assign(client.inventory[0]!, { status: "busy", state: "working" });
     let output = "FIRST";
     let delivered = "";
+    let captureDirectory: unknown;
     const spy = vi
       .spyOn(NativeClaudeSessionOutput.prototype, "sample")
-      .mockImplementation(async () => {
+      .mockImplementation(async function (this: NativeClaudeSessionOutput) {
+        captureDirectory = Reflect.get(this, "temporaryDirectory");
         if (delivered === output) return [];
         delivered = output;
         return [{ source: "workspace/live.output", chunk: output, output, truncated: false }];
@@ -2464,7 +2466,8 @@ it.effect("keeps live capture and terminal intake flowing while native inventory
       instanceId,
       configDirectory: root,
       binaryPath: "never-executed",
-      environment: {},
+      // Stock Claude task spools ignore the process TMPDIR override.
+      environment: { TMPDIR: path.join(root, "unrelated-host-temp") },
       client,
     });
     const runtime = yield* adapter.openSession({
@@ -2491,6 +2494,7 @@ it.effect("keeps live capture and terminal intake flowing while native inventory
     );
     yield* runtime.resumeThread({ threadId, providerThread });
     yield* Deferred.await(first);
+    expect(captureDirectory).toBe("/tmp");
     stall = true;
     sendState?.();
     yield* Effect.promise(() => blocked);
