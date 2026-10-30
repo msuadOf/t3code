@@ -2,6 +2,7 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
+import { claudeModelObserverEnvironment } from "./ClaudeModelObserverSettings.ts";
 import { ensureClaudeModelObserver } from "./ClaudeModelObserver.ts";
 
 export interface ClaudeModelObserverBinding {
@@ -224,11 +225,20 @@ const privateSettingsRoute = async (settingsPath: string): Promise<string | unde
     !record(settings) ||
     Object.keys(settings).length !== 1 ||
     !record(settings.env) ||
-    Object.keys(settings.env).length !== 1 ||
     typeof settings.env.ANTHROPIC_BASE_URL !== "string"
   )
     throw new Error("Invalid Claude observer private settings");
-  return settings.env.ANTHROPIC_BASE_URL;
+  const route = settings.env.ANTHROPIC_BASE_URL;
+  const env = settings.env;
+  if (Object.keys(env).length !== 1) {
+    const expected = claudeModelObserverEnvironment(route);
+    if (
+      Object.keys(env).length !== Object.keys(expected).length ||
+      Object.entries(expected).some(([key, value]) => env[key] !== value)
+    )
+      throw new Error("Invalid Claude observer private telemetry settings");
+  }
+  return route;
 };
 const proxyRoute = (value: string): boolean => {
   let route: URL;
@@ -297,7 +307,9 @@ export async function setClaudeModelObserverEnabled(
         })
       ).modelBaseUrl
     : binding.upstreamUrl;
-  await atomicPrivateJson(binding.settingsPath, { env: { ANTHROPIC_BASE_URL: route } });
+  await atomicPrivateJson(binding.settingsPath, {
+    env: input.enabled ? claudeModelObserverEnvironment(route) : { ANTHROPIC_BASE_URL: route },
+  });
   await writeClaudeModelObserverBinding({
     ...binding,
     stateDir: input.stateDir,
@@ -319,6 +331,8 @@ export async function prepareClaudeModelObserverSettings(input: {
     "settings",
     `${NodeCrypto.randomUUID()}.json`,
   );
-  await atomicPrivateJson(settingsPath, { env: { ANTHROPIC_BASE_URL: observer.modelBaseUrl } });
+  await atomicPrivateJson(settingsPath, {
+    env: claudeModelObserverEnvironment(observer.modelBaseUrl),
+  });
   return { settingsPath, observerStateDir, upstreamUrl };
 }

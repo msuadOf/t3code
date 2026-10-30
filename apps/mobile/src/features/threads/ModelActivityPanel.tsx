@@ -1,6 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { modelActivityBlockLabel } from "@t3tools/client-runtime/state/model-activity";
+import {
+  modelActivityBlockLabel,
+  modelActivitySourceLabel,
+} from "@t3tools/client-runtime/state/model-activity";
 import type {
   ModelActivityRequest,
   ModelActivityState,
@@ -39,14 +42,14 @@ function ModelRequest({
       <RowPressable
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
-        accessibilityLabel={`Model request ${request.id.slice(-8)}, ${request.confirmed ? "Saved in conversation" : "Not yet saved by Claude"}`}
+        accessibilityLabel={`${modelActivitySourceLabel(request)}, request ${request.id.slice(-8)}, ${request.confirmed ? "Saved in conversation" : "Not yet saved by Claude"}`}
         onPress={() => {
           onToggle();
           setExpanded({ confirmed: request.confirmed, open: !open });
         }}
       >
         <Text className="py-2 text-sm text-foreground">
-          {open ? "▾" : "▸"} Model request {request.id.slice(-8)} ·{" "}
+          {open ? "▾" : "▸"} {modelActivitySourceLabel(request)} · {request.id.slice(-8)} ·{" "}
           {request.confirmed
             ? "Saved in conversation"
             : request.status === "running"
@@ -135,7 +138,8 @@ function ModelActivityView({
   const viewportHeight = useRef(0);
   const anchors = useRef(new Map<string, number>());
   const [previousTarget, setPreviousTarget] = useState<string | null>(null);
-  const target = resolveModelActivityFollowTarget(activity.requests, previousTarget);
+  const requests = activity.requests.filter((request) => request.blocks.length > 0);
+  const target = resolveModelActivityFollowTarget(requests, previousTarget);
   const targetRef = useRef(target);
   if (target !== null && target !== previousTarget) setPreviousTarget(target);
   const pause = () => {
@@ -152,16 +156,16 @@ function ModelActivityView({
   };
   useLayoutEffect(() => {
     targetRef.current = target;
-    const keys = new Set(activity.requests.map(modelActivityRequestKey));
+    const keys = new Set(requests.map(modelActivityRequestKey));
     for (const key of anchors.current.keys()) {
       if (!keys.has(key)) anchors.current.delete(key);
     }
     follow();
   });
   // oxlint-disable-next-line unicorn/no-array-reverse -- Hermes lacks toReversed; reverse only this copy.
-  const newestFirst = [...activity.requests].reverse();
+  const newestFirst = [...requests].reverse();
   const disconnected = activity.connectionState === "disconnected" || failed;
-  const unsaved = activity.requests.filter((request) => !request.confirmed).length;
+  const unsaved = requests.filter((request) => !request.confirmed).length;
   return (
     <View
       accessibilityLabel="Model activity"
@@ -213,8 +217,8 @@ function ModelActivityView({
             onContentSizeChange={follow}
           >
             <Text className="text-xs text-foreground-muted">
-              Observed model responses, separate from the saved conversation. Requests are not
-              classified as main or auxiliary.
+              Observed model responses, separate from the saved conversation. Source labels appear
+              when confirmed by Claude.
             </Text>
             {disconnected ? (
               <Text accessibilityRole="alert" className="text-xs text-foreground-muted">
@@ -228,7 +232,7 @@ function ModelActivityView({
                 persisted messages.
               </Text>
             ) : null}
-            {activity.requests.length === 0 ? (
+            {requests.length === 0 ? (
               <Text className="text-xs text-foreground-muted">Waiting for model activity.</Text>
             ) : null}
             {newestFirst.map((request) => (

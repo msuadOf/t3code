@@ -4,6 +4,7 @@ import * as NodeHttps from "node:https";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
+import { claudeModelTraceAttribution } from "./ClaudeModelTraceAttribution.ts";
 import { claudeModelResponseTap } from "./ClaudeModelResponseTap.ts";
 
 export interface ClaudeModelActivity {
@@ -92,13 +93,16 @@ export async function startClaudeModelObserver(input: {
         if (client.response.writableLength > 1024 * 1024) client.response.destroy();
       }
   };
+  const attribution = claudeModelTraceAttribution((event) =>
+    publish({ ...event, messageId: null, type: "observer.source" }),
+  );
   const server = NodeHttp.createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
     const authorized = request.headers.authorization === `Bearer ${input.token}`;
     if (url.pathname === "/health" && authorized) {
       response
         .writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ version: 1, epoch }));
+        .end(JSON.stringify({ version: 1, epoch, traceAttribution: 1 }));
       return;
     }
     if (url.pathname === "/events" && authorized) {
@@ -116,6 +120,40 @@ export async function startClaudeModelObserver(input: {
       const client = { response, sessionId };
       subscribers.add(client);
       response.on("close", () => subscribers.delete(client));
+      return;
+    }
+    if (url.pathname === "/v1/traces" && authorized) {
+      if (request.method !== "POST") {
+        response.writeHead(405).end();
+        return;
+      }
+      if (
+        !String(request.headers["content-type"]).startsWith("application/json") ||
+        request.headers["content-encoding"]
+      ) {
+        response.writeHead(415).end();
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      try {
+        for await (const chunk of request) {
+          size += chunk.length;
+          if (size > 4 * 1024 * 1024) {
+            response.writeHead(413).end();
+            return;
+          }
+          chunks.push(Buffer.from(chunk));
+        }
+        if (!attribution.observeTraces(JSON.parse(Buffer.concat(chunks).toString("utf8")))) {
+          response.writeHead(400).end();
+          return;
+        }
+      } catch {
+        response.writeHead(400).end();
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" }).end("{}");
       return;
     }
     if (!url.pathname.startsWith(`/proxy/${input.token}/`)) {
@@ -188,6 +226,7 @@ export async function startClaudeModelObserver(input: {
         const decoder = new TextDecoder();
         let buffered = "";
         let stopped = false;
+        let identityRegistered = false;
         const tap = (chunk: Buffer) => {
           if (!observing || stopped) return;
           buffered = (buffered + decoder.decode(chunk, { stream: true })).replace(/\r\n/g, "\n");
@@ -234,7 +273,7 @@ export async function startClaudeModelObserver(input: {
                   "message_stop",
                   "error",
                 ].includes(value.type)
-              )
+              ) {
                 publish({
                   sessionId: sessionId!,
                   requestId,
@@ -242,6 +281,18 @@ export async function startClaudeModelObserver(input: {
                   type: value.type,
                   data: value,
                 });
+                if (!identityRegistered) {
+                  identityRegistered = true;
+                  attribution.observeRequest({
+                    sessionId: sessionId!,
+                    requestId,
+                    traceparent:
+                      typeof request.headers.traceparent === "string"
+                        ? request.headers.traceparent
+                        : undefined,
+                  });
+                }
+              }
             } catch {
               captureGap = true;
               publish({

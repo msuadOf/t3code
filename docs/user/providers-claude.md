@@ -138,6 +138,13 @@ by Claude**. Only a matching message saved by Claude changes the status to **Sav
 in conversation** and collapses that response; provisional activity does not become
 conversation history or future context. Missing or trimmed activity is indicated.
 
+Source labels appear when Claude's native trace confirms a response's origin:
+**Main session**, **Native agent**, or **Auxiliary request**. Content streams before
+this confirmation. Source identity is separate from whether Claude saved the message;
+an identified subagent response is still provisional until persistence is verified.
+If identities conflict or telemetry is missing, the panel keeps the content without
+guessing its origin from the prompt or request body. Retries remain separate responses.
+
 The activity panel follows the newest running response as it grows. Scroll or expand
 a request to pause following while reading; choose **Follow live** to return to the
 current output. This moves only the activity panel, not the saved conversation.
@@ -145,6 +152,11 @@ current output. This moves only the activity panel, not the saved conversation.
 The observer runs on the environment's machine and forwards model traffic to the
 upstream you configured. It does not use Anthropic Remote Control. It keeps a
 bounded response buffer in memory and does not save model request bodies or headers.
+Native source tracing uses a local authenticated OTLP receiver on the observer.
+T3's private worker settings disable detailed tracing and content logging; full
+request/response-body capture is not required. These settings are removed when
+observation is disabled. An older running observer that lacks source tracing must
+be restarted after its bound workers stop before enabling this configuration.
 Closing a client or restarting T3 leaves its native worker and observer running.
 A stopped observer can be restored when T3 reopens the bound worker; an interrupted
 model request is not replayed automatically.

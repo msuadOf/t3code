@@ -1,6 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { modelActivityBlockLabel } from "@t3tools/client-runtime/state/model-activity";
+import {
+  modelActivityBlockLabel,
+  modelActivitySourceLabel,
+} from "@t3tools/client-runtime/state/model-activity";
 import type {
   ModelActivityRequest,
   ModelActivityState,
@@ -43,7 +46,7 @@ function ModelRequest({
       }}
     >
       <CollapsibleTrigger render={<Button variant="ghost" size="sm" />}>
-        {open ? "▾" : "▸"} Model request {request.id.slice(-8)}
+        {open ? "▾" : "▸"} {modelActivitySourceLabel(request)} · {request.id.slice(-8)}
       </CollapsibleTrigger>
       <p className="px-2 text-xs text-muted-foreground">
         {request.confirmed
@@ -119,7 +122,7 @@ export function ModelActivityPanel({
   );
 }
 
-function ModelActivityView({
+export function ModelActivityView({
   activity,
   failed,
 }: {
@@ -132,7 +135,8 @@ function ModelActivityView({
   const viewportRef = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
   const [previousTarget, setPreviousTarget] = useState<string | null>(null);
-  const target = resolveModelActivityFollowTarget(activity.requests, previousTarget);
+  const requests = activity.requests.filter((request) => request.blocks.length > 0);
+  const target = resolveModelActivityFollowTarget(requests, previousTarget);
   if (target !== null && target !== previousTarget) setPreviousTarget(target);
   const pause = () => {
     followingRef.current = false;
@@ -161,7 +165,7 @@ function ModelActivityView({
     return observeResize(elements, follow);
   });
   const disconnected = activity.connectionState === "disconnected" || failed;
-  const unsaved = activity.requests.filter((request) => !request.confirmed).length;
+  const unsaved = requests.filter((request) => !request.confirmed).length;
   return (
     <aside
       aria-label="Model activity"
@@ -211,8 +215,8 @@ function ModelActivityView({
             }}
           >
             <p className="text-xs text-muted-foreground">
-              Observed model responses, separate from the saved conversation. Requests are not
-              classified as main or auxiliary.
+              Observed model responses, separate from the saved conversation. Source labels appear
+              when confirmed by Claude.
             </p>
             {disconnected ? (
               <p role="status" className="text-xs text-muted-foreground">
@@ -226,10 +230,10 @@ function ModelActivityView({
                 persisted messages.
               </p>
             ) : null}
-            {activity.requests.length === 0 ? (
+            {requests.length === 0 ? (
               <p className="text-xs text-muted-foreground">Waiting for model activity.</p>
             ) : null}
-            {activity.requests.toReversed().map((request) => (
+            {requests.toReversed().map((request) => (
               <div
                 key={modelActivityRequestKey(request)}
                 ref={modelActivityRequestKey(request) === target ? anchorRef : undefined}

@@ -9,10 +9,20 @@ export interface ModelActivityBlock {
   readonly toolId?: string;
   readonly initialInput?: string;
 }
+type ModelActivitySource =
+  | {
+      readonly state: "identified";
+      readonly querySource: string;
+      readonly agentId: string | null;
+      readonly parentAgentId: string | null;
+    }
+  | { readonly state: "conflict" };
+
 export interface ModelActivityRequest {
   readonly id: string;
   readonly sessionId: string;
   readonly messageId: string | null;
+  readonly source?: ModelActivitySource;
   readonly confirmed: boolean;
   readonly status: "running" | "completed" | "failed";
   readonly blocks: ReadonlyArray<ModelActivityBlock>;
@@ -43,6 +53,17 @@ const record = (value: unknown): Readonly<Record<string, unknown>> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Readonly<Record<string, unknown>>)
     : {};
+
+export function modelActivitySourceLabel(request: ModelActivityRequest): string {
+  const source = request.source;
+  if (!source) return "Source not yet confirmed";
+  if (source.state === "conflict") return "Source could not be confirmed";
+  if (source.agentId) return `Native agent · ${source.agentId}`;
+  if (source.querySource.startsWith("agent.")) return "Native agent";
+  return source.querySource === "repl_main_thread"
+    ? "Main session"
+    : `Auxiliary request · ${source.querySource}`;
+}
 
 export function modelActivityBlockLabel(
   block: ModelActivityBlock,
@@ -88,6 +109,39 @@ function applyEvent(state: ModelActivityState, event: ModelActivity): ModelActiv
       request.confirmed ||
       (event.messageId !== null && state.confirmedMessageIds.includes(event.messageId)),
   };
+  if (event.type === "observer.source") {
+    const data = event.data;
+    const bounded = (value: unknown): value is string =>
+      typeof value === "string" &&
+      value.length > 0 &&
+      value.length <= 128 &&
+      Array.from(value).every((character) => {
+        const code = character.charCodeAt(0);
+        return code >= 32 && code !== 127;
+      });
+    if (data.state === "conflict") request = { ...request, source: { state: "conflict" } };
+    else if (
+      request.source?.state !== "conflict" &&
+      data.state === "identified" &&
+      bounded(data.querySource) &&
+      (data.agentId === null || bounded(data.agentId)) &&
+      (data.parentAgentId === null || bounded(data.parentAgentId))
+    ) {
+      const source: ModelActivitySource = {
+        state: "identified",
+        querySource: data.querySource,
+        agentId: data.agentId,
+        parentAgentId: data.parentAgentId,
+      };
+      const previous = request.source;
+      const conflicting =
+        previous?.state === "identified" &&
+        (previous.querySource !== source.querySource ||
+          previous.agentId !== source.agentId ||
+          previous.parentAgentId !== source.parentAgentId);
+      request = { ...request, source: conflicting ? { state: "conflict" } : source };
+    }
+  }
   const index = event.data.index;
   if (typeof index === "number" && Number.isSafeInteger(index) && index >= 0 && index < 1024) {
     const blocks = [...request.blocks];
@@ -159,6 +213,17 @@ function applyEvent(state: ModelActivityState, event: ModelActivity): ModelActiv
     request = { ...request, status: "failed" };
   if (at < 0) requests.push(request);
   else requests[at] = request;
+  // Late identity metadata must not evict response content from the retained window.
+  if (requests.length > MAX_REQUESTS) {
+    let excess = requests.length - MAX_REQUESTS;
+    requests = requests.filter((item) => {
+      if (excess > 0 && item.blocks.length === 0) {
+        excess--;
+        return false;
+      }
+      return true;
+    });
+  }
   let truncated = state.truncated || requests.length > MAX_REQUESTS;
   requests = requests.slice(-MAX_REQUESTS);
   // Keep recent activity bounded even if a provider emits a single enormous block.

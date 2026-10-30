@@ -12,6 +12,7 @@ import {
   writeClaudeModelObserverBinding,
   prepareClaudeModelObserverSettings,
 } from "./ClaudeModelObserverBindings.ts";
+import { claudeModelObserverEnvironment } from "./ClaudeModelObserverSettings.ts";
 import { ensureClaudeModelObserver } from "./ClaudeModelObserver.ts";
 vi.mock("./ClaudeModelObserver.ts", () => ({
   ensureClaudeModelObserver: vi.fn(async () => ({
@@ -103,7 +104,7 @@ it("rejects damaged, mismatched and credential-bearing bindings instead of hidin
   await expect(readClaudeModelObserverBinding(input)).rejects.toMatchObject({ code: "EISDIR" });
 });
 
-it("prepares independent 0600 settings with only a per-worker base URL override", async () => {
+it("prepares independent private settings with local native tracing and no content logging", async () => {
   const prepared = await prepareClaudeModelObserverSettings({
     stateDir,
     instanceId,
@@ -118,11 +119,22 @@ it("prepares independent 0600 settings with only a per-worker base URL override"
     upstreamUrl: prepared.upstreamUrl,
   });
   expect(JSON.parse(await NodeFSP.readFile(prepared.settingsPath, "utf8"))).toEqual({
-    env: {
-      ANTHROPIC_BASE_URL:
-        "http://127.0.0.1:12345/proxy/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    },
+    env: claudeModelObserverEnvironment(
+      "http://127.0.0.1:12345/proxy/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ),
   });
+  const env = JSON.parse(await NodeFSP.readFile(prepared.settingsPath, "utf8")).env;
+  expect(env).toMatchObject({
+    ENABLE_BETA_TRACING_DETAILED: "0",
+    OTEL_EXPORTER_OTLP_TRACES_COMPRESSION: "none",
+    OTEL_LOGS_EXPORTER: "none",
+    OTEL_METRICS_EXPORTER: "none",
+    OTEL_LOG_RAW_API_BODIES: "0",
+    OTEL_LOG_TOOL_CONTENT: "0",
+  });
+  expect(new URL(env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT).origin).toBe(
+    new URL(env.ANTHROPIC_BASE_URL).origin,
+  );
   expect((await NodeFSP.stat(prepared.settingsPath)).mode & 0o777).toBe(0o600);
   expect(prepared.settingsPath).not.toContain(
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -408,4 +420,27 @@ it("uses actual private routing after either half of a settings/descriptor updat
   );
   expect(await hasClaudeModelObserverBindingRouting(input)).toBe(false);
   expect(await isClaudeModelObserverBindingCurrent(input)).toBe(false);
+});
+
+it("rejects a private route whose telemetry destination or privacy settings were changed", async () => {
+  const prepared = await prepareClaudeModelObserverSettings({
+    stateDir,
+    instanceId,
+    upstreamUrl: descriptor().upstreamUrl,
+  });
+  await writeClaudeModelObserverBinding({ ...descriptor(), ...prepared, stateDir });
+  const saved = JSON.parse(await NodeFSP.readFile(prepared.settingsPath, "utf8"));
+  for (const [key, value] of [
+    ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://external.invalid/v1/traces"],
+    ["ENABLE_BETA_TRACING_DETAILED", "1"],
+    ["OTEL_LOG_RAW_API_BODIES", "1"],
+  ]) {
+    await NodeFSP.writeFile(
+      prepared.settingsPath,
+      JSON.stringify({ env: { ...saved.env, [key!]: value } }),
+    );
+    await expect(
+      readClaudeModelObserverBinding({ stateDir, instanceId, nativeSessionId }),
+    ).rejects.toThrow("telemetry settings");
+  }
 });

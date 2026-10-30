@@ -69,14 +69,19 @@ export async function ensureClaudeModelObserver(input: {
         signal: AbortSignal.timeout(1000),
       }).catch(() => undefined);
       if (response?.ok) {
-        const health = (await response.json()) as { epoch?: string };
-        if (health.epoch === registration.epoch)
+        const health = (await response.json()) as { epoch?: string; traceAttribution?: number };
+        if (health.epoch === registration.epoch) {
+          if (health.traceAttribution !== 1)
+            throw new Error(
+              "Stop the native Claude workers and restart their local model observer to enable native source tracing",
+            );
           return {
             url,
             token: registration.token,
             epoch: registration.epoch,
             modelBaseUrl: `${url}/proxy/${registration.token}`,
           };
+        }
       }
     }
     let ownerAlive = false;

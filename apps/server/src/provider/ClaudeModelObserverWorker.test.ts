@@ -500,3 +500,163 @@ it.each([
     }
   },
 );
+
+it("joins identical model requests and retries to authenticated native spans without delaying bytes", async () => {
+  const sessionId = "11111111-2222-4333-8444-555555555555";
+  const traceId = "1".repeat(32);
+  const spanA = "2".repeat(16);
+  const spanB = "3".repeat(16);
+  let counter = 0;
+  const seenContexts: string[] = [];
+  const upstream = NodeHttp.createServer(async (request, response) => {
+    for await (const _chunk of request) {
+      /* Consume the unchanged fixture request. */
+    }
+    seenContexts.push(String(request.headers.traceparent));
+    const id = `msg_fixture_${++counter}`;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(
+      [
+        { type: "message_start", message: { id } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: id } },
+        { type: "message_stop" },
+      ]
+        .map((value) => `data: ${JSON.stringify(value)}\n\n`)
+        .join(""),
+    );
+  });
+  await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const address = upstream.address();
+  if (!address || typeof address === "string") throw new Error("No fixture address");
+  const observer = await startClaudeModelObserver({
+    upstreamUrl: `http://127.0.0.1:${address.port}`,
+    token: "trace-fixture",
+  });
+  const origin = `http://127.0.0.1:${observer.port}`;
+  const trace = (spanId: string, agentId: string) => ({
+    resourceSpans: [
+      {
+        scopeSpans: [
+          {
+            spans: [
+              {
+                name: "claude_code.llm_request",
+                traceId,
+                spanId,
+                attributes: [
+                  { key: "session.id", value: { stringValue: sessionId } },
+                  {
+                    key: "query_source_safe",
+                    value: { stringValue: "agent.builtin.general-purpose" },
+                  },
+                  { key: "agent_id", value: { stringValue: agentId } },
+                  { key: "user_prompt", value: { stringValue: "never-export-native-history" } },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const sendTrace = (value: unknown, authorized = true) =>
+    fetch(`${origin}/v1/traces`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(authorized ? { authorization: "Bearer trace-fixture" } : {}),
+      },
+      body: JSON.stringify(value),
+    });
+  try {
+    expect((await sendTrace(trace(spanA, "a-first"), false)).status).toBe(401);
+    expect((await sendTrace(trace(spanA, "a-first"))).status).toBe(200);
+    for (const span of [spanA, spanB, spanA]) {
+      const result = await fetch(`${origin}/proxy/trace-fixture/v1/messages`, {
+        method: "POST",
+        headers: { traceparent: `00-${traceId}-${span}-01` },
+        body: JSON.stringify({
+          metadata: { user_id: JSON.stringify({ session_id: sessionId }) },
+          messages: [],
+        }),
+      });
+      expect(await result.text()).toContain(`msg_fixture_${counter}`);
+    }
+    expect((await sendTrace(trace(spanB, "a-second"))).status).toBe(200);
+    const replay = await fetch(`${origin}/events?sessionId=${sessionId}`, {
+      headers: { authorization: "Bearer trace-fixture" },
+    });
+    const reader = replay.body!.getReader();
+    const first = await reader.read();
+    await reader.cancel();
+    const snapshot = JSON.parse(new TextDecoder().decode(first.value).split("\n\n")[0]!.slice(6));
+    const starts = snapshot.events.filter(
+      (event: { type: string }) => event.type === "message_start",
+    );
+    const sources = snapshot.events.filter(
+      (event: { type: string }) => event.type === "observer.source",
+    );
+    expect(starts).toHaveLength(3);
+    expect(sources).toHaveLength(3);
+    expect(new Set(starts.map((event: { requestId: string }) => event.requestId)).size).toBe(3);
+    for (const [index, start] of starts.entries()) {
+      const source = sources.find(
+        (event: { requestId: string }) => event.requestId === start.requestId,
+      );
+      expect(source.data.agentId).toBe(index === 1 ? "a-second" : "a-first");
+      expect(source.seq).toBeGreaterThan(start.seq);
+    }
+    expect(JSON.stringify(snapshot)).not.toContain("never-export-native-history");
+    expect(JSON.stringify(snapshot)).not.toContain(traceId);
+    expect(seenContexts).toEqual([spanA, spanB, spanA].map((span) => `00-${traceId}-${span}-01`));
+    expect((await sendTrace({ broken: true })).status).toBe(400);
+  } finally {
+    await observer.close();
+    upstream.closeAllConnections();
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  }
+});
+
+it("refuses to configure tracing on a live observer that does not support attribution", async () => {
+  const NodeFSP = await import("node:fs/promises");
+  const NodeOS = await import("node:os");
+  const NodePath = await import("node:path");
+  const NodeCrypto = await import("node:crypto");
+  const { ensureClaudeModelObserver } = await import("./ClaudeModelObserver.ts");
+  const stateDir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-old-observer-"));
+  const upstreamUrl = "http://127.0.0.1:1/";
+  const directory = NodePath.join(
+    stateDir,
+    "claude-model-observers",
+    NodeCrypto.createHash("sha256").update(upstreamUrl).digest("hex"),
+  );
+  const server = NodeHttp.createServer((_request, response) => {
+    response
+      .writeHead(200, { "content-type": "application/json" })
+      .end(JSON.stringify({ version: 1, epoch: "old" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("No fixture address");
+  await NodeFSP.mkdir(directory, { recursive: true });
+  await NodeFSP.writeFile(
+    NodePath.join(directory, "registration.json"),
+    JSON.stringify({
+      version: 1,
+      pid: process.pid,
+      port: address.port,
+      epoch: "old",
+      token: "a".repeat(64),
+    }),
+  );
+  try {
+    await expect(ensureClaudeModelObserver({ stateDir, upstreamUrl })).rejects.toThrow(
+      "restart their local model observer",
+    );
+    expect(await NodeFSP.readdir(directory)).toEqual(["registration.json"]);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await NodeFSP.rm(stateDir, { recursive: true, force: true });
+  }
+});

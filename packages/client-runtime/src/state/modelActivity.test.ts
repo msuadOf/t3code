@@ -4,6 +4,7 @@ import {
   emptyModelActivityState,
   reduceModelActivity,
   modelActivityBlockLabel,
+  modelActivitySourceLabel,
 } from "./modelActivity.ts";
 
 const event = (
@@ -343,4 +344,149 @@ it("includes retained tool identity in the activity memory budget", () => {
   expect(state.truncated).toBe(true);
   expect(blocks[0]?.toolId).toBeUndefined();
   expect(blocks[0]?.toolName).toBeUndefined();
+});
+
+it("keeps native source identity separate from persistence and response lifecycle", () => {
+  const identified = {
+    state: "identified",
+    querySource: "repl_main_thread",
+    agentId: null,
+    parentAgentId: null,
+  };
+  const state = reduceModelActivity(
+    emptyModelActivityState,
+    snapshot([
+      event(1, "observer.source", identified, { messageId: null }),
+      event(2, "content_block_delta", { index: 0, delta: { type: "text_delta", text: "Live" } }),
+      event(3, "message_stop"),
+      event(4, "observer.source", identified),
+    ]),
+  );
+  expect(state.requests[0]).toMatchObject({
+    source: identified,
+    status: "completed",
+    confirmed: false,
+    blocks: [{ text: "Live" }],
+  });
+  const confirmed = reduceModelActivity(state, {
+    kind: "confirmed",
+    epoch: state.epoch,
+    messageIds: ["model-id"],
+  });
+  expect(confirmed.requests[0]).toMatchObject({ confirmed: true, source: identified });
+});
+
+it("fails closed on conflicting source identities and retains partial content across snapshot replay", () => {
+  const identified = {
+    state: "identified",
+    querySource: "agent.builtin.general-purpose",
+    agentId: "agent-a",
+    parentAgentId: null,
+  };
+  const frames = [
+    event(1, "content_block_delta", { index: 0, delta: { type: "text_delta", text: "Partial" } }),
+    event(2, "observer.request_end", { complete: false }),
+    event(3, "observer.source", identified),
+    event(4, "observer.source", { state: "conflict" }),
+    event(5, "observer.source", identified),
+  ];
+  const state = reduceModelActivity(emptyModelActivityState, snapshot(frames));
+  expect(state.requests[0]).toMatchObject({
+    status: "failed",
+    confirmed: false,
+    source: { state: "conflict" },
+    blocks: [{ text: "Partial" }],
+  });
+  expect(reduceModelActivity(state, snapshot(frames, { epoch: "replacement" })).requests).toEqual(
+    state.requests,
+  );
+});
+
+it("does not accept malformed or unbounded native source metadata", () => {
+  for (const querySource of ["", "a".repeat(129), "main\nforged"]) {
+    const state = reduceModelActivity(
+      emptyModelActivityState,
+      snapshot([
+        event(1, "observer.source", {
+          state: "identified",
+          querySource,
+          agentId: null,
+          parentAgentId: null,
+        }),
+      ]),
+    );
+    expect(state.requests[0]?.source).toBeUndefined();
+  }
+});
+
+it("labels native identity independently of persistence and rejects a contradictory identity", () => {
+  const main = {
+    state: "identified",
+    querySource: "repl_main_thread",
+    agentId: null,
+    parentAgentId: null,
+  };
+  let state = reduceModelActivity(
+    emptyModelActivityState,
+    snapshot([event(1, "observer.source", main)]),
+  );
+  expect(modelActivitySourceLabel(state.requests[0]!)).toBe("Main session");
+  state = reduceModelActivity(state, {
+    kind: "event",
+    epoch: state.epoch,
+    event: event(2, "observer.source", { ...main, agentId: "other" }),
+  });
+  expect(modelActivitySourceLabel(state.requests[0]!)).toBe("Source could not be confirmed");
+  expect(
+    modelActivitySourceLabel({
+      ...state.requests[0]!,
+      source: {
+        state: "identified",
+        querySource: "agent.custom",
+        agentId: "child",
+        parentAgentId: null,
+      },
+    }),
+  ).toBe("Native agent · child");
+  expect(
+    modelActivitySourceLabel({
+      ...state.requests[0]!,
+      source: {
+        state: "identified",
+        querySource: "agent_classifier",
+        agentId: null,
+        parentAgentId: null,
+      },
+    }),
+  ).toBe("Auxiliary request · agent_classifier");
+});
+
+it("retains thirty-two response streams when late source-only metadata exceeds the window", () => {
+  const responses = Array.from({ length: 32 }, (_, index) =>
+    event(
+      index + 1,
+      "content_block_delta",
+      { index: 0, delta: { type: "text_delta", text: `response-${index}` } },
+      { requestId: `response-${index}` },
+    ),
+  );
+  const sources = Array.from({ length: 40 }, (_, index) =>
+    event(
+      index + 33,
+      "observer.source",
+      { state: "identified", querySource: "repl_main_thread", agentId: null, parentAgentId: null },
+      { requestId: `metadata-${index}`, messageId: null },
+    ),
+  );
+  const state = reduceModelActivity(
+    emptyModelActivityState,
+    snapshot([...responses, ...sources], { seq: 72 }),
+  );
+  expect(state.requests.map((request) => request.id)).toEqual(
+    responses.map((response) => response.requestId),
+  );
+  expect(state.requests.map((request) => request.blocks[0]?.text)).toEqual(
+    responses.map((response) => response.requestId),
+  );
+  expect(state.truncated).toBe(false);
 });
