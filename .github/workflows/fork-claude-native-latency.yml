@@ -16,6 +16,11 @@ on:
         type: choice
         options: [all, android, ios]
         default: all
+      iosRunner:
+        description: Standard ARM runner for iOS acceptance
+        type: choice
+        options: [macos-15, macos-26]
+        default: macos-15
 
 defaults:
   run:
@@ -41,7 +46,7 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(inputs.platform == 'ios' && '[{"platform":"ios","runner":"macos-15"}]' || inputs.platform == 'android' && '[{"platform":"android","runner":"ubuntu-24.04"}]' || '[{"platform":"android","runner":"ubuntu-24.04"},{"platform":"ios","runner":"macos-15"}]') }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.platform == 'ios' && (inputs.iosRunner || matrix.runner) || matrix.runner }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
