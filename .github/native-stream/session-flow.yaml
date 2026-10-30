@@ -2,6 +2,9 @@ appId: com.t3tools.t3code.dev
 ---
 - launchApp:
     clearState: true
+- extendedWaitUntil:
+    visible: Settings
+    timeout: 60000
 - tapOn: Settings
 - tapOn: "^Environments(?:,.*)?$"
 - tapOn: Add environment

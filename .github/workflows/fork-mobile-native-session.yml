@@ -184,7 +184,7 @@ jobs:
           profile: pixel_5
           cores: 4
           ram-size: 4096M
-          disable-animations: true
+          disable-animations: false
           script: |
             adb install apps/mobile/android/app/build/outputs/apk/release/app-release.apk
             adb reverse "tcp:$T3_PORT" "tcp:$T3_PORT"
