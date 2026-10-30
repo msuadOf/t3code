@@ -59,8 +59,13 @@ def recognize(frame):
         command = ["tesseract", frame["path"], "stdout", "--psm", "6", "-l", "eng"]
     else:
         command = [os.environ["CLAUDE_SCREEN_OCR"], frame["path"]]
+    ocr_env = dict(os.environ)
+    if args.platform == "android":
+        # Tesseract/OpenMP otherwise competes with the emulator for every virtual
+        # CPU. Recognition happens after capture and cannot change pixel timing.
+        ocr_env.update(OMP_THREAD_LIMIT="1", OMP_NUM_THREADS="1")
     frame["text"] = subprocess.run(command, capture_output=True, text=True, check=True,
-                                  timeout=15).stdout
+                                  env=ocr_env, timeout=60).stdout
     frame["ocrCompleteNs"] = time.monotonic_ns()
     (output / "frames.json").write_text(json.dumps(frames, indent=2))
     return frame
