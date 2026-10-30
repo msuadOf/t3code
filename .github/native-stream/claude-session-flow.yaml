@@ -38,9 +38,7 @@ appId: com.t3tools.t3code.dev
       platform: iOS
     commands:
       - assertVisible: "^${PAIRING_CODE}$"
-      - hideKeyboard
-      - tapOn:
-          point: "90%,10%"
+      - pressKey: Enter
 - runFlow:
     when:
       platform: Android
