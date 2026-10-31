@@ -96,7 +96,9 @@ jobs:
           echo "$RUNNER_TEMP/maestro-cli/maestro/bin" >> "$GITHUB_PATH"
 
       - name: Verify raw screenshot decoder
-        run: python3 .github/native-stream/test_android_screencap.py
+        run: |
+          python3 .github/native-stream/test_android_screencap.py
+          python3 .github/native-stream/test_claude_video_latency.py
 
       - name: Prepare screenshot recognition
         run: |
@@ -104,6 +106,7 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
           else
+            if ! command -v ffmpeg >/dev/null; then brew install ffmpeg; fi
             swiftc -O .github/native-stream/claude-screen-ocr.swift -o "$RUNNER_TEMP/claude-screen-ocr"
             echo "CLAUDE_SCREEN_OCR=$RUNNER_TEMP/claude-screen-ocr" >> "$GITHUB_ENV"
           fi
@@ -257,7 +260,7 @@ jobs:
           device_id="$IOS_LATENCY_DEVICE"
           printf '%s/#token=%s' "$DAEMON_ADDRESS" "$PAIRING_CODE" | python3 .github/native-stream/claude-run-bounded.py 60 copy-pairing-url xcrun simctl pbcopy "$device_id"
           maestro --device "$device_id" test -e DAEMON_ADDRESS="$DAEMON_ADDRESS" -e PAIRING_CODE="$PAIRING_CODE" -e CONTROL_URL="$CONTROL_URL" --format junit --output artifacts/native-session/results.xml --test-output-dir artifacts/native-session/maestro .github/native-stream/claude-session-flow.yaml
-          python3 .github/native-stream/claude-screen-latency.py --platform ios --device "$device_id"
+          python3 .github/native-stream/claude-video-latency.py --device "$device_id"
 
       - name: Collect iOS crash reports
         if: always() && matrix.platform == 'ios'
