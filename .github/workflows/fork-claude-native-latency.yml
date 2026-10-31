@@ -174,14 +174,17 @@ jobs:
         run: |
           python3 .github/native-stream/claude-run-bounded.py 60 list-device-types xcrun simctl list devicetypes --json > "$RUNNER_TEMP/latency-device-types.json"
           python3 .github/native-stream/claude-run-bounded.py 60 list-runtimes xcrun simctl list runtimes --json > "$RUNNER_TEMP/latency-runtimes.json"
-          node --input-type=module - "$RUNNER_TEMP/latency-device-types.json" "$RUNNER_TEMP/latency-runtimes.json" <<'JSDEVICE' > "$RUNNER_TEMP/latency-device-selection.json"
+          sdk_version="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          node --input-type=module - "$RUNNER_TEMP/latency-device-types.json" "$RUNNER_TEMP/latency-runtimes.json" "$sdk_version" <<'JSDEVICE' > "$RUNNER_TEMP/latency-device-selection.json"
           import fs from "node:fs";
           const types = JSON.parse(fs.readFileSync(process.argv[2], "utf8")).devicetypes;
           const runtimes = JSON.parse(fs.readFileSync(process.argv[3], "utf8")).runtimes;
+          const sdkVersion = process.argv[4].trim();
+          const sdkMajorMinor = sdkVersion.split(".").slice(0, 2).join(".");
           const device = types.find(d => d.identifier === "com.apple.CoreSimulator.SimDeviceType.iPhone-SE-3rd-generation");
-          const runtime = runtimes.filter(r => r.isAvailable && r.name.startsWith("iOS ")).sort((a, b) => b.version.localeCompare(a.version, undefined, {numeric: true}))[0];
-          if (!device || !runtime) throw new Error("iPhone SE (3rd generation) and an available iOS runtime are required for bounded-framebuffer latency acceptance");
-          console.log(JSON.stringify({deviceType: device.identifier, deviceName: device.name, runtime: runtime.identifier}));
+          const runtime = runtimes.filter(r => r.isAvailable && r.name.startsWith("iOS ") && r.version.split(".").slice(0, 2).join(".") === sdkMajorMinor).sort((a, b) => b.version.localeCompare(a.version, undefined, {numeric: true}))[0];
+          if (!device || !runtime) throw new Error(`iPhone SE (3rd generation) and an available iOS runtime matching simulator SDK ${sdkMajorMinor} are required`);
+          console.log(JSON.stringify({deviceType: device.identifier, deviceName: device.name, runtime: runtime.identifier, runtimeVersion: runtime.version, sdkVersion}));
           JSDEVICE
           device_type="$(node -p "JSON.parse(require('fs').readFileSync(process.env.RUNNER_TEMP+'/latency-device-selection.json','utf8')).deviceType")"
           runtime="$(node -p "JSON.parse(require('fs').readFileSync(process.env.RUNNER_TEMP+'/latency-device-selection.json','utf8')).runtime")"
@@ -258,6 +261,7 @@ jobs:
           MAESTRO_DRIVER_STARTUP_TIMEOUT: "300000"
         run: |
           device_id="$IOS_LATENCY_DEVICE"
+          python3 .github/native-stream/claude-run-bounded.py 60 prelaunch-app xcrun simctl launch "$device_id" com.t3tools.t3code.dev
           for attempt in 1 2 3; do
             if printf '%s/#token=%s' "$DAEMON_ADDRESS" "$PAIRING_CODE" | python3 .github/native-stream/claude-run-bounded.py 60 "copy-pairing-url-attempt-$attempt" xcrun simctl pbcopy "$device_id"; then
               break
@@ -265,7 +269,6 @@ jobs:
             if [ "$attempt" = 3 ]; then exit 1; fi
             sleep 2
           done
-          python3 .github/native-stream/claude-run-bounded.py 60 prelaunch-app xcrun simctl launch "$device_id" com.t3tools.t3code.dev
           python3 .github/native-stream/claude-run-maestro.py maestro --device "$device_id" test -e DAEMON_ADDRESS="$DAEMON_ADDRESS" -e PAIRING_CODE="$PAIRING_CODE" -e CONTROL_URL="$CONTROL_URL" --format junit --output artifacts/native-session/results.xml --test-output-dir artifacts/native-session/maestro .github/native-stream/claude-session-flow.yaml
           python3 .github/native-stream/claude-video-latency.py --device "$device_id"
 
