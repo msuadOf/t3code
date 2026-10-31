@@ -143,10 +143,10 @@ Path(env['HOME']).mkdir()
 write_private(config / "settings.json", {"skipDangerousModePermissionPrompt":True, "permissions":{"defaultMode":"bypassPermissions"}, "env":{k:env[k] for k in ['ANTHROPIC_API_KEY','ANTHROPIC_BASE_URL','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC']}})
 write_private(config / ".claude.json", {"hasCompletedOnboarding":True, "theme":"dark", "lastOnboardingVersion":"2.1.314", "customApiKeyResponses":{"approved":[env['ANTHROPIC_API_KEY'][-20:]],"rejected":[]},"projects":{str(work):{"hasTrustDialogAccepted":True}}})
 binary = os.environ['CLAUDE_BINARY']
-def run(args): return subprocess.run([binary, *args], env=env, cwd=work, capture_output=True, text=True, timeout=30, check=True)
+def run(args, timeout=30): return subprocess.run([binary, *args], env=env, cwd=work, capture_output=True, text=True, timeout=timeout, check=True)
 signal.signal(signal.SIGTERM, shutdown); signal.signal(signal.SIGINT, shutdown)
 try:
-    launch = run(['--bg','--dangerously-skip-permissions','--name','Native stream smoke','Run the native foreground progress probe.'])
+    launch = run(['--bg','--dangerously-skip-permissions','--name','Native stream smoke','Run the native foreground progress probe.'], timeout=120)
     (root / 'native.log').write_text(launch.stdout + launch.stderr)
     jobs = json.loads(run(['agents','--json','--all']).stdout)
     job = next(j for j in jobs if j.get('kind') == 'background'); sid = job['sessionId']
