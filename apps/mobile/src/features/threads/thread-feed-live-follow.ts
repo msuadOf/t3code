@@ -42,6 +42,47 @@ export function resolveThreadWorkGroupPendingFollowOffset(
     : undefined;
 }
 
+/** A dispatched scroll is still pending until native scrolling reaches its latest target. */
+export function resolveThreadWorkGroupFollowAcknowledgement(
+  pendingContentHeight: number | null,
+  nativeContentHeight: number,
+  viewportHeight: number,
+  scrollOffset: number,
+  maxViewportHeight = 256,
+): number | null {
+  const target = resolveThreadWorkGroupPendingFollowOffset(
+    pendingContentHeight,
+    nativeContentHeight,
+    viewportHeight,
+    maxViewportHeight,
+  );
+  return target !== undefined && Math.abs(target - scrollOffset) <= 1 ? null : pendingContentHeight;
+}
+
+/** Retry a displaced native follow once per current-layout observation. */
+export function resolveThreadWorkGroupNativeDrift(input: {
+  readonly following: boolean;
+  readonly userScrolling: boolean;
+  readonly streamingCommand: boolean;
+  readonly expectedContentHeight: number;
+  readonly nativeContentHeight: number;
+  readonly viewportHeight: number;
+  readonly scrollOffset: number;
+  readonly previousObservation: string | null;
+  readonly maxViewportHeight: number;
+}): string | null {
+  if (!input.following || input.userScrolling || !input.streamingCommand) return null;
+  const target = resolveThreadWorkGroupPendingFollowOffset(
+    input.expectedContentHeight,
+    input.nativeContentHeight,
+    input.viewportHeight,
+    input.maxViewportHeight,
+  );
+  if (target === undefined || Math.abs(target - input.scrollOffset) <= 1) return null;
+  const observation = `${input.nativeContentHeight}:${input.viewportHeight}:${input.scrollOffset}`;
+  return observation === input.previousObservation ? null : observation;
+}
+
 export function shouldFollowThreadWorkGroupAppend(input: {
   readonly previousRows: ReadonlyArray<{ readonly id: string }>;
   readonly rows: ReadonlyArray<{ readonly id: string }>;

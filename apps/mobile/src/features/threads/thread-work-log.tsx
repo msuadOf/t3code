@@ -80,6 +80,9 @@ import {
 import { useTurnItemDetail } from "../../state/queries";
 import {
   resolveThreadWorkGroupInitialScroll,
+  resolveThreadWorkGroupNativeDrift,
+  resolveThreadFeedLiveFollow,
+  resolveThreadWorkGroupFollowAcknowledgement,
   resolveThreadWorkGroupPendingFollowOffset,
   shouldFollowThreadWorkGroupAppend,
   type ThreadWorkGroupScrollPosition,
@@ -616,8 +619,12 @@ function ThreadWorkGroupList(props: {
   const listRef = useRef<LegendListRef>(null);
   const loadedRef = useRef(false);
   const userScrollingRef = useRef(false);
+  const followingRef = useRef(false);
   const pendingAppendHeightRef = useRef<number | null>(null);
   const nativeContentHeightRef = useRef(0);
+  const nativeScrollOffsetRef = useRef(initialPosition?.scrollOffset ?? 0);
+  const requestedAppendOffsetRef = useRef<number | null>(null);
+  const appendObservationRef = useRef<string | null>(null);
   const previousContent = useRef({
     rows: props.activities,
     height: Math.max(estimatedRowsHeight, initialPosition?.contentHeight ?? 0),
@@ -656,21 +663,35 @@ function ThreadWorkGroupList(props: {
       contentHeight: state.contentLength,
     });
   };
+  const cancelPendingAppend = () => {
+    pendingAppendHeightRef.current = null;
+    requestedAppendOffsetRef.current = null;
+    appendObservationRef.current = null;
+  };
   const finishPendingAppend = () => {
     const state = listRef.current?.getState();
-    if (!state || userScrollingRef.current) return;
+    const scroller = listRef.current?.getNativeScrollRef();
+    if (!state || !scroller || userScrollingRef.current) return;
+    pendingAppendHeightRef.current = resolveThreadWorkGroupFollowAcknowledgement(
+      pendingAppendHeightRef.current,
+      nativeContentHeightRef.current,
+      state.scrollLength,
+      nativeScrollOffsetRef.current,
+      WORK_GROUP_MAX_HEIGHT,
+    );
     const offset = resolveThreadWorkGroupPendingFollowOffset(
       pendingAppendHeightRef.current,
       nativeContentHeightRef.current,
       state.scrollLength,
       WORK_GROUP_MAX_HEIGHT,
     );
-    if (offset !== undefined) {
-      pendingAppendHeightRef.current = null;
-      // totalSize fires before LegendList updates row sizes/positions. Native
-      // content measurement confirms the new size; an absolute offset avoids
-      // scrollToEnd resolving the last row against those old positions.
-      void listRef.current?.scrollToOffset({ offset, animated: false });
+    if (pendingAppendHeightRef.current === null) requestedAppendOffsetRef.current = null;
+    if (offset !== undefined && offset !== requestedAppendOffsetRef.current) {
+      requestedAppendOffsetRef.current = offset;
+      // Native content is ready. Bypass LegendList's deferred imperative queue,
+      // which can otherwise run after another growth or a user drag. Keep follow
+      // pending until a native scroll event confirms the latest target.
+      scroller.scrollTo({ y: offset, animated: false });
     }
   };
   // LegendList notifies from child layout effects. Effect Events see the
@@ -690,7 +711,9 @@ function ThreadWorkGroupList(props: {
         detailsChanged,
         streamingCommand: props.streamingCommand,
         userScrolling: userScrollingRef.current,
-        pendingFollow: pendingAppendHeightRef.current !== null,
+        pendingFollow:
+          pendingAppendHeightRef.current !== null ||
+          (props.streamingCommand && followingRef.current),
       });
     previousContent.current = {
       rows: props.activities,
@@ -702,10 +725,12 @@ function ThreadWorkGroupList(props: {
         ? current
         : { height: nextHeight, rowCount: props.activities.length },
     );
+    const rowsReplaced = previous.rows.some((row, index) => row.id !== props.activities[index]?.id);
+    if (detailsChanged || rowsReplaced) followingRef.current = false;
     if (followAppend) {
       pendingAppendHeightRef.current = nextHeight;
-    } else if (detailsChanged || userScrollingRef.current || previous.rows !== props.activities) {
-      pendingAppendHeightRef.current = null;
+    } else if (detailsChanged || userScrollingRef.current || rowsReplaced) {
+      cancelPendingAppend();
     } else if (pendingAppendHeightRef.current !== null) {
       pendingAppendHeightRef.current = nextHeight;
     }
@@ -761,22 +786,89 @@ function ThreadWorkGroupList(props: {
         }}
         onLoad={() => {
           loadedRef.current = true;
+          const state = listRef.current?.getState();
+          followingRef.current =
+            !!state && state.contentLength - state.scrollLength - state.scroll <= 1;
           setRestoringPosition(false);
           rememberPosition();
         }}
-        onScroll={rememberPosition}
+        onScroll={(event) => {
+          nativeScrollOffsetRef.current = event.nativeEvent.contentOffset.y;
+          // Non-user events preserve reading intent. Only a real user scroll
+          // ending at the bottom can resume a cancelled follow.
+          pendingAppendHeightRef.current = resolveThreadWorkGroupFollowAcknowledgement(
+            pendingAppendHeightRef.current,
+            event.nativeEvent.contentSize.height,
+            event.nativeEvent.layoutMeasurement.height,
+            nativeScrollOffsetRef.current,
+            WORK_GROUP_MAX_HEIGHT,
+          );
+          const target = resolveThreadWorkGroupPendingFollowOffset(
+            previousContent.current.height,
+            event.nativeEvent.contentSize.height,
+            event.nativeEvent.layoutMeasurement.height,
+            WORK_GROUP_MAX_HEIGHT,
+          );
+          if (target !== undefined && Math.abs(target - nativeScrollOffsetRef.current) <= 1) {
+            appendObservationRef.current = null;
+          }
+          const observation = resolveThreadWorkGroupNativeDrift({
+            following: followingRef.current,
+            userScrolling: userScrollingRef.current,
+            streamingCommand: props.streamingCommand,
+            expectedContentHeight: previousContent.current.height,
+            nativeContentHeight: event.nativeEvent.contentSize.height,
+            viewportHeight: event.nativeEvent.layoutMeasurement.height,
+            scrollOffset: nativeScrollOffsetRef.current,
+            previousObservation: appendObservationRef.current,
+            maxViewportHeight: WORK_GROUP_MAX_HEIGHT,
+          });
+          if (observation !== null) {
+            appendObservationRef.current = observation;
+            nativeContentHeightRef.current = event.nativeEvent.contentSize.height;
+            pendingAppendHeightRef.current = previousContent.current.height;
+            requestedAppendOffsetRef.current = null;
+            finishPendingAppend();
+          }
+          if (pendingAppendHeightRef.current === null) requestedAppendOffsetRef.current = null;
+          rememberPosition();
+        }}
         onScrollBeginDrag={() => {
           userScrollingRef.current = true;
-          pendingAppendHeightRef.current = null;
+          followingRef.current = resolveThreadFeedLiveFollow(followingRef.current, {
+            type: "user-scroll-begin",
+          });
+          cancelPendingAppend();
         }}
-        onScrollEndDrag={() => {
+        onScrollEndDrag={(event) => {
+          followingRef.current = resolveThreadFeedLiveFollow(followingRef.current, {
+            type: "user-scroll-end",
+            isAtEnd:
+              event.nativeEvent.contentSize.height -
+                event.nativeEvent.layoutMeasurement.height -
+                event.nativeEvent.contentOffset.y <=
+              1,
+            userScrollSessionActive: userScrollingRef.current,
+          });
           userScrollingRef.current = false;
         }}
         onMomentumScrollBegin={() => {
           userScrollingRef.current = true;
-          pendingAppendHeightRef.current = null;
+          followingRef.current = resolveThreadFeedLiveFollow(followingRef.current, {
+            type: "user-scroll-begin",
+          });
+          cancelPendingAppend();
         }}
-        onMomentumScrollEnd={() => {
+        onMomentumScrollEnd={(event) => {
+          followingRef.current = resolveThreadFeedLiveFollow(followingRef.current, {
+            type: "user-scroll-end",
+            isAtEnd:
+              event.nativeEvent.contentSize.height -
+                event.nativeEvent.layoutMeasurement.height -
+                event.nativeEvent.contentOffset.y <=
+              1,
+            userScrollSessionActive: userScrollingRef.current,
+          });
           userScrollingRef.current = false;
           rememberPosition();
         }}

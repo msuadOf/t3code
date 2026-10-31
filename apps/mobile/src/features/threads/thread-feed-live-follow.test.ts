@@ -7,6 +7,8 @@ import {
   resolveThreadFeedReflowScroll,
   resolveThreadFeedSubmissionAnchor,
   resolveThreadWorkGroupInitialScroll,
+  resolveThreadWorkGroupNativeDrift,
+  resolveThreadWorkGroupFollowAcknowledgement,
   resolveThreadWorkGroupPendingFollowOffset,
   shouldFollowThreadWorkGroupAppend,
 } from "./thread-feed-live-follow";
@@ -44,6 +46,58 @@ describe("tool-group native layout following", () => {
     expect(resolveThreadWorkGroupPendingFollowOffset(200, 200, 180)).toBeUndefined();
     expect(resolveThreadWorkGroupPendingFollowOffset(200, 200, 200)).toBe(0);
     expect(resolveThreadWorkGroupPendingFollowOffset(null, 400, 256)).toBeUndefined();
+  });
+});
+
+describe("tool-group native follow acknowledgement", () => {
+  it("retains follow through growth while the previous native scroll has not arrived", () => {
+    // A was requested at 144, but native still reports its old 124 offset.
+    expect(resolveThreadWorkGroupFollowAcknowledgement(400, 400, 256, 124)).toBe(400);
+    // B grows to 420 before A's scroll event arrives. A cannot clear B.
+    expect(resolveThreadWorkGroupFollowAcknowledgement(420, 400, 256, 144)).toBe(420);
+    expect(resolveThreadWorkGroupFollowAcknowledgement(420, 420, 256, 144)).toBe(420);
+    expect(resolveThreadWorkGroupFollowAcknowledgement(420, 420, 256, 164)).toBeNull();
+  });
+
+  it("does not restore follow after user reading or disclosure cancelled it", () => {
+    expect(resolveThreadWorkGroupFollowAcknowledgement(null, 400, 256, 144)).toBeNull();
+  });
+});
+
+describe("tool-group native follow displacement", () => {
+  const drift = {
+    following: true,
+    userScrolling: false,
+    streamingCommand: true,
+    expectedContentHeight: 400,
+    nativeContentHeight: 400,
+    viewportHeight: 256,
+    scrollOffset: 124,
+    previousObservation: null,
+    maxViewportHeight: 256,
+  };
+
+  it("retries the final target after native displacement, with one request per observation", () => {
+    const observation = resolveThreadWorkGroupNativeDrift(drift);
+    expect(observation).not.toBeNull();
+    expect(
+      resolveThreadWorkGroupNativeDrift({ ...drift, previousObservation: observation }),
+    ).toBeNull();
+    expect(resolveThreadWorkGroupNativeDrift({ ...drift, scrollOffset: 144 })).toBeNull();
+    // Arrival clears the observation; a later MVCP displacement can be corrected again.
+    expect(resolveThreadWorkGroupNativeDrift({ ...drift, previousObservation: null })).toBe(
+      observation,
+    );
+  });
+
+  it.each([
+    { following: false },
+    { userScrolling: true },
+    { streamingCommand: false },
+    { nativeContentHeight: 380 },
+    { viewportHeight: 240 },
+  ])("rejects cancelled reading and stale layout observations: %j", (changes) => {
+    expect(resolveThreadWorkGroupNativeDrift({ ...drift, ...changes })).toBeNull();
   });
 });
 
@@ -113,6 +167,32 @@ describe("tool-group append following", () => {
         scrollOffset: 124,
         streamingCommand: true,
         pendingFollow: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps following after a non-user layout adjustment, but stops for a reader scrolling up", () => {
+    const shifted = { ...atEnd, rows: previousRows, scrollOffset: 20, streamingCommand: true };
+    const following = resolveThreadFeedLiveFollow(true, {
+      type: "scroll",
+      isAtEnd: false,
+      userScrollSessionActive: false,
+    });
+    expect(shouldFollowThreadWorkGroupAppend({ ...shifted, pendingFollow: following })).toBe(true);
+    const reading = resolveThreadFeedLiveFollow(following, { type: "user-scroll-begin" });
+    expect(shouldFollowThreadWorkGroupAppend({ ...shifted, pendingFollow: reading })).toBe(false);
+    expect(
+      shouldFollowThreadWorkGroupAppend({
+        ...shifted,
+        pendingFollow: following,
+        detailsChanged: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldFollowThreadWorkGroupAppend({
+        ...shifted,
+        pendingFollow: following,
+        rows: [{ id: "replacement" }],
       }),
     ).toBe(false);
   });
