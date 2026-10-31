@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 
 spec = importlib.util.spec_from_file_location("video_latency", Path(__file__).with_name("claude-video-latency.py"))
@@ -22,12 +23,17 @@ class RecordingEvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             video = Path(directory) / "recording.mov"
             command = [sys.executable, "-u", "-c", "import pathlib,signal,sys,time; pathlib.Path(sys.argv[1]).write_bytes(b'fixture-video'); signal.signal(signal.SIGINT,lambda *_:sys.exit(0)); print('Recording started',file=sys.stderr,flush=True); time.sleep(30)", str(video)]
-            metadata = video_latency.record_clip(command, video, lambda: None, duration=.05)
+            def delayed_emission():
+                time.sleep(.08)
+                return time.monotonic_ns()
+            metadata = video_latency.record_clip(command, video, delayed_emission, duration=.05)
             self.assertLessEqual(metadata['recordingStartedNs'], metadata['gateRequestNs'])
             self.assertLessEqual(metadata['gateRequestNs'], metadata['sigintNs'])
             self.assertLessEqual(metadata['sigintNs'], metadata['finalizedNs'])
             self.assertEqual(metadata['exitCode'], 0)
             self.assertEqual(metadata['videoSha256'], video_latency.sha(video))
+            self.assertGreaterEqual(metadata['sigintNs'] - metadata['emittedNs'], 50_000_000)
+            self.assertGreaterEqual(metadata['emittedNs'] - metadata['gateRequestNs'], 80_000_000)
 
     def test_startup_timeout_kills_only_its_owned_process(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -46,11 +52,19 @@ class RecordingEvidenceTests(unittest.TestCase):
             pidfile = Path(directory) / "pid"
             command = [sys.executable, "-u", "-c", "import os,pathlib,signal,sys,time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); signal.signal(signal.SIGINT,signal.SIG_IGN); print('Recording started',file=sys.stderr,flush=True); time.sleep(30)", str(pidfile)]
             with self.assertRaises(video_latency.subprocess.TimeoutExpired):
-                video_latency.record_clip(command, video, lambda: None, duration=.01, finalize_timeout=.1)
+                video_latency.record_clip(command, video, time.monotonic_ns, duration=.01, finalize_timeout=.1)
             with self.assertRaises(ProcessLookupError):
                 os.kill(int(pidfile.read_text()), 0)
             metadata = json.loads(video.with_suffix('.recording.json').read_text())
             self.assertNotIn('finalizedNs', metadata)
+
+    def test_emission_before_gate_or_in_future_is_rejected(self):
+        for emitted in [0, time.monotonic_ns() + 60_000_000_000]:
+            with self.subTest(emitted=emitted), tempfile.TemporaryDirectory() as directory:
+                video = Path(directory) / 'recording.mov'
+                command = [sys.executable, '-u', '-c', 'import sys,time; print("Recording started",file=sys.stderr,flush=True);time.sleep(60)']
+                with self.assertRaises(ValueError):
+                    video_latency.record_clip(command, video, lambda: emitted)
 
 
 if __name__ == '__main__':

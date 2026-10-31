@@ -27,7 +27,7 @@ def valid_bound(emitted_ns, finalized_ns, marker_found):
     return marker_found and 0 <= finalized_ns - emitted_ns <= 2_000_000_000
 
 
-def record_clip(command, video, release_gate, duration=.8, startup_timeout=60, finalize_timeout=10):
+def record_clip(command, video, release_gate, duration=1.2, startup_timeout=60, finalize_timeout=10):
     signals = queue.Queue()
     metadata = {"recordingSpawnNs": time.monotonic_ns()}
     stderr_path = video.with_suffix(".stderr.log")
@@ -54,8 +54,11 @@ def record_clip(command, video, release_gate, duration=.8, startup_timeout=60, f
                     if time.monotonic() >= deadline:
                         raise TimeoutError("Recorder did not report its first frame")
             metadata["gateRequestNs"] = time.monotonic_ns()
-            release_gate()
-            remaining = metadata["gateRequestNs"] / 1e9 + duration - time.monotonic()
+            emitted = release_gate()
+            if type(emitted) is not int or not metadata["gateRequestNs"] <= emitted <= time.monotonic_ns():
+                raise ValueError("Emission must follow this gate on the same host monotonic clock")
+            metadata["emittedNs"] = emitted
+            remaining = emitted / 1e9 + duration - time.monotonic()
             if remaining > 0:
                 time.sleep(remaining)
             metadata["sigintNs"] = time.monotonic_ns()
@@ -87,9 +90,9 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     control = os.environ["CONTROL_URL"].rstrip("/")
     results = []
-    def request(path, **query):
+    def request(path, timeout=5, **query):
         suffix = "?" + urllib.parse.urlencode(query) if query else ""
-        with urllib.request.urlopen(control + path + suffix, timeout=5) as response:
+        with urllib.request.urlopen(control + path + suffix, timeout=timeout) as response:
             return json.load(response)
     def recognize(path):
         text = subprocess.run([os.environ["CLAUDE_SCREEN_OCR"], str(path)],
@@ -110,8 +113,17 @@ def main():
     (output / "baseline.json").write_text(json.dumps({"path": str(baseline), "sha256": sha(baseline)}))
     for stage in range(1, 4):
         video = output / f"stage-{stage}.mov"
+        def release_gate():
+            deadline = time.monotonic() + 5
+            request("/advance", stage=stage)
+            while time.monotonic() < deadline:
+                emitted = request("/timing", timeout=deadline-time.monotonic(), stage=stage).get(str(stage), {}).get("emittedNs")
+                if emitted is not None:
+                    return emitted
+                time.sleep(.02)
+            raise TimeoutError("Native command did not acknowledge emission within five seconds")
         metadata = record_clip(["xcrun", "simctl", "io", args.device, "recordVideo", "--codec=h264", str(video)],
-                               video, lambda: request("/advance", stage=stage))
+                               video, release_gate)
         frame_dir = output / f"stage-{stage}-frames"
         frame_dir.mkdir()
         # Decode original frames in order, without fps resampling or a timestamp-based claim.

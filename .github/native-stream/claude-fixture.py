@@ -72,6 +72,7 @@ class Model(http.server.BaseHTTPRequestHandler):
             elif path == "/advance": advance.set(); (root / ("advance-" + stage)).touch()
             elif path == "/complete": complete.set(); (root / "complete").touch()
             elif path == "/emitted": timing.setdefault(stage, {})["emittedNs"] = time.monotonic_ns()
+            elif path == "/timing": pass
             elif path == "/visible":
                 sample = timing.setdefault(stage, {})
                 if "visibleNs" in sample:
