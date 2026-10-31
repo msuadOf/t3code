@@ -23,7 +23,19 @@ appId: com.t3tools.t3code.dev
 - extendedWaitUntil:
     visible: Add environment
     timeout: 60000
-- tapOn: Add environment
+- retry:
+    maxRetries: 2
+    commands:
+      - runFlow:
+          when:
+            notVisible: "^Address$"
+          commands:
+            - tapOn:
+                text: "^Add environment$"
+                retryTapIfNoChange: true
+      - extendedWaitUntil:
+          visible: "^Address$"
+          timeout: 15000
 - tapOn: Address
 - inputText: ${DAEMON_ADDRESS}
 - runFlow:
