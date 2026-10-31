@@ -2,12 +2,14 @@ import type { EnvironmentId, ThreadId, TurnItemId } from "@t3tools/contracts";
 import { TERMINAL_PALETTES, terminalOutputSpans } from "@t3tools/shared/terminalOutput";
 import type React from "react";
 import { useMemo, useRef } from "react";
-import { ScrollView, View } from "react-native";
+import { ScrollView, View, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
 
 import { AppText as Text } from "../../components/ui/AppText";
 import { useServerConfigs } from "../../state/entities";
 import { orchestrationEnvironment } from "../../state/orchestration";
 import { useEnvironmentQuery } from "../../state/query";
+
+import { resolveThreadFeedLiveFollow } from "./thread-feed-live-follow";
 
 // Within this many points of the end still counts as following the output.
 const FOLLOW_SLACK = 8;
@@ -39,6 +41,22 @@ export function ThreadCommandOutput(props: {
   const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
   // Follow new output until the reader scrolls up; scrolling back down resumes.
   const followRef = useRef(true);
+  const userScrollingRef = useRef(false);
+  const updateFollow = (event: NativeSyntheticEvent<NativeScrollEvent>, ending = false) => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    followRef.current = resolveThreadFeedLiveFollow(followRef.current, {
+      type: ending ? "user-scroll-end" : "scroll",
+      isAtEnd: contentSize.height - contentOffset.y - layoutMeasurement.height <= FOLLOW_SLACK,
+      userScrollSessionActive: userScrollingRef.current,
+    });
+    if (ending) userScrollingRef.current = false;
+  };
+  const beginScroll = () => {
+    userScrollingRef.current = true;
+    followRef.current = resolveThreadFeedLiveFollow(followRef.current, {
+      type: "user-scroll-begin",
+    });
+  };
   const text = data?.output.text ?? "";
   const spans = useMemo(
     () => terminalOutputSpans(text, TERMINAL_PALETTES[props.themeAppearance]),
@@ -71,11 +89,11 @@ export function ThreadCommandOutput(props: {
         className="max-h-60"
         contentContainerStyle={{ paddingRight: 8 }}
         scrollEventThrottle={100}
-        onScroll={(event) => {
-          const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-          followRef.current =
-            contentSize.height - contentOffset.y - layoutMeasurement.height <= FOLLOW_SLACK;
-        }}
+        onScroll={(event) => updateFollow(event)}
+        onScrollBeginDrag={beginScroll}
+        onScrollEndDrag={(event) => updateFollow(event, true)}
+        onMomentumScrollBegin={beginScroll}
+        onMomentumScrollEnd={(event) => updateFollow(event, true)}
         onContentSizeChange={() => {
           if (followRef.current) scrollRef.current?.scrollToEnd({ animated: false });
         }}

@@ -43,6 +43,7 @@ describe("tool-group append following", () => {
     viewportHeight: 256,
     scrollOffset: 33,
     detailsChanged: false,
+    streamingCommand: false,
     userScrolling: false,
   };
 
@@ -64,9 +65,32 @@ describe("tool-group append following", () => {
     ).toBe(true);
   });
 
+  it("follows streaming growth inside an existing command at the end", () => {
+    expect(
+      shouldFollowThreadWorkGroupAppend({
+        ...atEnd,
+        rows: previousRows,
+        contentHeight: 600,
+        streamingCommand: true,
+      }),
+    ).toBe(true);
+  });
+
   it.each([
     { name: "reading earlier calls", changes: { scrollOffset: 20 } },
-    { name: "streaming a result", changes: { rows: previousRows, contentHeight: 600 } },
+    { name: "streaming an ordinary result", changes: { rows: previousRows, contentHeight: 600 } },
+    {
+      name: "opening command details",
+      changes: { rows: previousRows, detailsChanged: true, streamingCommand: true },
+    },
+    {
+      name: "dragging through output",
+      changes: { rows: previousRows, userScrolling: true, streamingCommand: true },
+    },
+    {
+      name: "streaming while reading earlier output",
+      changes: { rows: previousRows, scrollOffset: 20, streamingCommand: true },
+    },
     {
       name: "replacing a call while appending",
       changes: { rows: [{ id: "replacement" }, ...appendedRows.slice(1)] },

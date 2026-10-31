@@ -37,13 +37,15 @@ export function shouldFollowThreadWorkGroupAppend(input: {
   readonly viewportHeight: number;
   readonly scrollOffset: number;
   readonly detailsChanged: boolean;
+  /** Expanded running commands grow without adding a work-log row. */
+  readonly streamingCommand: boolean;
   readonly userScrolling: boolean;
 }) {
   return (
     !input.detailsChanged &&
     !input.userScrolling &&
     input.contentHeight > input.previousContentHeight &&
-    input.rows.length > input.previousRows.length &&
+    (input.rows.length > input.previousRows.length || input.streamingCommand) &&
     input.previousRows.every((row, index) => row.id === input.rows[index]?.id) &&
     input.previousContentHeight - input.viewportHeight - input.scrollOffset <= 1
   );

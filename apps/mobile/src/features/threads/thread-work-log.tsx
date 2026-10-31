@@ -570,6 +570,12 @@ export function ThreadWorkLog(props: ThreadWorkLogProps) {
       {props.activities[0]?.groupedToolDetail ? (
         <ThreadWorkGroupList
           activities={props.activities}
+          streamingCommand={props.activities.some(
+            (row) =>
+              props.expandedRows[row.id] &&
+              row.projectedItem.item.type === "command_execution" &&
+              row.projectedItem.item.status === "running",
+          )}
           edgeFadeColor={props.edgeFadeColor}
           expandedRows={props.expandedRows}
           groupId={props.anchorKey}
@@ -586,6 +592,7 @@ export function ThreadWorkLog(props: ThreadWorkLogProps) {
 
 function ThreadWorkGroupList(props: {
   readonly activities: ReadonlyArray<ThreadFeedActivity>;
+  readonly streamingCommand: boolean;
   readonly edgeFadeColor: string;
   readonly expandedRows: Readonly<Record<string, boolean>>;
   readonly groupId: string;
@@ -675,6 +682,7 @@ function ThreadWorkGroupList(props: {
         viewportHeight: Math.min(previous.height, WORK_GROUP_MAX_HEIGHT),
         scrollOffset: scrollOffset.value,
         detailsChanged,
+        streamingCommand: props.streamingCommand,
         userScrolling: userScrollingRef.current,
       });
     previousContent.current = {
