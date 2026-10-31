@@ -136,7 +136,8 @@ export const make = Effect.fn("OpenCode2Server.make")(function* (input: {
                 cause,
               }),
           });
-    if (observer !== undefined) yield* observer;
+    // Catalog/status reads need only HTTP. Start the shared event observer when
+    // an interactive consumer subscribes, so its process cannot stall discovery.
     const observerEvents = observer?.pipe(
       Effect.flatMap((endpoint) => OpenCode2Client.observerEvents(httpClient, endpoint)),
     );
