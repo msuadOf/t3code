@@ -200,7 +200,8 @@ jobs:
           python3 - <<'PY'
           import json, os, pathlib, time
           ready = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-session-ready.jsonl'
-          for attempt in range(900):
+          fixture_pid = int((ready.parent / 'native-session-fixture.pid').read_text())
+          for attempt in range(1800):
               if ready.exists() and ready.read_text().strip():
                   metadata = json.loads(ready.read_text().splitlines()[0])
                   pairing = json.load(open(metadata['pairingPath']))
@@ -209,6 +210,11 @@ jobs:
                           output.write(key + '=' + value + '\n')
                   print('::add-mask::' + pairing['code'])
                   break
+              try:
+                  os.kill(fixture_pid, 0)
+              except ProcessLookupError:
+                  log = pathlib.Path('artifacts/native-session/fixture.log').read_text()
+                  raise RuntimeError('Native session fixture exited before readiness:\n' + log[-8000:])
               time.sleep(.1)
           else:
               raise RuntimeError('Native session fixture failed to start')
