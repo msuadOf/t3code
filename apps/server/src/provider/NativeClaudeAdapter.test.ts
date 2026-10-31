@@ -142,6 +142,70 @@ const fixtureAppThread = (
 });
 
 it.layer(IdAllocator.layer)("Claude native adapter", (it) => {
+  it.effect("forceNewNativeThread launches without adopting an existing native ID", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const launches: Parameters<NativeClaudeClient["startBackground"]>[0][] = [];
+        const freshId = "abcdef12-1234-1234-1234-123456789abc";
+        class Client extends FixtureClient {
+          override async startBackground(
+            input: Parameters<NativeClaudeClient["startBackground"]>[0],
+          ) {
+            launches.push(input);
+            return { ...this.inventory[0]!, sessionId: freshId };
+          }
+        }
+        const adapter = yield* makeNativeClaudeAdapter({
+          instanceId,
+          client: new Client("background"),
+          binaryPath: "never-executed",
+          configDirectory: "/nonexistent-claude-fixture",
+          environment: {},
+        });
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("force-new-session"),
+          modelSelection,
+          runtimePolicy,
+        });
+        const now = DateTime.makeUnsafe(1);
+        const existingProviderThread: OrchestrationV2ProviderThread = {
+          id: ProviderThreadId.make("existing-provider-thread"),
+          driver: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: instanceId,
+          providerSessionId: runtime.providerSessionId,
+          appThreadId: threadId,
+          nativeThreadRef: {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            nativeId,
+            strength: "strong",
+          },
+          nativeConversationHeadRef: null,
+          status: "idle",
+          ownerNodeId: null,
+          firstRunOrdinal: null,
+          lastRunOrdinal: null,
+          handoffIds: [],
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+        };
+        const result = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+          existingProviderThread,
+          forceNewNativeThread: true,
+        });
+        expect(launches).toHaveLength(1);
+        expect(launches[0]?.sessionId).toBeUndefined();
+        expect(launches[0]?.resume).toBe(false);
+        expect(result.nativeThreadRef?.nativeId).toBe(freshId);
+        expect(result.id).not.toBe(existingProviderThread.id);
+      }),
+    ),
+  );
+
   it.effect("attaches an existing native background worker without query/resume subprocesses", () =>
     Effect.scoped(
       Effect.gen(function* () {

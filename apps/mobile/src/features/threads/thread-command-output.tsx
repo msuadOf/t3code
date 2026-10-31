@@ -14,18 +14,13 @@ import { resolveThreadFeedLiveFollow } from "./thread-feed-live-follow";
 // Within this many points of the end still counts as following the output.
 const FOLLOW_SLACK = 8;
 
-/** True when the environment streams command output; older servers only return final output. */
 export function useCommandOutputStreaming(environmentId: EnvironmentId): boolean {
   return (
     useServerConfigs().get(environmentId)?.environment.capabilities.commandOutputStreaming === true
   );
 }
 
-/**
- * Output of one expanded command row: streams while the command runs, then
- * shows its final output. Mount it only when `useCommandOutputStreaming` holds.
- * It subscribes only while mounted, so collapsed rows and other threads receive nothing.
- */
+/** Mount only while useCommandOutputStreaming holds; unmount to stop subscriptions for collapsed rows or other threads. */
 export function ThreadCommandOutput(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
@@ -39,7 +34,6 @@ export function ThreadCommandOutput(props: {
     }),
   );
   const scrollRef = useRef<React.ComponentRef<typeof ScrollView>>(null);
-  // Follow new output until the reader scrolls up; scrolling back down resumes.
   const followRef = useRef(true);
   const userScrollingRef = useRef(false);
   const updateFollow = (event: NativeSyntheticEvent<NativeScrollEvent>, ending = false) => {

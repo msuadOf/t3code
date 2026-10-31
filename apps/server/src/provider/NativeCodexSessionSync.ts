@@ -455,15 +455,13 @@ const make = Effect.gen(function* () {
         Effect.logWarning("Native Codex session synchronization failed", { cause }),
       ),
     ),
-    start: Effect.gen(function* () {
-      yield* sync.pipe(
-        Effect.catch((cause) =>
-          Effect.logWarning("Native Codex session synchronization failed", { cause }),
-        ),
-        Effect.repeat(Schedule.spaced("3 seconds")),
-        forkParked,
-      );
-    }),
+    start: sync.pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("Native Codex session synchronization failed", { cause }),
+      ),
+      Effect.repeat(Schedule.spaced("3 seconds")),
+      forkParked,
+    ),
   });
 });
 export const layer = Layer.effect(NativeCodexSessionSync, make);

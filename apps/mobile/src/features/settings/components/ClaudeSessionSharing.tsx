@@ -6,11 +6,11 @@ import {
   type NativeSessionSharingCandidate,
 } from "@t3tools/contracts";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import { useAdaptiveWorkspaceLayout } from "../../layout/AdaptiveWorkspaceLayout";
+import { useSelectWorkspaceDetail } from "../../workspace/useSelectWorkspaceDetail";
 import { useRef, useState } from "react";
 import { TextInput, View } from "react-native";
 import { AppText as Text } from "../../../components/ui/AppText";
-import { SettingsActionRow } from "./SettingsActionRow";
+import { ListActionRow as SettingsActionRow } from "../../../components/ui/ListActionRow";
 import { serverEnvironment } from "../../../state/server";
 import { useEnvironmentScope } from "../../../state/session";
 import { useAtomCommand } from "../../../state/use-atom-command";
@@ -22,7 +22,7 @@ export function ClaudeSessionSharing({
   readonly environmentId: EnvironmentId;
   readonly instanceId: ProviderInstanceId;
 }) {
-  const { selectThreadRoute } = useAdaptiveWorkspaceLayout();
+  const selectDetail = useSelectWorkspaceDetail();
   const canRead = useEnvironmentScope(environmentId, AuthOrchestrationReadScope);
   const canOpen = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const list = useAtomCommand(serverEnvironment.listNativeSessions, { reportFailure: false });
@@ -83,7 +83,7 @@ export function ClaudeSessionSharing({
     gate.current = false;
     setBusy(false);
     if (result._tag === "Success") {
-      selectThreadRoute({ environmentId, threadId: result.value.threadId });
+      selectDetail({ name: "Thread", params: { environmentId, threadId: result.value.threadId } });
     } else if (result._tag === "Failure") {
       const cause = squashAtomCommandFailure(result);
       setError(

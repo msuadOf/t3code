@@ -26,6 +26,7 @@ import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { mapHistory } from "../provider/NativeSessionHistory.ts";
 import { makeNativeBackgroundRecovery } from "./NativeBackgroundRecovery.ts";
@@ -38,6 +39,9 @@ const gitLayer = GitVcsDriver.layer.pipe(
   Layer.provideMerge(NodeServices.layer),
 );
 const dependencies = Layer.mergeAll(
+  Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
+    getInstance: () => Effect.sync(() => undefined),
+  }),
   stores,
   sinkLayer,
   IdAllocator.layer,

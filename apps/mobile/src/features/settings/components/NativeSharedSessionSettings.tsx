@@ -15,7 +15,7 @@ import { serverEnvironment } from "../../../state/server";
 import { readEnvironmentScope, useEnvironmentScope } from "../../../state/session";
 import { useAtomCommand } from "../../../state/use-atom-command";
 import { SettingsSwitchRow } from "./SettingsSwitchRow";
-import { SettingsActionRow } from "./SettingsActionRow";
+import { ListActionRow as SettingsActionRow } from "../../../components/ui/ListActionRow";
 
 function configRecord(config: unknown): Record<string, unknown> {
   return typeof config === "object" && config !== null && !Array.isArray(config)

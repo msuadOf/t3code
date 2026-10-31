@@ -1,10 +1,10 @@
-import { SourceControlProviderKind, type ThreadPullRequestWatch } from "@t3tools/contracts";
+import { type ThreadPullRequestWatch } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 import {
   ForgejoComment,
   forgejoComment,
-} from "@t3tools/source-control-forgejo/server/forgejoPullRequestJson";
+} from "../../../../packages/source-control-forgejo/src/server/forgejoPullRequestJson.ts";
 
 import { evaluatePullRequestWatch as evaluate } from "./pullRequestWatch.ts";
 
@@ -30,7 +30,16 @@ describe("Forgejo comment watch boundary", () => {
     wakes: 2,
   } satisfies ThreadPullRequestWatch;
   const finalDetail = {
-    provider: SourceControlProviderKind.make("forgejo"),
+    capabilities: {
+      diff: true,
+      comment: true,
+      actions: [],
+      mergeMethods: [],
+      search: false,
+      review: { inlineComment: false, reply: false, resolve: false, verdicts: [] },
+      reviewers: { request: false, listCandidates: false },
+      checksAlwaysReport: false,
+    },
     headSha: seen.headSha,
     checks: [],
     mergeability: "mergeable",

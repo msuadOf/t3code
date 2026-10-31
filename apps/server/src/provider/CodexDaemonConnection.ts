@@ -51,8 +51,8 @@ export const makeClient = Effect.fn("CodexDaemonConnection.makeClient")(function
   const connect = CodexDaemon.makeStdio(connection.endpoint);
   const stdio = yield* connect.pipe(
     Effect.catchTags({
-      CodexAppServerTransportError: (original) =>
-        Effect.gen(function* () {
+      CodexAppServerTransportError: Effect.fn("CodexDaemonConnection.startOnMissingSocket")(
+        function* (original) {
           // An explicit endpoint is authoritative. A missing default socket is
           // the only condition under which T3 starts Codex's managed daemon.
           if (!connection.managed || (yield* fileSystem.exists(connection.socketPath))) {
@@ -77,7 +77,8 @@ export const makeClient = Effect.fn("CodexDaemonConnection.makeClient")(function
           return yield* connect.pipe(
             Effect.retry({ schedule: Schedule.exponential("100 millis"), times: 5 }),
           );
-        }),
+        },
+      ),
     }),
   );
   return yield* CodexClient.make(stdio, options);

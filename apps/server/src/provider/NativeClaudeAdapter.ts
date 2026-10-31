@@ -1,3 +1,4 @@
+// @effect-diagnostics abortControllerInEffect:off -- Watchers are independently retired by native job generation/unload; aborting the session fiber would stop sibling subscriptions.
 import { makeNativeClaudeTerminalView } from "./NativeClaudeTerminalView.ts";
 import { nativeSessionProjectionId } from "@t3tools/provider-core/server/nativeSessions";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
@@ -424,7 +425,6 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         }
       }).pipe(
         captureLock.withPermit,
-        Effect.catch((cause) => Effect.logWarning("Claude live output capture failed", { cause })),
         Effect.repeat(Schedule.spaced("250 millis")),
         Effect.forkScoped,
       );
@@ -548,7 +548,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
               signature = next;
               return Queue.offer(refreshRequests, undefined).pipe(Effect.asVoid);
             }),
-            Effect.catch(() => Effect.void),
+            Effect.ignore,
           );
         }).pipe(
           Effect.scoped,
@@ -710,9 +710,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
             ),
           );
           const subagents = historyAvailable
-            ? yield* attempt(() => source.subagents(id)).pipe(
-                Effect.catch(() => Effect.succeed([])),
-              )
+            ? yield* attempt(() => source.subagents(id)).pipe(Effect.orElseSucceed(() => []))
             : [];
           let commandsAvailable = historyAvailable;
           const commands = historyAvailable
@@ -922,7 +920,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
                     nativeThreadId: id,
                     nativeTurnId: turn.id,
                     nativeRequestId: item.id,
-                  }) ?? Effect.succeed(undefined)
+                  }) ?? Effect.void
                 );
                 if (restored?.status === "resolved") continue;
                 const canPublish =
@@ -1375,7 +1373,9 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         providerSession,
         events: Stream.fromQueue(events),
         ensureThread: Effect.fn("NativeClaudeAdapter.ensureThread")(function* (request) {
-          const existing = request.existingProviderThread;
+          const existing = request.forceNewNativeThread
+            ? undefined
+            : request.existingProviderThread;
           const nativeOwner = existing?.nativeThreadRef?.nativeId
             ? (yield* attempt(() => client.listSessions())).some(
                 (job) => job.sessionId === existing.nativeThreadRef!.nativeId,

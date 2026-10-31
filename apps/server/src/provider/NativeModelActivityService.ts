@@ -156,8 +156,7 @@ const make = Effect.gen(function* () {
   const observeSelected = (selected: Connected, after?: number, recovering = false) =>
     Stream.unwrap(
       Effect.gen(function* () {
-        const controller = new AbortController();
-        yield* Effect.addFinalizer(() => Effect.sync(() => controller.abort()));
+        const signal = yield* Effect.abortSignal;
         let epoch = `${selected.observer.epoch}:${selected.session.id}`;
         const pending = new Set<string>();
         const confirmed = new Set<string>();
@@ -187,7 +186,7 @@ const make = Effect.gen(function* () {
             ...selected.observer,
             sessionId: selected.session.id,
             ...(after === undefined ? {} : { after: after }),
-            signal: controller.signal,
+            signal: signal,
           }),
           readError,
         ).pipe(

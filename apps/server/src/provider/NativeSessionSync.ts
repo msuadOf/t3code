@@ -761,7 +761,7 @@ const make = Effect.gen(function* () {
                   ],
                 });
               }
-            }).pipe(Effect.catch(() => Effect.void)),
+            }).pipe(Effect.ignore),
           ),
         );
       }).pipe(mutation.withPermits(1));

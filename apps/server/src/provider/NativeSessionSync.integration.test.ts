@@ -1279,13 +1279,11 @@ it.effect.each(["starting", "running"] as const)(
                 Effect.gen(function* () {
                   yield* Deferred.succeed(entered, options!.threadId!);
                   yield* Deferred.await(release);
-                  return yield* Effect.fail(
-                    new ProviderDriverError({
-                      driver: claudeDriver,
-                      instanceId: claude,
-                      detail: "claim failed after caller attached",
-                    }),
-                  );
+                  return yield* new ProviderDriverError({
+                    driver: claudeDriver,
+                    instanceId: claude,
+                    detail: "claim failed after caller attached",
+                  });
                 }),
             },
           }),

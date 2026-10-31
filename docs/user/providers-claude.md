@@ -239,7 +239,7 @@ it is not an unconditional network latency guarantee.
 
 Use `/compact`, model selection, permission controls, and task management in the
 attached Claude CLI. Its background worker owns those settings. SDK-specific
-compaction prompts, structured task-list projection, and usage-limit recovery
+compaction prompts and usage-limit recovery
 are unavailable in the native conversation adapter.
 
 ## Skills
@@ -253,6 +253,13 @@ contribute skills under names such as `plugin:review`. Skills marked `disable-mo
 can still be started by you. Invoke those one per message: Claude directly runs
 only the last named skill and may try to start earlier ones through its Skill
 tool, which refuses skills reserved for manual invocation.
+
+## Task lists
+
+To show Claude task lists in the web and desktop apps, add
+`CLAUDE_CODE_ENABLE_TODO_TOOLS=1` under **Variables** in the Claude instance's
+**Environment** section in **Settings > Providers**. Each update shows as a Tasks
+row in the thread; open it to see every step.
 
 ## OpenRouter
 

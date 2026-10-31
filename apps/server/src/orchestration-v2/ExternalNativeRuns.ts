@@ -479,7 +479,7 @@ const make = Effect.gen(function* () {
     );
   });
   return ExternalNativeRuns.of({
-    recoverBackground: (input) =>
+    recoverBackground: Effect.fn("ExternalNativeRuns.recoverBackground")((input) =>
       recoverBackground(input).pipe(
         Effect.mapError(
           (cause) =>
@@ -490,7 +490,8 @@ const make = Effect.gen(function* () {
             }),
         ),
       ),
-    reconcileSnapshot: (input) =>
+    ),
+    reconcileSnapshot: Effect.fn("ExternalNativeRuns.reconcileSnapshot")((input) =>
       reconcileSnapshot(input).pipe(
         Effect.mapError(
           (cause) =>
@@ -501,7 +502,8 @@ const make = Effect.gen(function* () {
             }),
         ),
       ),
-    adopt: (input) =>
+    ),
+    adopt: Effect.fn("ExternalNativeRuns.adopt")((input) =>
       adopt(input).pipe(
         Effect.mapError(
           (cause) =>
@@ -512,6 +514,7 @@ const make = Effect.gen(function* () {
             }),
         ),
       ),
+    ),
   });
 });
 

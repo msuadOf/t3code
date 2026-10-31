@@ -38,7 +38,6 @@ import {
   enrichProviderSnapshotWithVersionAdvisory,
   makeCachedProviderMaintenanceResolution,
   makePackageManagedProviderMaintenanceResolver,
-  normalizeCommandPath,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "@t3tools/provider-core/server/maintenanceResolver";
 import {
@@ -55,22 +54,36 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("codex");
-function isCodexStandaloneCommandPath(commandPath: string): boolean {
-  return normalizeCommandPath(commandPath).includes("/packages/standalone/");
+const CODEX_STANDALONE_HOME_PATTERN = /^(.*)\/packages\/standalone\//is;
+
+function codexStandaloneHome(commandPath: string): string | null {
+  // Slash replacement preserves indices; Unicode lowercasing can change the path length.
+  const match = CODEX_STANDALONE_HOME_PATTERN.exec(commandPath.replaceAll("\\", "/"));
+  if (!match) {
+    return null;
+  }
+  const home = match[1]!;
+  // Keep root separators: `C:` is drive-relative, and an empty home is not `/`.
+  const isRoot = home === "" || /^[a-z]:$/i.test(home);
+  return commandPath.slice(0, home.length + (isRoot ? 1 : 0));
 }
 
-/**
- * Codex's updater owns the standalone tree under the same home as its daemon.
- */
+// Standalone updates locate their install through CODEX_HOME. Account and auth-overlay
+// homes can share an executable, so only the updater uses the executable's owning home.
 function makeCodexMaintenanceResolver(sharedHomePath: string) {
   return makePackageManagedProviderMaintenanceResolver({
     provider: DRIVER_KIND,
     npmPackageName: "@openai/codex",
     nativeUpdate: {
       args: ["update"],
-      isCommandPath: isCodexStandaloneCommandPath,
+      isCommandPath: (commandPath) => codexStandaloneHome(commandPath) !== null,
       requiresCommandPath: true,
-      env: { CODEX_HOME: sharedHomePath },
+      env: (context) => ({
+        CODEX_HOME:
+          codexStandaloneHome(context.realCommandPath) ??
+          codexStandaloneHome(context.resolvedCommandPath) ??
+          sharedHomePath,
+      }),
     },
   });
 }
@@ -129,6 +142,7 @@ export const CodexDriver: ProviderDriver<
     const pathService = yield* Path.Path;
     const httpClient = yield* HttpClient.HttpClient;
     const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
+    const installation = yield* CodexInstallation.CodexInstallation;
     const modelCatalog = yield* ModelCatalog.ModelCatalog;
     const currentCatalog = modelCatalog.current(DRIVER_KIND);
     const processEnv = yield* mergeProviderInstanceEnvironment(
@@ -180,7 +194,10 @@ export const CodexDriver: ProviderDriver<
         enabled,
         config: effectiveConfig,
       },
-      { onUsageLimits: (update) => snapshot.applyUsageLimits(update) },
+      {
+        onUsageLimits: (update) => snapshot.applyUsageLimits(update),
+        compatibility: installation.compatibility,
+      },
     ).pipe(
       Effect.mapError(
         (cause) =>
@@ -282,10 +299,8 @@ export const CodexDriver: ProviderDriver<
             ),
           );
 
-    // Redemption spends something on the user's account. It serialises on
-    // the account (instances sharing a Codex home share the credit), keeps
-    // one idempotency key until Codex reports an outcome, and is bounded so
-    // a hung app-server cannot hold the account lock.
+    // Redemption spends account credit; serialize by the auth.json directory, keep one idempotency key
+    // until the outcome, and bound the wait so a hung app-server cannot hold the account lock.
     const accountKey = sharedHomePath;
     const consumeResetCredit: NonNullable<ProviderInstance["consumeResetCredit"]> = () =>
       resetCreditCoordinator
