@@ -258,7 +258,13 @@ jobs:
           MAESTRO_DRIVER_STARTUP_TIMEOUT: "300000"
         run: |
           device_id="$IOS_LATENCY_DEVICE"
-          printf '%s/#token=%s' "$DAEMON_ADDRESS" "$PAIRING_CODE" | python3 .github/native-stream/claude-run-bounded.py 60 copy-pairing-url xcrun simctl pbcopy "$device_id"
+          for attempt in 1 2 3; do
+            if printf '%s/#token=%s' "$DAEMON_ADDRESS" "$PAIRING_CODE" | python3 .github/native-stream/claude-run-bounded.py 60 "copy-pairing-url-attempt-$attempt" xcrun simctl pbcopy "$device_id"; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then exit 1; fi
+            sleep 2
+          done
           maestro --device "$device_id" test -e DAEMON_ADDRESS="$DAEMON_ADDRESS" -e PAIRING_CODE="$PAIRING_CODE" -e CONTROL_URL="$CONTROL_URL" --format junit --output artifacts/native-session/results.xml --test-output-dir artifacts/native-session/maestro .github/native-stream/claude-session-flow.yaml
           python3 .github/native-stream/claude-video-latency.py --device "$device_id"
 
