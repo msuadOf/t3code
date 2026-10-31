@@ -597,6 +597,7 @@ describe("OpenCode 2 through the orchestrator", () => {
   const backgroundReconnect = Effect.fn("backgroundReconnect")(function* (input: {
     readonly name: string;
     readonly cut: string;
+    readonly unrecordedShellOutput?: "empty";
     readonly hold?: string;
     readonly reconnect: (parent: string) => ReadonlyArray<ProviderReplayEntry>;
     readonly steps: (
@@ -628,6 +629,12 @@ describe("OpenCode 2 through the orchestrator", () => {
     const transcript = yield* OpenCode2OrchestratorReplayHarness.decodeTranscript({
       ...recorded,
       scenario: input.name,
+      metadata: {
+        ...recorded.metadata,
+        ...(input.unrecordedShellOutput === undefined
+          ? {}
+          : { unrecordedShellOutput: input.unrecordedShellOutput }),
+      },
       entries: [
         ...kept,
         { type: "runtime_exit", status: "success" },
@@ -657,6 +664,7 @@ describe("OpenCode 2 through the orchestrator", () => {
     Effect.gen(function* () {
       const { result, projection } = yield* backgroundReconnect({
         name: "opencode2-follow-up-reconnect",
+        unrecordedShellOutput: "empty",
 
         cut: "session.step.streamed.5",
         hold: "session.text.ended.3",
@@ -878,6 +886,7 @@ describe("OpenCode 2 through the orchestrator", () => {
         const transcript = yield* OpenCode2OrchestratorReplayHarness.decodeTranscript({
           ...recorded,
           scenario: "opencode2-background-in-turn",
+          metadata: { ...recorded.metadata, unrecordedShellOutput: "empty" },
           entries: [
             ...recorded.entries.slice(0, parentEnd),
 

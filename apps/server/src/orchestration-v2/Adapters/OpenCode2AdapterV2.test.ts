@@ -314,6 +314,7 @@ const colorForm = {
 const resumed = (
   entries: ReadonlyArray<ProviderReplayEntry>,
   options?: {
+    readonly unrecordedShellOutput?: "empty";
     readonly external?: boolean;
     readonly observer?: boolean;
     readonly supervised?: boolean;
@@ -3203,7 +3204,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
           },
           event("session.execution.succeeded", { sessionID: SESSION }),
         ],
-        { replayGate: gate },
+        { replayGate: gate, unrecordedShellOutput: "empty" },
       );
       const seen = yield* Deferred.make<void>();
       const events = yield* runtime.events.pipe(

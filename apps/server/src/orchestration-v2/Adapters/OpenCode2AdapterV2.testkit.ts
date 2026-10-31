@@ -135,6 +135,7 @@ const replayHttpClient = (
   controller: OpenCodeReplayController,
   replayGate: ProviderReplayGate | undefined,
   onPrompt: ((input: unknown) => void) | undefined,
+  emptyUnrecordedShellOutput = false,
 ) =>
   HttpClient.make((request, url) =>
     Effect.tryPromise({
@@ -153,6 +154,14 @@ const replayHttpClient = (
           query,
           raw === undefined ? undefined : decodeJson(raw),
         );
+        // A few upstream lifecycle recordings predate the fork's read-only output
+        // tail. Only explicitly marked fixtures may model that absent source as empty.
+        if (emptyUnrecordedShellOutput && operation.type === "shell.output") {
+          return new Response(
+            encodeJson({ data: { output: "", cursor: 0, size: 0, truncated: false } }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
         // HTTP streams and requests use separate connections; deliver prior recorded inbound data before matching requests.
         if (operation.type !== "event.subscribe") await controller.untilInboundDelivered();
         if (operation.type === "session.prompt") onPrompt?.(operation.input);
@@ -213,7 +222,20 @@ export const replayServer = (
     const opencode = yield* OpenCode2Client.make.pipe(
       Effect.provideService(
         HttpClient.HttpClient,
-        replayHttpClient(controller, options?.replayGate, options?.onPrompt),
+        replayHttpClient(
+          controller,
+          options?.replayGate,
+          options?.onPrompt,
+          transcript.metadata?.unrecordedShellOutput === "empty" &&
+            !transcript.entries.some(
+              (entry) =>
+                entry.type === "expect_outbound" &&
+                typeof entry.frame === "object" &&
+                entry.frame !== null &&
+                "type" in entry.frame &&
+                entry.frame.type === "shell.output",
+            ),
+        ),
       ),
     );
     const api = yield* opencode.connect({ baseUrl: BASE_URL, password: "replay" });
@@ -298,6 +320,7 @@ export const openCode2ReplayRuntime = (
     readonly external?: boolean;
     readonly observer?: boolean;
     readonly shared?: boolean;
+    readonly unrecordedShellOutput?: "empty";
     readonly onExternalTurn?: ProviderAdapter.ProviderAdapterV2OpenSessionInput["onExternalTurn"];
     readonly onPrompt?: (input: unknown) => void;
     readonly borrowers?: { current: number };
@@ -315,6 +338,9 @@ export const openCode2ReplayRuntime = (
         protocol: OPENCODE2_HTTP_PROTOCOL,
         version: "2.0.18",
         scenario: "opencode2_adapter",
+        ...(options?.unrecordedShellOutput === undefined
+          ? {}
+          : { metadata: { unrecordedShellOutput: options.unrecordedShellOutput } }),
         entries,
       },
       options,

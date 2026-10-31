@@ -2819,15 +2819,13 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       for (const message of recent.toReversed()) {
         if (message.type !== "assistant" || state.active !== turn) continue;
         const ordinals = { text: 0, reasoning: 0 };
-        for (const [index, part] of message.content.entries()) {
+        for (const part of message.content) {
           if (part.type === "text" || part.type === "reasoning") {
             const block = { assistantMessageID: message.id, ordinal: ordinals[part.type]++ };
-            // OpenCode saves a block's text only when the block ends, so the last block of a
-            // response still streaming stays open and keeps the text that already arrived.
-            const open =
-              message.time.streamed === undefined && index === message.content.length - 1;
+            // History may lag both reasoning and text deltas. A later sibling block
+            // does not prove this accumulator is final; keep prefixes until the
+            // native message or execution has an explicit completion boundary.
             const completed =
-              !open ||
               idle !== undefined ||
               message.time.completed !== undefined ||
               message.finish !== undefined;
