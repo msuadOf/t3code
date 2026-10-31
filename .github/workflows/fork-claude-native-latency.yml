@@ -30,7 +30,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: claude-native-latency-${{ github.ref }}
+  group: claude-native-latency-${{ github.ref }}-${{ inputs.platform || 'all' }}
   cancel-in-progress: false
 
 env:
