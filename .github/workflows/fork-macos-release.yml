@@ -184,7 +184,7 @@ jobs:
 
           Claude live output capture is independent of slow session discovery. Streaming command output keeps following new content, and foreground commands retain their original scheduling. Native local symlink browsing is preserved.
 
-          The application version remains the upstream base version. Web compatibility-layer acceptance passed all three measured stages below two seconds. Final Android/iOS device acceptance was not rerun, as requested.
+          The application version remains the upstream base version. Final Android/iOS device acceptance was not rerun, as requested; this release uses shared-layer regression tests and Web verification.
 
           Linux x64: unpack the self-contained CLI archive and run `./t3`. Verify it against SHA256SUMS-linux.txt.
 

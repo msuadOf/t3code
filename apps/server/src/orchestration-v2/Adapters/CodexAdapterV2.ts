@@ -7891,10 +7891,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ),
           respondToRuntimeRequest: Effect.fn("CodexAdapterV2.respondToRuntimeRequest")(
             function* (requestInput) {
-              for (const artifacts of nativeRequestArtifacts.values()) {
-                if (artifacts.request.id === requestInput.requestId)
-                  artifacts.locallyAnswered = true;
-              }
+              const markDeliveredAnswer = (delivered: boolean) =>
+                Effect.sync(() => {
+                  if (!delivered) return;
+                  for (const artifacts of nativeRequestArtifacts.values()) {
+                    if (artifacts.request.id === requestInput.requestId)
+                      artifacts.locallyAnswered = true;
+                  }
+                });
               const pending = (yield* Ref.get(pendingRuntimeRequests)).get(
                 String(requestInput.requestId),
               );
@@ -7917,7 +7921,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     ),
                   });
                 }
-                yield* Deferred.succeed(pending.answers, requestInput.answers);
+                yield* Deferred.succeed(pending.answers, requestInput.answers).pipe(
+                  Effect.tap(markDeliveredAnswer),
+                  Effect.uninterruptible,
+                );
                 return;
               }
               if (requestInput.decision === undefined) {
@@ -7929,7 +7936,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   ),
                 });
               }
-              yield* Deferred.succeed(pending.decision, requestInput.decision);
+              yield* Deferred.succeed(pending.decision, requestInput.decision).pipe(
+                Effect.tap(markDeliveredAnswer),
+                Effect.uninterruptible,
+              );
             },
             (effect, requestInput) =>
               effect.pipe(

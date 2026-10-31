@@ -2538,105 +2538,140 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ),
   );
 
-  it.effect("resolves an approval answered by another daemon client without replying again", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const scenario = "codex-shared-approval-resolved";
-        const nativeThreadId = `native-${scenario}`;
-        const nativeTurnId = "shared-approval-turn";
-        const transcript = makeCodexReplayTranscript({
-          scenario,
-          entries: [
-            ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "Check files" }),
-            {
-              type: "emit_inbound",
-              label: "shared approval",
-              frame: {
-                id: 900,
-                method: "item/commandExecution/requestApproval",
-                params: {
-                  threadId: nativeThreadId,
-                  turnId: nativeTurnId,
-                  itemId: "command-one",
-                  approvalId: "not-the-rpc-id",
-                  command: "cat README.md",
-                  startedAtMs: 1782622441000,
+  it.effect.each([
+    { kind: "approval", invalidLocalAnswer: false },
+    { kind: "approval", invalidLocalAnswer: true },
+    { kind: "user_input", invalidLocalAnswer: true },
+  ] as const)(
+    "resolves a shared request after %j without replying again",
+    ({ kind, invalidLocalAnswer }) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scenario = "codex-shared-approval-resolved";
+          const nativeThreadId = `native-${scenario}`;
+          const nativeTurnId = "shared-approval-turn";
+          const transcript = makeCodexReplayTranscript({
+            scenario,
+            entries: [
+              ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "Check files" }),
+              {
+                type: "emit_inbound",
+                label: "shared approval",
+                frame: {
+                  id: 900,
+                  method:
+                    kind === "approval"
+                      ? "item/commandExecution/requestApproval"
+                      : "item/tool/requestUserInput",
+                  params: {
+                    threadId: nativeThreadId,
+                    turnId: nativeTurnId,
+                    itemId: "command-one",
+                    approvalId: "not-the-rpc-id",
+                    command: "cat README.md",
+                    startedAtMs: 1782622441000,
+                    ...(kind === "user_input"
+                      ? {
+                          questions: [
+                            {
+                              id: "branch",
+                              header: "Branch",
+                              question: "Which branch?",
+                              isOther: false,
+                              isSecret: false,
+                              options: [{ label: "main", description: "Main branch" }],
+                            },
+                          ],
+                        }
+                      : {}),
+                  },
                 },
               },
-            },
-            {
-              type: "expect_outbound",
-              label: "barrier after the UI saw approval",
-              frame: {
-                id: 4,
-                method: "thread/resume",
-                params: { threadId: nativeThreadId },
-              },
-            },
-            {
-              type: "emit_inbound",
-              label: "another client resolved the real RPC id",
-              frame: {
-                method: "serverRequest/resolved",
-                params: { threadId: nativeThreadId, requestId: 900 },
-              },
-            },
-            {
-              type: "emit_inbound",
-              label: "barrier response",
-              frame: {
-                id: 4,
-                result: { thread: { id: nativeThreadId, updatedAt: 1782622440 } },
-              },
-            },
-            {
-              type: "emit_inbound",
-              label: "completed",
-              frame: {
-                method: "turn/completed",
-                params: {
-                  threadId: nativeThreadId,
-                  turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+              {
+                type: "expect_outbound",
+                label: "barrier after the UI saw approval",
+                frame: {
+                  id: 4,
+                  method: "thread/resume",
+                  params: { threadId: nativeThreadId },
                 },
               },
-            },
-          ],
-        });
-        const harness = yield* makeCodexReplayHarness(transcript);
-        const turn = makeCodexTestTurnInput({
-          threadId: harness.threadId,
-          providerThread: harness.providerThread,
-          now: yield* DateTime.now,
-          attemptId: RunAttemptId.make("shared-approval-attempt"),
-          text: "Check files",
-        });
-        yield* harness.runtime.startTurn(turn);
-        yield* harness.until(() =>
-          harness.events.some(
-            (event) =>
-              event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
-          ),
-        );
-        yield* harness.runtime.resumeThread({ providerThread: harness.providerThread });
-        yield* harness.firstTerminal;
-        const states = harness.events.flatMap((event) =>
-          event.type === "runtime_request.updated" ? [event.runtimeRequest.status] : [],
-        );
-        assert.deepEqual(states, ["pending", "resolved"]);
-        assert.isTrue(
-          harness.events.some(
-            (event) =>
-              event.type === "turn_item.updated" &&
-              event.turnItem.type === "approval_request" &&
-              event.turnItem.status === "completed",
-          ),
-        );
-      }),
-    ).pipe(
-      Effect.provide(
-        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+              {
+                type: "emit_inbound",
+                label: "another client resolved the real RPC id",
+                frame: {
+                  method: "serverRequest/resolved",
+                  params: { threadId: nativeThreadId, requestId: 900 },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "barrier response",
+                frame: {
+                  id: 4,
+                  result: { thread: { id: nativeThreadId, updatedAt: 1782622440 } },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "completed",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                  },
+                },
+              },
+            ],
+          });
+          const harness = yield* makeCodexReplayHarness(transcript);
+          const turn = makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("shared-approval-attempt"),
+            text: "Check files",
+          });
+          yield* harness.runtime.startTurn(turn);
+          yield* harness.until(() =>
+            harness.events.some(
+              (event) =>
+                event.type === "runtime_request.updated" &&
+                event.runtimeRequest.status === "pending",
+            ),
+          );
+          if (invalidLocalAnswer) {
+            const request = harness.events.flatMap((event) =>
+              event.type === "runtime_request.updated" ? [event.runtimeRequest] : [],
+            )[0];
+            assert.isDefined(request);
+            const error = yield* harness.runtime
+              .respondToRuntimeRequest({ requestId: request!.id })
+              .pipe(Effect.flip);
+            assert.equal(error._tag, "ProviderAdapterRuntimeRequestResponseError");
+          }
+          yield* harness.runtime.resumeThread({ providerThread: harness.providerThread });
+          yield* harness.firstTerminal;
+          const states = harness.events.flatMap((event) =>
+            event.type === "runtime_request.updated" ? [event.runtimeRequest.status] : [],
+          );
+          assert.deepEqual(states, ["pending", "resolved"]);
+          assert.isTrue(
+            harness.events.some(
+              (event) =>
+                event.type === "turn_item.updated" &&
+                event.turnItem.type ===
+                  (kind === "approval" ? "approval_request" : "user_input_request") &&
+                event.turnItem.status === "completed",
+            ),
+          );
+        }),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
       ),
-    ),
   );
 
   it.effect("reports a native rewind while idle without starting or interrupting a turn", () =>
