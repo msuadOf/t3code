@@ -168,11 +168,29 @@ jobs:
             apps/mobile/android/app/build/outputs/apk/release/app-release.apk
             ${{ runner.temp }}/native-stream-ios/Build/Products/Release-iphonesimulator/T3CodeDev.app
 
+      - name: Archive iOS simulator app for independent acceptance
+        if: matrix.platform == 'ios'
+        run: tar -czf "$RUNNER_TEMP/claude-native-ios-app.tgz" -C "$RUNNER_TEMP/native-stream-ios/Build/Products/Release-iphonesimulator" T3CodeDev.app
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.platform == 'ios'
+        with:
+          name: claude-native-ios-app
+          path: ${{ runner.temp }}/claude-native-ios-app.tgz
+          retention-days: 3
+          compression-level: 0
+
       - name: Prepare iOS simulator and install app
         if: matrix.platform == 'ios'
         timeout-minutes: 15
         run: |
-          python3 .github/native-stream/claude-run-bounded.py 60 list-device-types xcrun simctl list devicetypes --json > "$RUNNER_TEMP/latency-device-types.json"
+          for attempt in 1 2; do
+            if python3 .github/native-stream/claude-run-bounded.py 60 "list-device-types-attempt-$attempt" xcrun simctl list devicetypes --json > "$RUNNER_TEMP/latency-device-types.json"; then
+              break
+            fi
+            if [ "$attempt" = 2 ]; then exit 1; fi
+            sleep 2
+          done
           python3 .github/native-stream/claude-run-bounded.py 60 list-runtimes xcrun simctl list runtimes --json > "$RUNNER_TEMP/latency-runtimes.json"
           sdk_version="$(xcrun --sdk iphonesimulator --show-sdk-version)"
           node --input-type=module - "$RUNNER_TEMP/latency-device-types.json" "$RUNNER_TEMP/latency-runtimes.json" "$sdk_version" <<'JSDEVICE' > "$RUNNER_TEMP/latency-device-selection.json"
