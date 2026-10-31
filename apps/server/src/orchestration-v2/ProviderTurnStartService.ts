@@ -976,7 +976,7 @@ export const layer: Layer.Layer<
         // retry copy after it would rank older missed requests as the newest history.
         const missedRuns = projection.runs.filter(
           (source) =>
-            !(session.driver === "claudeAgent" && sameNativeThread) &&
+            !(session.preserveNativeContext === true && sameNativeThread) &&
             !resumeFellBack &&
             source.ordinal < run.ordinal &&
             source.providerThreadId === providerThread.id &&
@@ -1244,9 +1244,9 @@ export const layer: Layer.Layer<
               }),
         );
         if (resumed._tag === "Success") {
-          // Native Claude already owns this history; do not preflight by injecting
+          // The shared native worker owns this history; do not preflight by injecting
           // a second portable summary or replace its executor on a budget check.
-          if (session.driver === "claudeAgent" && resumed.success.nativeThreadRef !== null)
+          if (session.preserveNativeContext === true && resumed.success.nativeThreadRef !== null)
             return resumed.success;
           const context = handoffContextForThread(resumed.success);
           context.budget = yield* Effect.cached(context.budget);
@@ -1303,10 +1303,10 @@ export const layer: Layer.Layer<
         resumedRetryHandoff = [];
         if (!(yield* isCurrentAttemptInStatus("starting"))) return undefined;
 
-        // A shared Claude worker owns its context. Failure to attach must not
+        // A shared native worker owns its context. Failure to attach must not
         // silently replace the session with a different executor and a summary.
         if (
-          session.driver === "claudeAgent" &&
+          session.preserveNativeContext === true &&
           providerThread.nativeThreadRef !== null &&
           resumed._tag === "Failure"
         )
@@ -1386,11 +1386,11 @@ export const layer: Layer.Layer<
       }
       const now = yield* DateTime.now;
       const handoffContext = resumedHandoffContext ?? handoffContextForThread(loadedProviderThread);
-      const preserveNativeClaudeContext =
-        session.driver === "claudeAgent" &&
+      const preserveNativeContext =
+        session.preserveNativeContext === true &&
         providerThread.nativeThreadRef !== null &&
         handoffContext.sameNativeThread;
-      if (preserveNativeClaudeContext) {
+      if (preserveNativeContext) {
         restartNote = "";
         effectiveHandoffs = effectiveHandoffs.filter(
           (handoff) =>

@@ -152,6 +152,7 @@ export function ModelActivityView({
     // Set only this viewport: scrollIntoView would also move the main conversation.
     if (offset !== null) viewport.scrollTop = offset;
   };
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- aligns the DOM viewport with the followed request and owns its ResizeObserver until cleanup without overriding user pause
   useLayoutEffect(() => {
     if (!open || !target) return;
     follow();

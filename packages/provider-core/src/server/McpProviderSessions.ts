@@ -92,7 +92,9 @@ const make = Effect.gen(function* () {
       }
       yield* Ref.update(sessions, (current) => new Map(current).set(config.threadId, config));
     }),
-    read: (threadId) => Ref.get(sessions).pipe(Effect.map((current) => current.get(threadId))),
+    read: Effect.fn("McpProviderSessions.read")((threadId) =>
+      Ref.get(sessions).pipe(Effect.map((current) => current.get(threadId))),
+    ),
     clear: Effect.fn("McpProviderSessions.clear")(
       (threadId: ThreadId, expectedProviderSessionId?: string) =>
         Ref.modify(sessions, (current) => {
@@ -116,27 +118,29 @@ const make = Effect.gen(function* () {
           ),
         ),
     ),
-    recordHtmlRender: (threadId, input, reference) =>
-      Ref.update(htmlRenders, (current) =>
-        new Map(current).set(
-          threadId,
-          [
-            ...(current.get(threadId) ?? []),
-            {
-              title: input.title,
-              height: input.height,
-              htmlLength: input.html.length,
-              htmlHash: hashHtml(input.html),
-              // Copy the tail so its backing storage cannot retain the entire HTML string.
-              htmlEnd: Buffer.from(input.html.slice(-KEPT_HTML_END_LENGTH), "utf16le").toString(
-                "utf16le",
-              ),
-              reference,
-            },
-          ].slice(-MAX_KEPT_HTML_RENDERS),
+    recordHtmlRender: Effect.fn("McpProviderSessions.recordHtmlRender")(
+      (threadId, input, reference) =>
+        Ref.update(htmlRenders, (current) =>
+          new Map(current).set(
+            threadId,
+            [
+              ...(current.get(threadId) ?? []),
+              {
+                title: input.title,
+                height: input.height,
+                htmlLength: input.html.length,
+                htmlHash: hashHtml(input.html),
+                // Copy the tail so its backing storage cannot retain the entire HTML string.
+                htmlEnd: Buffer.from(input.html.slice(-KEPT_HTML_END_LENGTH), "utf16le").toString(
+                  "utf16le",
+                ),
+                reference,
+              },
+            ].slice(-MAX_KEPT_HTML_RENDERS),
+          ),
         ),
-      ),
-    takeHtmlRender: (threadId, input, reported) =>
+    ),
+    takeHtmlRender: Effect.fn("McpProviderSessions.takeHtmlRender")((threadId, input, reported) =>
       Ref.modify(htmlRenders, (current) => {
         const kept = current.get(threadId) ?? [];
         const index =
@@ -155,6 +159,7 @@ const make = Effect.gen(function* () {
         }
         return [kept[index]!.reference, next];
       }),
+    ),
   });
 });
 

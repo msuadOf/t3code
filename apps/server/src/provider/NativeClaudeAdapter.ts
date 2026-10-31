@@ -1372,6 +1372,7 @@ export const makeNativeClaudeAdapter = Effect.fn("NativeClaudeAdapter.make")(fun
         providerSessionId: input.providerSessionId,
         providerSession,
         events: Stream.fromQueue(events),
+        preserveNativeContext: true,
         ensureThread: Effect.fn("NativeClaudeAdapter.ensureThread")(function* (request) {
           const existing = request.forceNewNativeThread
             ? undefined

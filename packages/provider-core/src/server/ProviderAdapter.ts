@@ -640,6 +640,8 @@ export interface ProviderAdapterV2SessionRuntime {
   ) => Effect.Effect<boolean>;
   /** Set only if all session background tasks end with its process; otherwise threads must keep Waiting. */
   readonly backgroundTasksEndWithProcess?: true;
+  /** A shared native worker owns its history; never replace it or replay undelivered T3 input on resume. */
+  readonly preserveNativeContext?: true;
   readonly getModelContextWindow?: (
     modelSelection: ModelSelection,
     cwd?: string | null,

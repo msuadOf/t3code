@@ -718,6 +718,7 @@ function makeLocalCommandHarness(input: {
   );
   const fallbackEnsureThread = vi.fn(() => Effect.succeed(providerThread));
   const resumeFallbackSession = {
+    preserveNativeContext: input.nativeClaude === true,
     driver: providerThread.driver,
     resumeThread: () =>
       Effect.fail(
@@ -785,6 +786,7 @@ function makeLocalCommandHarness(input: {
               : input.failReadsAfterRunning === true || input.previousTurn !== undefined
                 ? Effect.succeed({
                     driver: providerThread.driver,
+                    preserveNativeContext: input.nativeClaude === true,
                     providerSession,
                     ensureThread: () => Effect.succeed(providerThread),
                     resumeThread: () => Effect.succeed(projection.providerThreads[0]),

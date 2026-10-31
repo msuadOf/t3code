@@ -150,6 +150,7 @@ function ModelActivityView({
     });
     if (offset !== null) viewportRef.current?.scrollTo({ y: offset, animated: false });
   };
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- updates native ScrollView anchors after layout and scrolls the followed request while preserving user pause
   useLayoutEffect(() => {
     targetRef.current = target;
     const keys = new Set(requests.map(modelActivityRequestKey));
@@ -158,7 +159,7 @@ function ModelActivityView({
     }
     follow();
   });
-  // oxlint-disable-next-line unicorn/no-array-reverse -- Hermes lacks toReversed; reverse only this copy.
+  // Reverse only this copy for Hermes compatibility.
   const newestFirst = [...requests].reverse();
   const disconnected = activity.connectionState === "disconnected" || failed;
   const unmatched = requests.filter((request) => !request.confirmed).length;

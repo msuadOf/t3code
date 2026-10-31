@@ -168,6 +168,7 @@ it.layer(IdAllocator.layer)("Claude native adapter", (it) => {
           modelSelection,
           runtimePolicy,
         });
+        expect(runtime.preserveNativeContext).toBe(true);
         const now = DateTime.makeUnsafe(1);
         const existingProviderThread: OrchestrationV2ProviderThread = {
           id: ProviderThreadId.make("existing-provider-thread"),
