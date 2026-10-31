@@ -1,4 +1,4 @@
-name: Fork macOS release
+name: Fork release
 
 on:
   push:
@@ -102,8 +102,62 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  linux:
+    if: github.repository != 'pingdotgg/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      T3CODE_TELEMETRY_CHANNEL: dev
+    steps:
+      - uses: actions/checkout@v6
+      - name: Resolve the same immutable release source as macOS
+        env:
+          REQUESTED_VERSION: ${{ inputs.version || (github.event_name == 'push' && github.ref_name) || '' }}
+        run: |
+          set -euo pipefail
+          version="${REQUESTED_VERSION#codex-v}"
+          version="${version#v}"
+          version="${version:-$(node -p "require('./apps/server/package.json').version")}"
+          existing_tag="$(git ls-remote --tags origin "refs/tags/codex-v$version")"
+          if [[ -n "$existing_tag" ]]; then
+            git fetch --no-tags --depth=1 origin "refs/tags/codex-v$version"
+            git checkout --detach FETCH_HEAD
+          fi
+          test "$(node -p "require('./apps/server/package.json').version")" = "$version"
+          test "$(node -p "require('./apps/desktop/package.json').version")" = "$version"
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+      - name: Install dependencies
+        run: vp install --frozen-lockfile --filter=t3... --filter=@t3tools/web... --filter=@t3tools/scripts...
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build server and web
+        run: vp run --filter t3 build
+      - name: Build native runtime and resource monitor
+        run: |
+          vp run --filter t3 build:exe
+          vp run build:resource-monitor
+          mkdir -p apps/server/dist/resource-monitor/linux-x64
+          cp native/resource-monitor/target/release/t3-resource-monitor apps/server/dist/resource-monitor/linux-x64/
+      - name: Package and smoke-test Linux CLI
+        run: |
+          node scripts/build-cli-archive.ts --platform linux --arch x64 --version "$RELEASE_VERSION" --output-dir fork-release
+          node scripts/smoke-cli-archive.ts --archive fork-release/*.tar.gz --expect-version "$RELEASE_VERSION"
+          cd fork-release
+          sha256sum ./*.tar.gz > SHA256SUMS-linux.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-x64-release
+          path: fork-release/*
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
-    needs: build
+    needs: [build, linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -117,18 +171,28 @@ jobs:
         with:
           name: macos-arm64-release
           path: release
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-x64-release
+          path: release
       - name: Publish fork prerelease
         shell: bash
         run: |
           set -euo pipefail
           cat > release-notes.md <<'NOTES'
-          Fork preview with shared Codex CLI sessions in the existing T3 interface.
+          Fork release with native shared Codex, Claude, and OpenCode sessions.
+
+          Claude live output capture is independent of slow session discovery. Streaming command output keeps following new content, and foreground commands retain their original scheduling. Native local symlink browsing is preserved.
+
+          The application version remains the upstream base version. Web compatibility-layer acceptance passed all three measured stages below two seconds. Final Android/iOS device acceptance was not rerun, as requested.
+
+          Linux x64: unpack the self-contained CLI archive and run `./t3`. Verify it against SHA256SUMS-linux.txt.
 
           macOS Apple Silicon: download the DMG or ZIP. This community build is not signed with an Apple Developer ID and is not notarized. macOS may require approval in Privacy & Security before opening it.
 
           SHA256SUMS.txt contains the archive checksums. This preview does not configure an upstream automatic update feed or publish to npm, hosted T3, or an app store.
           NOTES
-          (cd release && sha256sum -c SHA256SUMS.txt)
+          (cd release && sha256sum -c SHA256SUMS.txt && sha256sum -c SHA256SUMS-linux.txt)
           release_tag="codex-v$RELEASE_VERSION"
           release_tags="$(gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[].tag_name')"
           if [[ $'\n'"$release_tags"$'\n' == *$'\n'"$release_tag"$'\n'* ]]; then
@@ -138,9 +202,9 @@ jobs:
               exit 1
             fi
             gh release upload "$release_tag" release/*.dmg release/*.zip --clobber
-            gh release upload "$release_tag" release/SHA256SUMS.txt --clobber
+            gh release upload "$release_tag" release/SHA256SUMS.txt release/*.tar.gz release/SHA256SUMS-linux.txt --clobber
           else
-            gh release create "$release_tag" release/*.dmg release/*.zip release/SHA256SUMS.txt \
-              --target "$RELEASE_COMMIT" --title "Shared Codex $RELEASE_VERSION (macOS arm64)" \
+            gh release create "$release_tag" release/*.dmg release/*.zip release/*.tar.gz release/SHA256SUMS.txt release/SHA256SUMS-linux.txt \
+              --target "$RELEASE_COMMIT" --title "T3 Code fork $RELEASE_VERSION — shared native sessions" \
               --notes-file release-notes.md --prerelease --latest=false
           fi
