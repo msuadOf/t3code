@@ -46,29 +46,18 @@ appId: com.t3tools.t3code.dev
     when:
       platform: iOS
     commands:
-      - evalScript: ${output.hostChars = DAEMON_ADDRESS.split('')}
-      - evalScript: ${output.hostIndex = 0}
-      - repeat:
-          times: ${output.hostChars.length}
-          commands:
-            - inputText: ${output.hostChars[output.hostIndex]}
-            - evalScript: ${output.hostIndex += 1}
+      - longPressOn: "^Address$"
+      - tapOn: "^Paste$"
       - hideKeyboard
-      - assertVisible: "^${DAEMON_ADDRESS}$"
-- tapOn: "^Code$"
-- inputText: ${PAIRING_CODE}
-- runFlow:
-    when:
-      platform: iOS
-    commands:
-      - assertVisible: "^${PAIRING_CODE}$"
-      - hideKeyboard
+      - assertVisible: "^${DAEMON_ADDRESS}/#token=${PAIRING_CODE}$"
       - tapOn:
           point: "90%,10%"
 - runFlow:
     when:
       platform: Android
     commands:
+      - tapOn: "^Code$"
+      - inputText: ${PAIRING_CODE}
       - pressKey: Enter
 - extendedWaitUntil:
     notVisible: Code
