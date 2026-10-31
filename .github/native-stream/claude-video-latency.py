@@ -115,7 +115,7 @@ def main():
         frame_dir = output / f"stage-{stage}-frames"
         frame_dir.mkdir()
         # Decode original frames in order, without fps resampling or a timestamp-based claim.
-        subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-vsync", "0",
+        subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-fps_mode", "passthrough",
                         str(frame_dir / "frame-%06d.png")], check=True, timeout=60)
         probe = subprocess.run(["ffprobe", "-v", "error", "-show_frames", "-select_streams", "v:0",
                                 "-of", "json", str(video)], capture_output=True, text=True, check=True, timeout=60)
