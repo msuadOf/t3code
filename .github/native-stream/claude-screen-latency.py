@@ -38,7 +38,7 @@ def request(path, **query):
 
 
 def capture(name, timeout=10):
-    path = output / (name + ".png")
+    path = output / (name + (".png" if args.platform == "android" else ".jpg"))
     began = time.monotonic_ns()
     if args.platform == "android":
         command = ["adb"]
@@ -49,7 +49,7 @@ def capture(name, timeout=10):
             subprocess.run(command + ["exec-out", "screencap"], stdout=image,
                            check=True, timeout=timeout)
     else:
-        subprocess.run(["xcrun", "simctl", "io", args.device, "screenshot", str(path)],
+        subprocess.run(["xcrun", "simctl", "io", args.device, "screenshot", "--type=jpeg", str(path)],
                        capture_output=True, check=True, timeout=timeout)
     captured = time.monotonic_ns()
     row = {"path": str(path), "captureStartNs": began, "captureCompleteNs": captured}
