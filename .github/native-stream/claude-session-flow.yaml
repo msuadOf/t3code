@@ -67,10 +67,17 @@ appId: com.t3tools.t3code.dev
     visible: "(?s).*Read-only native terminal view.*"
     timeout: 30000
 - extendedWaitUntil:
-    visible: "(?s).*Native output source:.*"
+    visible: "(?s)^Native output source:.*"
     timeout: 30000
-- tapOn: "(?s).*Native output source:.*"
-- extendedWaitUntil:
-    visible: "(?s).*NATIVE_CLAUDE_READY.*"
-    timeout: 30000
+- retry:
+    maxRetries: 2
+    commands:
+      - runFlow:
+          when:
+            notVisible: "(?s).*NATIVE_CLAUDE_READY.*"
+          commands:
+            - tapOn: "(?s)^Native output source:.*"
+      - extendedWaitUntil:
+          visible: "(?s).*NATIVE_CLAUDE_READY.*"
+          timeout: 30000
 - takeScreenshot: artifacts/native-session/claude-ready-for-pixel-measurement
