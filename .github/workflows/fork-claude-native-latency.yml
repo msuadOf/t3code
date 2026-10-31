@@ -16,6 +16,10 @@ on:
         type: choice
         options: [all, android, ios]
         default: all
+      iosShellRevision:
+        description: Optional full SHA of a compatible cached iOS shell (strict JS-only allowlist)
+        type: string
+        default: ""
       iosRunner:
         description: Standard ARM runner for iOS acceptance
         type: choice
@@ -140,8 +144,30 @@ jobs:
             apps/mobile/android/app/build/outputs/apk/release/app-release.apk
             ${{ runner.temp }}/native-stream-ios/Build/Products/Release-iphonesimulator/T3CodeDev.app
 
+      - name: Check optional iOS shell compatibility
+        id: ios-shell-source
+        if: github.event_name == 'workflow_dispatch' && matrix.platform == 'ios' && steps.native-app.outputs.cache-hit != 'true' && inputs.iosShellRevision != ''
+        env:
+          IOS_SHELL_REVISION: ${{ inputs.iosShellRevision }}
+        run: python3 .github/native-stream/claude-ios-shell.py prepare --revision "$IOS_SHELL_REVISION" --report artifacts/native-session/ios-shell-reuse.json
+
+      - name: Restore compatible iOS shell
+        id: ios-shell
+        if: steps.ios-shell-source.outputs.eligible == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          key: native-session-app-v2-ios-${{ steps.ios-shell-source.outputs.digest }}
+          path: |
+            apps/mobile/android/app/build/outputs/apk/release/app-release.apk
+            ${{ runner.temp }}/native-stream-ios/Build/Products/Release-iphonesimulator/T3CodeDev.app
+
+      - name: Embed current JS and assets in cached iOS shell
+        id: ios-rebundle
+        if: steps.ios-shell.outputs.cache-hit == 'true'
+        run: python3 .github/native-stream/claude-ios-shell.py rebundle --app "$RUNNER_TEMP/native-stream-ios/Build/Products/Release-iphonesimulator/T3CodeDev.app" --report artifacts/native-session/ios-shell-reuse.json
+
       - name: Generate native project
-        if: steps.native-app.outputs.cache-hit != 'true'
+        if: steps.native-app.outputs.cache-hit != 'true' && steps.ios-rebundle.outputs.reused != 'true'
         working-directory: apps/mobile
         run: pnpm exec expo prebuild --clean --platform ${{ matrix.platform }} 2>&1 | tee ../../artifacts/native-session/prebuild.log
 
@@ -154,7 +180,7 @@ jobs:
         run: ./gradlew app:assembleRelease -PreactNativeArchitectures=x86_64 --max-workers=2 2>&1 | tee ../../../artifacts/native-session/build.log
 
       - name: Build iOS fixture app
-        if: matrix.platform == 'ios' && steps.native-app.outputs.cache-hit != 'true'
+        if: matrix.platform == 'ios' && steps.native-app.outputs.cache-hit != 'true' && steps.ios-rebundle.outputs.reused != 'true'
         working-directory: apps/mobile
         run: |
           xcodebuild -workspace ios/T3CodeDev.xcworkspace -scheme T3CodeDev -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/native-stream-ios" CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="-" CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="" PROVISIONING_PROFILE_SPECIFIER="" ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build > ../../artifacts/native-session/build.log 2>&1
@@ -163,7 +189,7 @@ jobs:
         if: steps.native-app.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: ${{ steps.native-app.outputs.cache-primary-key }}
+          key: native-session-app-${{ matrix.platform == 'ios' && 'v2' || 'v1' }}-${{ matrix.platform }}-${{ steps.native-source.outputs.digest }}
           path: |
             apps/mobile/android/app/build/outputs/apk/release/app-release.apk
             ${{ runner.temp }}/native-stream-ios/Build/Products/Release-iphonesimulator/T3CodeDev.app
