@@ -37,12 +37,24 @@ appId: com.t3tools.t3code.dev
           visible: "^Address$"
           timeout: 15000
 - tapOn: Address
-- inputText: ${DAEMON_ADDRESS}
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - inputText: ${DAEMON_ADDRESS}
 - runFlow:
     when:
       platform: iOS
     commands:
+      - evalScript: ${output.hostChars = DAEMON_ADDRESS.split('')}
+      - evalScript: ${output.hostIndex = 0}
+      - repeat:
+          times: ${output.hostChars.length}
+          commands:
+            - inputText: ${output.hostChars[output.hostIndex]}
+            - evalScript: ${output.hostIndex += 1}
       - hideKeyboard
+      - assertVisible: "^${DAEMON_ADDRESS}$"
 - tapOn: "^Code$"
 - inputText: ${PAIRING_CODE}
 - runFlow:
