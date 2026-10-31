@@ -80,6 +80,7 @@ import {
 import { useTurnItemDetail } from "../../state/queries";
 import {
   resolveThreadWorkGroupInitialScroll,
+  resolveThreadWorkGroupPendingFollowOffset,
   shouldFollowThreadWorkGroupAppend,
   type ThreadWorkGroupScrollPosition,
 } from "./thread-feed-live-follow";
@@ -616,6 +617,7 @@ function ThreadWorkGroupList(props: {
   const loadedRef = useRef(false);
   const userScrollingRef = useRef(false);
   const pendingAppendHeightRef = useRef<number | null>(null);
+  const nativeContentHeightRef = useRef(0);
   const previousContent = useRef({
     rows: props.activities,
     height: Math.max(estimatedRowsHeight, initialPosition?.contentHeight ?? 0),
@@ -655,16 +657,20 @@ function ThreadWorkGroupList(props: {
     });
   };
   const finishPendingAppend = () => {
-    const targetHeight = pendingAppendHeightRef.current;
     const state = listRef.current?.getState();
-    if (
-      targetHeight !== null &&
-      state &&
-      !userScrollingRef.current &&
-      Math.abs(state.scrollLength - targetHeight) <= 1
-    ) {
+    if (!state || userScrollingRef.current) return;
+    const offset = resolveThreadWorkGroupPendingFollowOffset(
+      pendingAppendHeightRef.current,
+      nativeContentHeightRef.current,
+      state.scrollLength,
+      WORK_GROUP_MAX_HEIGHT,
+    );
+    if (offset !== undefined) {
       pendingAppendHeightRef.current = null;
-      void listRef.current?.scrollToEnd({ animated: false });
+      // totalSize fires before LegendList updates row sizes/positions. Native
+      // content measurement confirms the new size; an absolute offset avoids
+      // scrollToEnd resolving the last row against those old positions.
+      void listRef.current?.scrollToOffset({ offset, animated: false });
     }
   };
   // LegendList notifies from child layout effects. Effect Events see the
@@ -684,6 +690,7 @@ function ThreadWorkGroupList(props: {
         detailsChanged,
         streamingCommand: props.streamingCommand,
         userScrolling: userScrollingRef.current,
+        pendingFollow: pendingAppendHeightRef.current !== null,
       });
     previousContent.current = {
       rows: props.activities,
@@ -696,11 +703,11 @@ function ThreadWorkGroupList(props: {
         : { height: nextHeight, rowCount: props.activities.length },
     );
     if (followAppend) {
-      pendingAppendHeightRef.current = Math.min(nextHeight, WORK_GROUP_MAX_HEIGHT);
+      pendingAppendHeightRef.current = nextHeight;
     } else if (detailsChanged || userScrollingRef.current || previous.rows !== props.activities) {
       pendingAppendHeightRef.current = null;
     } else if (pendingAppendHeightRef.current !== null) {
-      pendingAppendHeightRef.current = Math.min(nextHeight, WORK_GROUP_MAX_HEIGHT);
+      pendingAppendHeightRef.current = nextHeight;
     }
     finishPendingAppend();
     rememberPosition();
@@ -748,6 +755,10 @@ function ThreadWorkGroupList(props: {
         renderItem={renderItem}
         sharedValues={sharedValues}
         onLayout={finishPendingAppend}
+        onContentSizeChange={(_width, nextHeight) => {
+          nativeContentHeightRef.current = nextHeight;
+          finishPendingAppend();
+        }}
         onLoad={() => {
           loadedRef.current = true;
           setRestoringPosition(false);

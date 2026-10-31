@@ -7,6 +7,7 @@ import {
   resolveThreadFeedReflowScroll,
   resolveThreadFeedSubmissionAnchor,
   resolveThreadWorkGroupInitialScroll,
+  resolveThreadWorkGroupPendingFollowOffset,
   shouldFollowThreadWorkGroupAppend,
 } from "./thread-feed-live-follow";
 
@@ -32,6 +33,20 @@ describe("tool-group scroll restoration", () => {
   });
 });
 
+describe("tool-group native layout following", () => {
+  it("waits for native content measurement before following JS row growth", () => {
+    expect(resolveThreadWorkGroupPendingFollowOffset(400, 380, 256)).toBeUndefined();
+    expect(resolveThreadWorkGroupPendingFollowOffset(400, 400, 250)).toBeUndefined();
+    expect(resolveThreadWorkGroupPendingFollowOffset(400, 400, 256)).toBe(144);
+  });
+
+  it("waits for a growing short group's viewport and cancels with no pending follow", () => {
+    expect(resolveThreadWorkGroupPendingFollowOffset(200, 200, 180)).toBeUndefined();
+    expect(resolveThreadWorkGroupPendingFollowOffset(200, 200, 200)).toBe(0);
+    expect(resolveThreadWorkGroupPendingFollowOffset(null, 400, 256)).toBeUndefined();
+  });
+});
+
 describe("tool-group append following", () => {
   const previousRows = Array.from({ length: 10 }, (_, index) => ({ id: `call-${index}` }));
   const appendedRows = [...previousRows, { id: "new-call" }];
@@ -45,6 +60,7 @@ describe("tool-group append following", () => {
     detailsChanged: false,
     streamingCommand: false,
     userScrolling: false,
+    pendingFollow: false,
   };
 
   it("follows a new call when the reader was at the end", () => {
@@ -76,16 +92,51 @@ describe("tool-group append following", () => {
     ).toBe(true);
   });
 
+  it("keeps an already pending follow through more JS growth before native layout", () => {
+    expect(
+      shouldFollowThreadWorkGroupAppend({
+        ...atEnd,
+        rows: previousRows,
+        previousContentHeight: 400,
+        contentHeight: 420,
+        scrollOffset: 124,
+        streamingCommand: true,
+        pendingFollow: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldFollowThreadWorkGroupAppend({
+        ...atEnd,
+        rows: previousRows,
+        previousContentHeight: 400,
+        contentHeight: 420,
+        scrollOffset: 124,
+        streamingCommand: true,
+        pendingFollow: false,
+      }),
+    ).toBe(false);
+  });
+
   it.each([
     { name: "reading earlier calls", changes: { scrollOffset: 20 } },
     { name: "streaming an ordinary result", changes: { rows: previousRows, contentHeight: 600 } },
     {
       name: "opening command details",
-      changes: { rows: previousRows, detailsChanged: true, streamingCommand: true },
+      changes: {
+        rows: previousRows,
+        detailsChanged: true,
+        streamingCommand: true,
+        pendingFollow: true,
+      },
     },
     {
       name: "dragging through output",
-      changes: { rows: previousRows, userScrolling: true, streamingCommand: true },
+      changes: {
+        rows: previousRows,
+        userScrolling: true,
+        streamingCommand: true,
+        pendingFollow: true,
+      },
     },
     {
       name: "streaming while reading earlier output",

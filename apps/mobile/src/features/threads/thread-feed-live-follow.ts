@@ -29,6 +29,19 @@ export function resolveThreadWorkGroupInitialScroll(
   return index >= 0 && position ? { index, viewOffset: -position.offsetWithinRow } : undefined;
 }
 
+export function resolveThreadWorkGroupPendingFollowOffset(
+  pendingContentHeight: number | null,
+  nativeContentHeight: number,
+  viewportHeight: number,
+  maxViewportHeight = 256,
+): number | undefined {
+  return pendingContentHeight !== null &&
+    Math.abs(nativeContentHeight - pendingContentHeight) <= 1 &&
+    Math.abs(viewportHeight - Math.min(pendingContentHeight, maxViewportHeight)) <= 1
+    ? Math.max(0, pendingContentHeight - viewportHeight)
+    : undefined;
+}
+
 export function shouldFollowThreadWorkGroupAppend(input: {
   readonly previousRows: ReadonlyArray<{ readonly id: string }>;
   readonly rows: ReadonlyArray<{ readonly id: string }>;
@@ -40,6 +53,7 @@ export function shouldFollowThreadWorkGroupAppend(input: {
   /** Expanded running commands grow without adding a work-log row. */
   readonly streamingCommand: boolean;
   readonly userScrolling: boolean;
+  readonly pendingFollow: boolean;
 }) {
   return (
     !input.detailsChanged &&
@@ -47,7 +61,8 @@ export function shouldFollowThreadWorkGroupAppend(input: {
     input.contentHeight > input.previousContentHeight &&
     (input.rows.length > input.previousRows.length || input.streamingCommand) &&
     input.previousRows.every((row, index) => row.id === input.rows[index]?.id) &&
-    input.previousContentHeight - input.viewportHeight - input.scrollOffset <= 1
+    (input.pendingFollow ||
+      input.previousContentHeight - input.viewportHeight - input.scrollOffset <= 1)
   );
 }
 
