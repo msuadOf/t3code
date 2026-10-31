@@ -115,6 +115,13 @@ jobs:
             echo "CLAUDE_SCREEN_OCR=$RUNNER_TEMP/claude-screen-ocr" >> "$GITHUB_ENV"
           fi
 
+      - name: Verify independent H264 prefix decoding
+        if: matrix.platform == 'ios'
+        run: |
+          command -v ffmpeg
+          command -v ffprobe
+          python3 .github/native-stream/test_claude_h264_prefix.py
+
       - name: Prepare evidence directory
         run: mkdir -p artifacts/native-session
 

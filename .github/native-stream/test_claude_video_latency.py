@@ -14,6 +14,20 @@ spec.loader.exec_module(video_latency)
 
 
 class RecordingEvidenceTests(unittest.TestCase):
+    def test_prefix_marker_requires_exact_same_final_pixel_hash(self):
+        decoded = [{"path": "early-marker.png", "sha256": "marker-hash"},
+                   {"path": "early-background.png", "sha256": "background-hash"}]
+        texts = {"early-marker.png": "NATIVE_CLAUDE_LATENCY_1",
+                 "early-background.png": "NATIVE_CLAUDE_READY"}
+        recognize = lambda path: texts[str(path)]
+        self.assertIsNone(video_latency.matching_prefix_marker(decoded,
+            {"background-hash": Path("final-background.png")}, recognize, "NATIVE_CLAUDE_LATENCY_1"))
+        self.assertIsNone(video_latency.matching_prefix_marker(decoded,
+            {"marker-hash": Path("final-marker.png")}, recognize, "NATIVE_CLAUDE_LATENCY_2"))
+        match = video_latency.matching_prefix_marker(decoded,
+            {"marker-hash": Path("final-marker.png")}, recognize, "NATIVE_CLAUDE_LATENCY_1")
+        self.assertEqual(match, (decoded[0], Path("final-marker.png")))
+
     def probe(self):
         return {"streams": [{"index": 0, "codec_type": "video", "codec_name": "h264",
                               "extradata": "fixed-avcC", "extradata_size": 10}],

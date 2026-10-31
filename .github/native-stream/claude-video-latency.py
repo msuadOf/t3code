@@ -12,6 +12,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import claude_h264_prefix as h264_prefix
 
 
 def sha(path):
@@ -21,6 +22,14 @@ def sha(path):
 def contains(text, marker):
     normalize = lambda value: re.sub(r"[^A-Z0-9]", "", value.upper())
     return normalize(marker) in normalize(text)
+
+
+def matching_prefix_marker(decoded, final_frames_by_hash, recognize, marker):
+    for frame in decoded:
+        final = final_frames_by_hash.get(frame["sha256"])
+        if final is not None and contains(recognize(Path(frame["path"])), marker):
+            return frame, final
+    return None
 
 
 def valid_bound(emitted_ns, finalized_ns, marker_found):
@@ -165,13 +174,17 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     control = os.environ["CONTROL_URL"].rstrip("/")
     results = []
+    ocr_cache = {}
     def request(path, timeout=5, **query):
         suffix = "?" + urllib.parse.urlencode(query) if query else ""
         with urllib.request.urlopen(control + path + suffix, timeout=timeout) as response:
             return json.load(response)
     def recognize(path):
-        text = subprocess.run([os.environ["CLAUDE_SCREEN_OCR"], str(path)],
-                              capture_output=True, text=True, check=True, timeout=60).stdout
+        digest = sha(path)
+        if digest not in ocr_cache:
+            ocr_cache[digest] = subprocess.run([os.environ["CLAUDE_SCREEN_OCR"], str(path)],
+                                capture_output=True, text=True, check=True, timeout=60).stdout
+        text = ocr_cache[digest]
         path.with_suffix(".ocr.txt").write_text(text)
         return text
     def screenshot(name):
@@ -211,29 +224,16 @@ def main():
                     return emitted
                 time.sleep(.02)
             raise TimeoutError("Native command did not acknowledge emission within five seconds")
-        metadata = record_clip(recording_command(video), video, release_gate, snapshots=True)
+        metadata = record_clip(recording_command(video), video, release_gate, duration=3, snapshots=True)
         final_bytes = video.read_bytes()
-        ranges = packet_ranges(probe_video(video), len(final_bytes), trusted_config)
+        final_probe = probe_video(video)
+        ranges = packet_ranges(final_probe, len(final_bytes), trusted_config)
         captured_ns = metadata["finalizedNs"]
-        matching_snapshot = None
-        for sample in sorted(metadata["snapshots"], key=lambda row: row["readCompleteNs"]):
-            if not metadata["emittedNs"] <= sample["readStartNs"] <= sample["readCompleteNs"] <= metadata["emittedNs"] + 1_950_000_000:
-                raise ValueError("Snapshot was not read completely within its explicit host-clock window")
-            snapshot = Path(sample["path"]).read_bytes()
-            if hashlib.sha256(snapshot).hexdigest() != sample["sha256"]:
-                raise ValueError("Immutable snapshot evidence changed after capture")
-            if snapshot_contains_packets(snapshot, final_bytes, ranges):
-                matching_snapshot = sample
-                captured_ns = min(captured_ns, sample["readCompleteNs"])
-                break
-        metadata["packetProof"] = {"packetCount": len(ranges), "ranges": ranges,
-            "baselineConfigSha256": hashlib.sha256(trusted_config.encode()).hexdigest(),
-            "matchingSnapshot": matching_snapshot, "capturedNs": captured_ns}
-        video.with_suffix(".recording.json").write_text(json.dumps(metadata, indent=2))
+        metadata["prefixProofs"] = []
         frame_dir = output / f"stage-{stage}-frames"
         frame_dir.mkdir()
         # Decode original frames in order, without fps resampling or a timestamp-based claim.
-        subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-fps_mode", "passthrough",
+        subprocess.run(["ffmpeg", "-v", "error", "-xerror", "-err_detect", "explode", "-i", str(video), "-fps_mode", "passthrough",
                         str(frame_dir / "frame-%06d.png")], check=True, timeout=60)
         probe = subprocess.run(["ffprobe", "-v", "error", "-show_frames", "-select_streams", "v:0",
                                 "-of", "json", str(video)], capture_output=True, text=True, check=True, timeout=60)
@@ -245,11 +245,42 @@ def main():
         found = next((frame for frame in selected if contains(recognize(frame), f"NATIVE_CLAUDE_LATENCY_{stage}")), None)
         if found is None:
             raise RuntimeError(f"Stage {stage}: no recording frame shows its unique marker")
+        final_frames_by_hash = {}
+        for frame in frames:
+            final_frames_by_hash.setdefault(sha(frame), frame)
+        baseline_probe = json.loads(baseline_video.with_suffix(".packets.json").read_text())
+        for index, sample in enumerate(sorted(metadata["snapshots"], key=lambda row: row["readCompleteNs"])):
+            if not metadata["emittedNs"] <= sample["readStartNs"] <= sample["readCompleteNs"] <= metadata["emittedNs"] + 1_950_000_000:
+                raise ValueError("Snapshot was not read completely within its explicit host-clock window")
+            snapshot = Path(sample["path"]).read_bytes()
+            if sha(Path(sample["path"])) != sample["sha256"]:
+                raise ValueError("Immutable snapshot evidence changed after capture")
+            evidence = {"snapshot": sample}
+            try:
+                annexb, proof = h264_prefix.build_prefix(baseline_probe, final_probe, final_bytes, snapshot,
+                    emitted_ns=metadata["emittedNs"], read_complete_ns=sample["readCompleteNs"])
+                evidence.update(proof)
+                decoded = h264_prefix.decode_prefix(annexb, output / f"stage-{stage}-prefix-{index:03d}")
+                match = matching_prefix_marker(decoded, final_frames_by_hash, recognize, f"NATIVE_CLAUDE_LATENCY_{stage}")
+                if match is not None:
+                    frame, final_frame = match
+                    evidence["markerFrame"] = frame
+                    evidence["identicalFinalFrame"] = str(final_frame)
+                    captured_ns = min(captured_ns, sample["readCompleteNs"])
+                    found = final_frame
+            except (ValueError, subprocess.CalledProcessError) as error:
+                evidence["rejected"] = str(error)
+            metadata["prefixProofs"].append(evidence)
+            if "markerFrame" in evidence:
+                break
+        metadata["packetProof"] = {"packetCount": len(ranges), "ranges": ranges,
+            "capturedNs": captured_ns, "baselineConfigSha256": hashlib.sha256(trusted_config.encode()).hexdigest()}
+        video.with_suffix(".recording.json").write_text(json.dumps(metadata, indent=2))
         result = request("/visible", stage=stage, capturedNs=captured_ns)
         if result["emittedNs"] != metadata["emittedNs"]:
             raise ValueError("Fixture emission timestamp changed during measurement")
         result.update(stage=stage, screenshot=str(found), sha256=sha(found), **metadata,
-                      measurement="all recording packets match a pre-finalization immutable snapshot, or normal finalization; host monotonic upper bound, no PTS timing")
+                      measurement="independently decoded immutable snapshot marker exactly matches a final video frame, or normal finalization; host monotonic upper bound, no PTS timing")
         result["passed"] = result["passed"] and valid_bound(result["emittedNs"], captured_ns, True)
         results.append(result)
         (output / "results.json").write_text(json.dumps(results, indent=2))

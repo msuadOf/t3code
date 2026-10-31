@@ -103,4 +103,15 @@ appId: com.t3tools.t3code.dev
           centerElement: true
           visibilityPercentage: 100
           timeout: 30000
+      - swipe:
+          start: "50%,75%"
+          end: "50%,55%"
+          duration: 600
+      - swipe:
+          start: "50%,75%"
+          end: "50%,55%"
+          duration: 600
+      - assertVisible:
+          text: "^Bash$"
+          index: 1
 - takeScreenshot: artifacts/native-session/claude-ready-for-pixel-measurement
