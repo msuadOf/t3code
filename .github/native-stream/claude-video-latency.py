@@ -213,6 +213,7 @@ def main():
         "videoSha256": sha(baseline_video), "extradata": trusted_config,
         "extradataSha256": hashlib.sha256(trusted_config.encode()).hexdigest(),
     }, indent=2))
+    recordings = []
     for stage in range(1, 4):
         video = output / f"stage-{stage}.mov"
         def release_gate():
@@ -225,7 +226,29 @@ def main():
                 time.sleep(.02)
             raise TimeoutError("Native command did not acknowledge emission within five seconds")
         metadata = record_clip(recording_command(video), video, release_gate, duration=3, snapshots=True)
+        checkpoint = request("/foreground-checkpoint", timeout=40, stage=stage,
+                             finalizedNs=metadata["finalizedNs"])["foregroundCheckpoint"]
+        metadata["foregroundCheckpoint"] = checkpoint
+        video.with_suffix(".recording.json").write_text(json.dumps(metadata, indent=2))
+        if not checkpoint["foregroundVerified"] or not checkpoint["stillBlocked"]:
+            raise RuntimeError(f"Stage {stage}: foreground checkpoint failed: {checkpoint['nativeEvidence']}")
+        recordings.append((stage, video, metadata))
+    # Release the unchanged foreground command before CPU-heavy offline analysis.
+    request("/complete")
+    deadline = time.monotonic() + 30
+    attempt = 0
+    while time.monotonic() < deadline:
+        attempt += 1
+        done = screenshot(f"completed-{attempt:02d}")
+        if contains(recognize(done), "NATIVE_CLAUDE_DONE"):
+            (output / "completion.json").write_text(json.dumps({"path": str(done), "sha256": sha(done)}))
+            break
+    else:
+        raise RuntimeError("Native pixels did not show DONE after foreground command completion")
+    for stage, video, metadata in recordings:
         final_bytes = video.read_bytes()
+        if hashlib.sha256(final_bytes).hexdigest() != metadata["videoSha256"]:
+            raise ValueError("Recording changed after its foreground checkpoint")
         final_probe = probe_video(video)
         ranges = packet_ranges(final_probe, len(final_bytes), trusted_config)
         captured_ns = metadata["finalizedNs"]
@@ -285,16 +308,10 @@ def main():
         results.append(result)
         (output / "results.json").write_text(json.dumps(results, indent=2))
         print(json.dumps(result), flush=True)
+        if not result["foregroundVerified"] or not result["stillBlocked"]:
+            raise RuntimeError(f"Stage {stage}: native foreground checkpoint is not valid")
         if not result["passed"]:
-            raise RuntimeError(f"Stage {stage}: recording pixel upper bound exceeded 2000 ms; no overhead was subtracted")
-    request("/complete")
-    deadline = time.monotonic() + 30
-    attempt = 0
-    while time.monotonic() < deadline:
-        attempt += 1
-        if contains(recognize(screenshot(f"completed-{attempt:02d}")), "NATIVE_CLAUDE_DONE"):
-            return
-    raise RuntimeError("Native pixels did not show DONE after foreground command completion")
+            raise RuntimeError(f"Stage {stage}: pixel upper bound {result['latencyMs']} ms exceeded 2000 ms; no overhead was subtracted")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 """Stock Claude foreground stdout -> real T3 -> native app latency fixture. No accounts."""
 import http.server, json, os, pathlib, secrets, shlex, shutil, signal, socket, subprocess, tempfile, threading, time, urllib.request, urllib.parse
 from pathlib import Path
+from claude_checkpoint import make_checkpoint, resolve_checkpoint
 root = Path(tempfile.mkdtemp(prefix="t3-native-claude-")).resolve()
 work = root / "project"; work.mkdir()
 config = root / "config"; config.mkdir()
@@ -73,6 +74,21 @@ class Model(http.server.BaseHTTPRequestHandler):
             elif path == "/complete": complete.set(); (root / "complete").touch()
             elif path == "/emitted": timing.setdefault(stage, {})["emittedNs"] = time.monotonic_ns()
             elif path == "/timing": pass
+            elif path == "/foreground-checkpoint":
+                sample = timing.setdefault(stage, {})
+                if "emittedNs" not in sample or "foregroundCheckpoint" in sample or "visibleNs" in sample:
+                    self.send_error(409, "Checkpoint requires one unacknowledged native emission"); return
+                try:
+                    finalized = int(urllib.parse.parse_qs(url.query).get("finalizedNs", [""])[0])
+                    if not sample["emittedNs"] <= finalized <= time.monotonic_ns():
+                        raise ValueError("Invalid recording finalization timestamp")
+                    evidence = foreground_evidence(stage)
+                    checkpoint = make_checkpoint(stage, sample["emittedNs"], finalized,
+                        time.monotonic_ns(), evidence, not (root / "complete").exists())
+                except ValueError as error:
+                    self.send_error(400, str(error)); return
+                sample["foregroundCheckpoint"] = checkpoint
+                write_private(root / "native-evidence" / ("checkpoint-" + stage + ".json"), checkpoint)
             elif path == "/visible":
                 sample = timing.setdefault(stage, {})
                 if "visibleNs" in sample:
@@ -84,17 +100,25 @@ class Model(http.server.BaseHTTPRequestHandler):
                     self.send_error(400, "Invalid screenshot timestamp"); return
                 if not sample.get("emittedNs", acknowledged + 1) <= captured <= acknowledged:
                     self.send_error(400, "Screenshot must follow emission on the same host monotonic clock"); return
+                if "foregroundCheckpoint" in sample:
+                    try:
+                        state = resolve_checkpoint(sample["foregroundCheckpoint"], stage,
+                            sample["emittedNs"], captured, acknowledged)
+                    except ValueError as error:
+                        self.send_error(400, str(error)); return
+                    sample.update(state)
+                else:
+                    sample["stillBlocked"] = not (root / "complete").exists()
+                    evidence = foreground_evidence(stage)
+                    sample["foregroundVerified"] = evidence['verified']
+                    sample["foregroundEvidence"] = 'native-evidence/stage-' + stage + '.json'
                 sample["visibleNs"] = captured
                 sample["acknowledgedNs"] = acknowledged
-                sample["stillBlocked"] = not (root / "complete").exists()
-                evidence = foreground_evidence(stage)
-                sample["foregroundVerified"] = evidence['verified']
-                sample["foregroundEvidence"] = 'native-evidence/stage-' + stage + '.json'
                 sample["latencyMs"] = (captured - sample["emittedNs"]) / 1e6
                 sample["passed"] = sample["stillBlocked"] and sample["foregroundVerified"] and 0 <= sample.get("latencyMs", 999999) <= 2000
                 write_private(root / "latency.json", timing)
             elif path == "/shutdown": shutdown()
-            result = dict(timing.get(stage, {})) if path == "/visible" else dict(timing)
+            result = dict(timing.get(stage, {})) if path in {"/visible", "/foreground-checkpoint"} else dict(timing)
         self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps(result).encode())
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or "{}")

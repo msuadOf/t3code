@@ -103,6 +103,7 @@ jobs:
         run: |
           python3 .github/native-stream/test_android_screencap.py
           python3 .github/native-stream/test_claude_video_latency.py
+          python3 .github/native-stream/test_claude_checkpoint.py
 
       - name: Prepare screenshot recognition
         run: |
