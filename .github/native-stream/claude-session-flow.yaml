@@ -15,9 +15,17 @@ appId: com.t3tools.t3code.dev
     when:
       platform: Android
     commands:
-      - extendedWaitUntil:
-          visible: Settings
-          timeout: 60000
+      - retry:
+          maxRetries: 1
+          commands:
+            - runFlow:
+                when:
+                  visible: "^Pixel Launcher isn't responding$"
+                commands:
+                  - tapOn: "^Close app$"
+            - extendedWaitUntil:
+                visible: Settings
+                timeout: 30000
       - tapOn: Settings
       - tapOn: "^Environments(?:,.*)?$"
 - extendedWaitUntil:
